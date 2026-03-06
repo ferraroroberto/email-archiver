@@ -194,12 +194,19 @@ class EmailArchiver:
 
             try:
                 original_name = attachment.FileName or f"attachment_{att_index}"
-                safe_name = _sanitize_filename(
-                    Path(original_name).stem, max_len=60
-                ) + Path(original_name).suffix.lower()
+                stem = _sanitize_filename(Path(original_name).stem, max_len=60)
+                suffix = Path(original_name).suffix.lower()
+                safe_name = stem + suffix
 
-                att_filename = f"{seq} - {att_index:02d} - {safe_name}"
+                att_filename = f"{seq} - {safe_name}"
                 att_path = os.path.join(folder_path, att_filename)
+                # Avoid overwrite if multiple attachments share the same name
+                counter = 2
+                while os.path.exists(att_path):
+                    safe_name = f"{stem}_{counter}{suffix}"
+                    att_filename = f"{seq} - {safe_name}"
+                    att_path = os.path.join(folder_path, att_filename)
+                    counter += 1
 
                 attachment.SaveAsFile(att_path)
                 saved.append(att_path)
