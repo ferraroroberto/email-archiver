@@ -1,0 +1,25 @@
+# Email Archiver – Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Notes:
+#   - pywin32 provides win32com (Outlook COM) and win32gui (Explorer window).
+#   - extract-msg reads .msg files without Outlook (used only by the scanner).
+#   - rapidfuzz is the fast C extension for fuzzy string matching (folder name boost).
+#     Falls back gracefully if not installed (scoring still works via FTS5 alone).
+#   - psutil is used for the is_running() Outlook check; fallback exists without it.
+#   - pyyaml loads the config file.
+
+# Core
+pyyaml>=6.0
+
+# Outlook COM automation (Windows only)
+pywin32>=306
+
+# .msg file reader (scanner only – does NOT require Outlook)
+extract-msg>=0.48.0
+
+# Fuzzy string matching (folder name scoring boost)
+rapidfuzz>=3.0
+
+# Optional: faster process list for is_running() check
+psutil>=5.9

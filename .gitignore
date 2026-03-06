@@ -1,0 +1,14 @@
+# Local config (copy from config.example.yaml)
+config/config.yaml
+
+# Database and logs
+data/*.db
+data/*.db-shm
+data/*.db-wal
+logs/*.log
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+tmp/
