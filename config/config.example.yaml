@@ -1,0 +1,34 @@
+# Email Archiver Configuration
+# Copy this file to config.yaml and set archive.root_path to your OneDrive archive root.
+#
+#   copy config\config.example.yaml config\config.yaml
+#
+# Then edit config/config.yaml and set archive.root_path.
+
+archive:
+  # Absolute path to the root of your email archive (OneDrive local sync folder)
+  root_path: "C:/Users/YourName/OneDrive/Documentos/"
+
+database:
+  # Path relative to the project root or absolute
+  path: "data/emails.db"
+
+scanning:
+  batch_size: 500
+  body_preview_length: 500
+  max_path_length: 259
+
+suggestion:
+  max_suggestions: 3
+  min_score: 0.05
+
+ui:
+  window_width: 960
+  window_height: 560
+  font_family: "Segoe UI"
+  font_size_normal: 10
+  font_size_title: 13
+
+logging:
+  level: "INFO"
+  file: "logs/archiver.log"
