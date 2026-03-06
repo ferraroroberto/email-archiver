@@ -73,8 +73,10 @@ class ArchiveDialog:
         sw = self._root.winfo_screenwidth()
         sh = self._root.winfo_screenheight()
         self._root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        self._root.attributes("-topmost", True)
 
         self._build_ui()
+        self._root.bind("<Escape>", lambda e: self._root.destroy())
         self._root.after(80, self._start_loading)
 
     # --------------------------------------------------------- UI build ----

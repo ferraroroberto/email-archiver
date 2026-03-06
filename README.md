@@ -30,23 +30,23 @@ Two commands, each launchable from a Stream Deck button or the command line:
 Walks the entire OneDrive archive from a configured root folder, opens every `.msg` file it finds, extracts metadata (subject, sender, recipients, date, body preview), and stores it in a local SQLite database with a full-text search index. Subsequent scans are incremental — only new or modified files are processed.
 
 ### 2. Archive Email
-Connects to the running Outlook instance, reads the currently selected email, queries the database to find the most relevant project folders, and presents ranked suggestions. You click a folder (or browse manually), confirm, and the email is saved as a `.msg` file plus all attachments — all consistently numbered — in under two seconds.
+Connects to the running Outlook instance, reads the currently selected email, queries the database to find the most relevant project folders, and presents ranked suggestions. You click a folder (or browse manually), confirm, and the email is saved as a `.msg` file plus all attachments — all consistently numbered — in under two seconds. The window closes immediately after saving (no confirmation popup); the log file records what was saved.
 
 ---
 
 ## File naming convention
 
-When an email is archived in a folder, files are named with a zero-padded 3-digit sequence number derived from the highest existing prefix in that folder:
+When an email is archived in a folder, files are named with a zero-padded 3-digit sequence number derived from the highest existing prefix in that folder, using ` - ` (space-dash-space) as the separator:
 
 ```
-023_Project_Alpha_meeting_notes.msg
-023_01_invoice.pdf
-023_02_signed_contract.docx
+023 - Project_Alpha_meeting_notes.msg
+023 - invoice.pdf
+023 - signed_contract.docx
 ```
 
-- The email gets `NNN_sanitized_subject.msg`
-- Each real attachment gets `NNN_NN_original_filename.ext`
-- Embedded images (inline in HTML body) are skipped automatically
+- The email gets `NNN - sanitized_subject.msg`
+- Each real attachment gets `NNN - original_filename.ext`
+- Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
 
 ---
 
@@ -277,7 +277,7 @@ WAL journal mode is enabled so the archive command can read the DB while a scan 
 | **Incremental scan** | No — re-read all files every time | Yes — `mtime` check, skips unchanged files |
 | **Architecture** | 3 flat scripts + shared utils | Package with 6 separated modules |
 | **UI** | Blocking `window.mainloop()` per dialog | Background thread, non-blocking |
-| **Attachments** | `NNN - filename.ext` | `NNN_NN_filename.ext` |
+| **Attachments** | (varies) | `NNN - filename.ext` (email: `NNN - subject.msg`) |
 | **Exchange resolution** | Partial | Full `GetExchangeUser()` SMTP fallback |
 | **Logging** | `print()` statements | Structured `logging` to file + console |
 | **Config** | Hardcoded `.txt` params files | `config/config.yaml` |
