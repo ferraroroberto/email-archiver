@@ -1,25 +1,28 @@
 """
 Suggestion engine: ranks archive folders for an incoming email.
 
-Two-stage scoring pipeline:
+Three-stage scoring pipeline:
 ─────────────────────────────────────────────────────────────────────────────
 Stage 1 – FTS5 BM25 (repository layer)
     Full-text search over every indexed email (subject + sender + recipients
     + body preview). Results are aggregated per folder and normalised to
-    [0, 1]. This captures semantic similarity to past emails in that folder.
+    [0, 1]. BM25 column weights give subject 10×, sender/recipients 3×, and
+    body 1× — so subject matches dominate the ranking.
 
-Stage 2 – Folder-name boost (this module)
+Stage 2 – Subject thread score (this module)
+    Compares the incoming subject against the subjects of recent emails
+    already stored in each candidate folder (up to 5 samples). A high score
+    means the same conversation thread exists in that folder — the strongest
+    signal for "same subject → same folder" routing.
+    Uses rapidfuzz token_set_ratio (handles Re:/Fwd: prefixes naturally).
+
+Stage 3 – Folder-name boost (this module)
     Computes fuzzy similarity between the incoming subject and the folder
-    *name* (not full path). A short folder name like "Proyecto Alpha" that
-    matches the subject "Re: Proyecto Alpha – Budget" gets a high boost.
-    Uses rapidfuzz (fast C extension) with token_set_ratio, which handles
-    word-order differences well.
+    *leaf name*. Useful for new projects with few or no prior emails.
 
-Final score = 0.70 × fts_score + 0.30 × folder_name_score
-
-The 70/30 split was chosen empirically: FTS BM25 is the primary signal
-because it considers actual email content, but folder name is a strong
-tiebreaker when two folders have similar email histories.
+Final score = 0.45 × fts_score
+            + 0.30 × subject_thread_score
+            + 0.25 × folder_name_score
 
 Fallback (empty DB):
     If no FTS results are found (e.g. the DB hasn't been scanned yet), the
@@ -40,8 +43,9 @@ from email_archiver.outlook.client import EmailData
 logger = logging.getLogger(__name__)
 
 # Scoring weights (must sum to 1.0)
-_W_FTS = 0.70
-_W_NAME = 0.30
+_W_FTS = 0.45
+_W_SUBJ = 0.30   # subject thread continuity (incoming subject vs. folder's stored subjects)
+_W_NAME = 0.25   # folder leaf-name fuzzy match
 
 
 @dataclass
@@ -74,6 +78,29 @@ def _fuzzy_folder_score(subject: str, folder_path: str) -> float:
         return fuzz.token_set_ratio(subject, folder_name) / 100.0
     except ImportError:
         # rapidfuzz not installed — skip the name boost
+        return 0.0
+
+
+def _subject_thread_score(incoming_subject: str, sample_subjects: list[str]) -> float:
+    """
+    Score thread continuity: compare the incoming subject against subjects of
+    emails already stored in the candidate folder.
+
+    Uses token_set_ratio so "Re: Project Alpha – Q2" scores high against
+    "Project Alpha – Q2" or "Fwd: Project Alpha – Q2".
+
+    Returns the best match score in [0, 1], or 0 if no samples available.
+    """
+    if not incoming_subject or not sample_subjects:
+        return 0.0
+    try:
+        from rapidfuzz import fuzz  # type: ignore
+        best = max(
+            fuzz.token_set_ratio(incoming_subject, s) / 100.0
+            for s in sample_subjects if s
+        )
+        return best
+    except ImportError:
         return 0.0
 
 
@@ -116,7 +143,8 @@ class SuggestionEngine:
         blended: list[RankedSuggestion] = []
         for s in raw:
             name_score = _fuzzy_folder_score(email.subject, s.folder_path)
-            final_score = _W_FTS * s.score + _W_NAME * name_score
+            thread_score = _subject_thread_score(email.subject, s.sample_subjects)
+            final_score = _W_FTS * s.score + _W_SUBJ * thread_score + _W_NAME * name_score
 
             if final_score < self._min_score:
                 continue
