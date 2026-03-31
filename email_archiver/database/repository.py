@@ -190,12 +190,15 @@ class EmailRepository:
             return []
 
         # Step 1 – FTS5 search.
-        # `rank` is the built-in BM25 column; negative values, more negative
-        # = better match.  We invert to positive for intuitive aggregation.
+        # Use bm25() with explicit column weights so subject matches count
+        # far more than sender/recipients, which in turn count more than body.
+        # Weights: subject×10, sender×3, recipients×3, body_preview×1.
+        # bm25() returns negative values; more negative = better match.
+        # We invert to positive for intuitive aggregation.
         try:
             fts_rows = self._conn.execute(
                 """
-                SELECT rowid, rank
+                SELECT rowid, bm25(emails_fts, 10.0, 3.0, 3.0, 1.0) AS rank
                 FROM   emails_fts
                 WHERE  emails_fts MATCH ?
                 ORDER  BY rank
@@ -245,7 +248,7 @@ class EmailRepository:
                 SELECT DISTINCT subject FROM emails
                 WHERE  folder_path = ?
                 ORDER  BY date_sent DESC
-                LIMIT  2
+                LIMIT  5
                 """,
                 (fp,),
             ).fetchall()
