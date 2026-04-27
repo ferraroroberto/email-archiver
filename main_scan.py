@@ -44,13 +44,12 @@ def _run_headless(cfg: dict) -> None:
             pct = f"{int(current / total * 100)}%" if total else ""
             print(f"\r  {current:>6,} / {total:,}  {pct}  ", end="", flush=True)
 
-    print(f"Scanning: {cfg['archive']['root_path']}")
+    logger.info("Scanning: %s", cfg['archive']['root_path'])
     stats = scanner.scan(progress_callback=on_progress)
-    print()
-    print(
-        f"Done — {stats.newly_indexed:,} new, {stats.updated:,} updated, "
-        f"{stats.skipped:,} skipped, {stats.errors:,} errors "
-        f"in {stats.duration_seconds:.1f}s"
+    print()  # clear the \r progress line
+    logger.info(
+        "Done — %s new, %s updated, %s skipped, %s errors in %.1fs",
+        stats.newly_indexed, stats.updated, stats.skipped, stats.errors, stats.duration_seconds,
     )
 
 
