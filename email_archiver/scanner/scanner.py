@@ -116,7 +116,10 @@ class FolderScanner:
     """
 
     def __init__(self, cfg: dict) -> None:
-        self._root = Path(cfg["archive"]["root_path"])
+        raw_paths = cfg["archive"].get("root_paths")
+        if not raw_paths:
+            raw_paths = [cfg["archive"].get("root_path")]
+        self._roots = [Path(p) for p in raw_paths if p]
         self._db_path = cfg["database"]["path"]
         self._batch_size: int = cfg["scanning"]["batch_size"]
         self._preview_len: int = cfg["scanning"]["body_preview_length"]
@@ -135,8 +138,11 @@ class FolderScanner:
                                total_estimate may be 0 if unknown.
             stop_flag: a single-element list [False]; set to [True] to abort.
         """
-        if not self._root.exists():
-            raise FileNotFoundError(f"Archive root not found: {self._root}")
+        for root in self._roots:
+            if not root.exists():
+                logger.warning("Archive root not found: %s", root)
+        if not self._roots:
+            raise ValueError("No archive roots configured.")
 
         stats = ScanStats()
         start = datetime.now()
@@ -146,14 +152,17 @@ class FolderScanner:
 
         # Collect all .msg paths upfront for progress reporting and for
         # the post-scan purge (delete DB entries whose files were removed).
-        logger.info("Discovering .msg files under %s …", self._root)
+        logger.info("Discovering .msg files under %s …", self._roots)
         all_msg_paths: list[str] = []
-        for dirpath, _dirs, files in os.walk(self._root):
-            for fname in files:
-                if fname.lower().endswith(".msg"):
-                    fp = os.path.join(dirpath, fname)
-                    if len(fp) <= self._max_path:
-                        all_msg_paths.append(fp)
+        for root in self._roots:
+            if not root.exists():
+                continue
+            for dirpath, _dirs, files in os.walk(root):
+                for fname in files:
+                    if fname.lower().endswith(".msg"):
+                        fp = os.path.join(dirpath, fname)
+                        if len(fp) <= self._max_path:
+                            all_msg_paths.append(fp)
 
         stats.total_found = len(all_msg_paths)
         logger.info("Found %d .msg files. Starting indexing …", stats.total_found)

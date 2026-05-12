@@ -44,7 +44,8 @@ def _run_headless(cfg: dict) -> None:
             pct = f"{int(current / total * 100)}%" if total else ""
             print(f"\r  {current:>6,} / {total:,}  {pct}  ", end="", flush=True)
 
-    logger.info("Scanning: %s", cfg['archive']['root_path'])
+    roots = cfg['archive'].get('root_paths', [cfg['archive'].get('root_path')])
+    logger.info("Scanning: %s", roots)
     stats = scanner.scan(progress_callback=on_progress)
     print()  # clear the \r progress line
     logger.info(

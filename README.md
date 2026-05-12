@@ -141,11 +141,14 @@ Copy the example config and set your archive root path:
 copy config\config.example.yaml config\config.yaml
 ```
 
-Then edit `config/config.yaml` and set the archive root:
+Then edit `config/config.yaml` and set one or more archive roots:
 
 ```yaml
 archive:
-  root_path: "C:/Users/YourName/OneDrive/Archive"
+  # List of absolute paths to your email archive roots (OneDrive local sync folders)
+  root_paths:
+    - "C:/Users/YourName/OneDrive/Documentos/"
+    - "C:/Users/YourName/OneDrive/Archive/"
 ```
 
 All other defaults are sensible out of the box.

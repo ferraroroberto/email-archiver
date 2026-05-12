@@ -28,7 +28,7 @@ def load_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
         raise FileNotFoundError(
             f"Config file not found: {CONFIG_FILE}\n"
-            "Copy config/config.yaml and set archive.root_path."
+            "Copy config/config.yaml and set archive.root_paths."
         )
 
     with open(CONFIG_FILE, encoding="utf-8") as fh:

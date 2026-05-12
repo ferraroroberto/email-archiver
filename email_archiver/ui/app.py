@@ -292,7 +292,7 @@ class ArchiveDialog:
     # ------------------------------------------------ user interactions ----
 
     def _on_browse(self) -> None:
-        archive_root = self._cfg["archive"]["root_path"]
+        archive_root = self._cfg["archive"].get("root_paths", [self._cfg["archive"].get("root_path")])[0]
         chosen = browse_folder(self._root, initial_dir=archive_root)
         if chosen:
             self._do_archive(chosen)
@@ -373,9 +373,11 @@ class ScanWindow:
         tk.Label(hdr, text="🗂  Scan Archive", bg=_ACCENT, fg="white",
                  font=(ff, ft, "bold"), padx=16).pack(side="left")
 
+        roots = self._cfg['archive'].get('root_paths', [self._cfg['archive'].get('root_path')])
+        text = "Archive roots:\n" + "\n".join(str(r) for r in roots)
         info = tk.Label(
             root,
-            text=f"Archive root:\n{self._cfg['archive']['root_path']}",
+            text=text,
             bg=_BG, font=(ff, fn), anchor="w", padx=14, pady=8,
             wraplength=580, justify="left",
         )
@@ -473,7 +475,8 @@ class ScanWindow:
 
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        rw, rh = 620, 220
+        rw = 620
+        rh = root.winfo_reqheight() + 10
         root.geometry(f"{rw}x{rh}+{(sw - rw) // 2}+{(sh - rh) // 2}")
         root.mainloop()
 
@@ -546,7 +549,8 @@ class LauncherApp:
         # Size + centre
         self._root.update_idletasks()
         sw, sh = self._root.winfo_screenwidth(), self._root.winfo_screenheight()
-        rw, rh = 480, 230
+        rw = 480
+        rh = self._root.winfo_reqheight() + 10
         self._root.geometry(f"{rw}x{rh}+{(sw - rw) // 2}+{(sh - rh) // 2}")
 
     def _load_stats(self) -> None:
