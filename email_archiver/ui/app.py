@@ -30,10 +30,10 @@ from email_archiver.ui.dialogs import (
 
 logger = logging.getLogger(__name__)
 
-_ACCENT = "#1a6b3c"
+_ACCENT = "#0078D4"
 _BG = "#f5f5f5"
 _CARD_BG = "#ffffff"
-_SCORE_GOOD = "#2d6a4f"
+_SCORE_GOOD = "#0078D4"
 _SCORE_MID = "#b5451b"
 
 
