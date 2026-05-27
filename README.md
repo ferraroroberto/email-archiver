@@ -47,6 +47,7 @@ When an email is archived in a folder, files are named with a zero-padded 3-digi
 - The email gets `NNN - sanitized_subject.msg`
 - Each real attachment gets `NNN - original_filename.ext`
 - Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
+- The filename is dynamically shortened with a trailing `...` if the destination folder is deep enough that the full path would otherwise exceed Windows' 260-char `MAX_PATH` limit (e.g. `042 - Long_subject_starts_here....msg`)
 
 ---
 

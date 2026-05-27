@@ -33,6 +33,11 @@ _OL_MSG_FORMAT = 3
 # Regex to find the leading NNN_ prefix in filenames
 _RE_PREFIX = re.compile(r"^(\d+)")
 
+# Windows MAX_PATH is 260; stay a few chars under to leave headroom for the OS,
+# COM marshalling, and any internal use of long-path prefixes.
+_WINDOWS_MAX_PATH = 255
+_ELLIPSIS = "..."
+
 
 # ----------------------------------------------------------------- types ----
 
@@ -55,6 +60,41 @@ def _sanitize_filename(text: str, max_len: int = 80) -> str:
     # Collapse multiple underscores/spaces
     cleaned = re.sub(r"[_ ]{2,}", "_", cleaned).strip("_. ")
     return cleaned[:max_len] if cleaned else "email"
+
+
+def _fit_filename_to_path(
+    folder_path: str,
+    seq: str,
+    stem: str,
+    suffix: str,
+    *,
+    max_path: int = _WINDOWS_MAX_PATH,
+) -> str:
+    """
+    Build ``"{seq} - {stem}{suffix}"`` such that the full path
+    ``os.path.join(folder_path, filename)`` stays within ``max_path`` chars.
+
+    If the stem has to be cut, an ellipsis is appended so the resulting
+    filename still hints at the original subject. ``suffix`` is preserved.
+    """
+    prefix = f"{seq} - "
+    sep_len = 1  # path separator inserted by os.path.join
+    filename_budget = max_path - len(folder_path) - sep_len
+    fixed = len(prefix) + len(suffix)
+
+    if filename_budget >= fixed + len(stem):
+        return f"{prefix}{stem}{suffix}"
+
+    stem_budget = filename_budget - fixed - len(_ELLIPSIS)
+    if stem_budget > 0:
+        return f"{prefix}{stem[:stem_budget]}{_ELLIPSIS}{suffix}"
+
+    # Pathological: even a one-char stem + ellipsis won't fit.
+    # Cut as tightly as possible without the ellipsis; if the folder itself
+    # already exceeds the budget there is nothing we can do except let the
+    # underlying call surface a clear OSError.
+    stem_budget = max(1, filename_budget - fixed)
+    return f"{prefix}{stem[:stem_budget]}{suffix}"
 
 
 def get_next_sequence_number(folder_path: str) -> str:
@@ -134,7 +174,7 @@ class EmailArchiver:
         subject: str,
     ) -> str:
         safe_subject = _sanitize_filename(subject)
-        filename = f"{seq} - {safe_subject}.msg"
+        filename = _fit_filename_to_path(folder_path, seq, safe_subject, ".msg")
         file_path = os.path.join(folder_path, filename)
 
         try:
@@ -196,15 +236,17 @@ class EmailArchiver:
                 original_name = attachment.FileName or f"attachment_{att_index}"
                 stem = _sanitize_filename(Path(original_name).stem, max_len=60)
                 suffix = Path(original_name).suffix.lower()
-                safe_name = stem + suffix
 
-                att_filename = f"{seq} - {safe_name}"
+                att_filename = _fit_filename_to_path(folder_path, seq, stem, suffix)
                 att_path = os.path.join(folder_path, att_filename)
-                # Avoid overwrite if multiple attachments share the same name
+                # Avoid overwrite if multiple attachments share the same name.
+                # The disambiguation suffix is folded into the stem before fitting,
+                # so the final path still respects the Windows MAX_PATH budget.
                 counter = 2
                 while os.path.exists(att_path):
-                    safe_name = f"{stem}_{counter}{suffix}"
-                    att_filename = f"{seq} - {safe_name}"
+                    att_filename = _fit_filename_to_path(
+                        folder_path, seq, f"{stem}_{counter}", suffix
+                    )
                     att_path = os.path.join(folder_path, att_filename)
                     counter += 1
 
