@@ -401,6 +401,7 @@ class ScanWindow:
         btn_frame.pack(pady=10)
 
         start_btn: list[tk.Button] = []
+        cancel_btn: list[tk.Button] = []
 
         def on_progress(current: int, total: int, path: str) -> None:
             if total > 0:
@@ -411,8 +412,13 @@ class ScanWindow:
                 status_var.set(f"Indexing {current:,} files…")
             detail_var.set(path[-70:] if len(path) > 70 else path)
 
+        def on_quit() -> None:
+            root.destroy()
+
         def do_scan() -> None:
             start_btn[0].config(state="disabled", text="Scanning…")
+            cancel_btn[0].config(state="normal", text="✗  Cancel", command=on_cancel)
+            cancel_btn[0].pack(side="left", padx=6)
             bar.config(mode="determinate")
             self._stop_flag[0] = False
 
@@ -451,16 +457,19 @@ class ScanWindow:
                 f"({stats.duration_seconds:.1f}s)"
             )
             detail_var.set("")
-            start_btn[0].config(state="normal", text="Scan Again")
+            start_btn[0].config(state="normal", text="↺  Scan Again")
+            cancel_btn[0].config(state="normal", text="✕  Quit", command=on_quit)
 
         def on_error(exc: Exception) -> None:
             status_var.set(f"⚠  Error: {exc}")
-            start_btn[0].config(state="normal", text="Retry")
+            start_btn[0].config(state="normal", text="↺  Retry")
+            cancel_btn[0].config(state="normal", text="✕  Quit", command=on_quit)
 
         def on_cancel() -> None:
             self._stop_flag[0] = True
             status_var.set("⏹  Cancelling… finishing current file, please wait.")
             detail_var.set("")
+            cancel_btn[0].config(state="disabled", text="Cancelling…")
 
         btn = tk.Button(btn_frame, text="▶  Start Scan",
                         command=do_scan, relief="flat",
@@ -469,9 +478,13 @@ class ScanWindow:
         btn.pack(side="left", padx=6)
         start_btn.append(btn)
 
-        tk.Button(btn_frame, text="✗  Cancel", command=on_cancel,
-                  relief="flat", bg="#e0e0e0",
-                  font=(ff, fn), padx=8, pady=5).pack(side="left", padx=6)
+        # Secondary button: hidden at idle, shown once scan starts.
+        # Text/command cycle: Cancel → Cancelling… → Quit.
+        cbtn = tk.Button(btn_frame, text="✗  Cancel", command=on_cancel,
+                         relief="flat", bg="#e0e0e0",
+                         font=(ff, fn), padx=8, pady=5)
+        cancel_btn.append(cbtn)
+        # cbtn is intentionally NOT packed here; do_scan() packs it.
 
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
