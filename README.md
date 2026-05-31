@@ -83,20 +83,11 @@ archiver/
 │   │   └── archiver.py         ← File saving logic (EmailArchiver)
 │   │
 │   ├── engine/
-│   │   └── suggester.py        ← Two-stage folder ranking (SuggestionEngine)
+│   │   └── suggester.py        ← Three-stage folder ranking (SuggestionEngine)
 │   │
 │   └── ui/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Confirm, browse, progress dialogs
-│
-├── old_refactored/              ← Original scripts kept for reference
-│   ├── email-automation-classify.py   (scanner, Excel/Pickle based)
-│   ├── email-automation-archive.py    (archiver with fuzzywuzzy suggestions)
-│   ├── email-automation-save.py       (save to active Explorer window)
-│   ├── utils.py                       (shared helpers)
-│   ├── window.py                      (Explorer window detection)
-│   ├── outlook_macros.vb              (VBA macros for Outlook)
-│   └── refactor.md                    (original design prompt, in Spanish)
 │
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
@@ -201,19 +192,23 @@ python main_ui.py
 
 ## How the suggestion engine works
 
-When you trigger "Archive Email", the app runs a two-stage ranking pipeline:
+When you trigger "Archive Email", the app runs a three-stage ranking pipeline:
 
-**Stage 1 — FTS5 full-text search (70% of final score)**
+**Stage 1 — FTS5 full-text search (45% of final score)**
 
 SQLite's built-in FTS5 engine searches the entire index of ~18,000 emails using BM25 relevance scoring. The query is built from the incoming email's subject + sender + recipients, tokenised and joined with OR so partial matches still contribute. Results are aggregated per folder (sum of per-email BM25 scores) and normalised to [0, 1].
 
 BM25 weights: subject ×10, sender ×3, recipients ×3, body preview ×1.
 
-**Stage 2 — Folder name boost (30% of final score)**
+**Stage 2 — Subject thread score (30% of final score)**
 
-`rapidfuzz.token_set_ratio` compares the email subject against the folder's leaf directory name. A folder called `Project Alpha` that matches the subject "RE: Project Alpha – Budget Q4" gets a high boost. This handles the common case where a new email in a project thread has no prior emails in the DB yet.
+`rapidfuzz.token_set_ratio` compares the incoming email's subject against the subjects of recent emails already stored in each candidate folder (up to 5 samples). A high score means the same conversation thread is already in that folder — the strongest signal for routing emails in an ongoing thread. Re:/Fwd: prefixes are handled naturally by token_set_ratio.
 
-**Final score = 0.70 × FTS_score + 0.30 × folder_name_score**
+**Stage 3 — Folder name boost (25% of final score)**
+
+`rapidfuzz.token_set_ratio` compares the email subject against the folder's leaf directory name. A folder called `Project Alpha` that matches the subject "RE: Project Alpha – Budget Q4" gets a high boost. This handles the common case where a new project thread has no prior emails in the DB yet.
+
+**Final score = 0.45 × FTS_score + 0.30 × subject_thread_score + 0.25 × folder_name_score**
 
 Up to 3 suggestions are shown, ranked by final score, each displaying the folder path, match percentage, number of similar past emails, and a sample subject from that folder.
 
@@ -286,13 +281,3 @@ WAL journal mode is enabled so the archive command can read the DB while a scan 
 | **Logging** | `print()` statements | Structured `logging` to file + console |
 | **Config** | Hardcoded `.txt` params files | `config/config.yaml` |
 
----
-
-## Notes on the old code (`old_refactored/`)
-
-The original scripts are preserved exactly as they were and are not imported or used by the new application. They serve as a reference for:
-
-- The original matching logic (`fuzz.token_set_ratio` with subject + sender + recipient scoring and `Folder_Name_Score`)
-- The `get_first_explorer_folder_path()` approach for detecting the active Windows Explorer window (used in `email-automation-save.py` to archive to the currently open folder — not replicated in the new version but available if needed)
-- The VBA macros in `outlook_macros.vb` for any Outlook-side automation
-- The original design brief in `refactor.md`

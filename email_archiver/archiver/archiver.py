@@ -2,9 +2,8 @@
 Email archiver: saves .msg files and extracts attachments to disk.
 
 Naming convention (matches user spec):
-    Email:       NNN_sanitized_subject.msg
-    Attachments: NNN_01_filename.ext
-                 NNN_02_filename.ext
+    Email:       NNN - sanitized_subject.msg
+    Attachments: NNN - filename.ext
 
 Where NNN is zero-padded to 3 digits (000–999).
 
