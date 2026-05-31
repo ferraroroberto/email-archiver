@@ -23,10 +23,7 @@ from typing import Any
 from email_archiver.archiver.archiver import EmailArchiver
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
 from email_archiver.outlook.client import EmailData, OutlookClient
-from email_archiver.ui.dialogs import (
-    ProgressDialog,
-    browse_folder,
-)
+from email_archiver.ui.dialogs import browse_folder
 
 logger = logging.getLogger(__name__)
 
