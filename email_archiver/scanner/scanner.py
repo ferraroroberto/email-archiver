@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +24,7 @@ from extract_msg.exceptions import InvalidFileFormatError, UnrecognizedMSGTypeEr
 
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
+from email_archiver.text import clean_subject as _clean_subject_base
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +33,9 @@ ProgressCallback = Callable[[int, int, str], None]
 
 # ---------------------------------------------------------------- helpers ---
 
-_RE_REPLY_PREFIX = re.compile(
-    r"^\s*(re|rv|fwd?)\s*:?\s*", re.IGNORECASE
-)
-_RE_MSG_SUFFIX = re.compile(r"\s*\.msg$", re.IGNORECASE)
-
-
 def _clean_subject(raw: str | None) -> str:
     """Strip Re:/Rv:/Fwd: prefixes and .msg suffix for cleaner indexing."""
-    if not raw:
-        return ""
-    s = _RE_REPLY_PREFIX.sub("", raw.strip())
-    s = _RE_MSG_SUFFIX.sub("", s)
-    return s.strip()
+    return _clean_subject_base(raw, strip_msg_suffix=True)
 
 
 def _safe_str(value: object) -> str:

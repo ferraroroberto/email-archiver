@@ -13,10 +13,11 @@ Design decisions:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+from email_archiver.text import clean_subject as _clean_subject
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,6 @@ class EmailData:
 
 
 # -------------------------------------------------------------- helpers -----
-
-_RE_REPLY_PREFIX = re.compile(r"^\s*(re|rv|fwd?)\s*:?\s*", re.IGNORECASE)
-
-
-def _clean_subject(raw: str | None) -> str:
-    if not raw:
-        return ""
-    return _RE_REPLY_PREFIX.sub("", raw.strip()).strip()
 
 
 def _resolve_smtp(address_entry: Any) -> str:
