@@ -8,7 +8,7 @@ A modular Python application for automatically indexing and archiving Outlook em
 
 Email archiving used to be a fully manual process: select an email in Outlook, navigate to the right project folder in Windows Explorer, drag, save attachments separately, rename everything consistently. With a deeply nested OneDrive archive of nearly 18,000 emails across hundreds of project folders, this was taking significant time every day.
 
-A first version of this automation was built around 2021–2022 using a different approach: an Excel spreadsheet as the database (cached as a Pickle file for speed), `fuzzywuzzy` for fuzzy subject matching, and three separate scripts — one to classify/index (`email-automation-classify.py`), one to archive with AI suggestion (`email-automation-archive.py`), and one to save to the folder currently open in Windows Explorer (`email-automation-save.py`). That code lives in `old_refactored/` as a reference.
+A first version of this automation was built around 2021–2022 using a different approach: an Excel spreadsheet as the database (cached as a Pickle file for speed), `fuzzywuzzy` for fuzzy subject matching, and three separate scripts — one to classify/index (`email-automation-classify.py`), one to archive with AI suggestion (`email-automation-archive.py`), and one to save to the folder currently open in Windows Explorer (`email-automation-save.py`).
 
 The original approach had several pain points over time:
 
@@ -104,15 +104,18 @@ archiver/
 ### Prerequisites
 
 - Windows 10/11
-- Python 3.10+ (with a virtual environment recommended)
+- Python 3.10+
 - Microsoft Outlook Desktop installed and configured
 - OneDrive synced locally
 
 ### Install dependencies
 
+Create the virtual environment and install dependencies:
+
 ```powershell
 cd email-archiver
-pip install -r requirements.txt
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Dependencies:
@@ -152,9 +155,9 @@ The first scan reads every `.msg` file in your archive. If your files are stored
 To speed up the first scan, right-click your archive root in Windows Explorer → **Always keep on this device** to force OneDrive to sync everything locally first.
 
 ```powershell
-python main_scan.py
+& .\.venv\Scripts\python.exe main_scan.py
 # or headless:
-python main_scan.py --no-ui
+& .\.venv\Scripts\python.exe main_scan.py --no-ui
 ```
 
 ---
@@ -176,16 +179,16 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 
 ```powershell
 # Open the archive dialog (reads selected Outlook email)
-python main_archive.py
+& .\.venv\Scripts\python.exe main_archive.py
 
 # Open the scan window
-python main_scan.py
+& .\.venv\Scripts\python.exe main_scan.py
 
 # Scan without any UI (prints progress to stdout)
-python main_scan.py --no-ui
+& .\.venv\Scripts\python.exe main_scan.py --no-ui
 
 # Full launcher with both buttons + DB stats
-python main_ui.py
+& .\.venv\Scripts\python.exe main_ui.py
 ```
 
 ---
@@ -268,7 +271,7 @@ WAL journal mode is enabled so the archive command can read the DB while a scan 
 
 ## What changed from the old version
 
-| | Old (`old_refactored/`) | New |
+| | Old version (pre-2026) | New |
 |---|---|---|
 | **Database** | Excel + Pickle (Pandas) | SQLite + FTS5 |
 | **Startup time** | 3–8 s (Excel load) | < 0.5 s |
