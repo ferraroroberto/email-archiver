@@ -18,7 +18,13 @@ database:
 scanning:
   batch_size: 500
   body_preview_length: 500
-  max_path_length: 259
+
+path:
+  # Maximum path length (chars) honoured by BOTH the scanner (skips existing
+  # paths longer than this) and the archiver (shortens filenames so the path it
+  # writes never overflows). Windows MAX_PATH is 260 incl. the terminating NUL;
+  # 255 leaves headroom for the OS, COM marshalling, and long-path prefixes.
+  max_length: 255
 
 suggestion:
   max_suggestions: 3

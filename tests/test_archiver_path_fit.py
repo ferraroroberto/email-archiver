@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from email_archiver.archiver.archiver import (
     _ELLIPSIS,
-    _WINDOWS_MAX_PATH,
     _fit_filename_to_path,
 )
+from email_archiver.config import DEFAULT_MAX_PATH_LENGTH as _WINDOWS_MAX_PATH
 
 
 def _full_len(folder: str, filename: str) -> int:
