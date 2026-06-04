@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from email_archiver.config import load_config, setup_logging
+from email_archiver.config import get_archive_roots, load_config, setup_logging
 
 
 def main() -> None:
@@ -44,7 +44,7 @@ def _run_headless(cfg: dict) -> None:
             pct = f"{int(current / total * 100)}%" if total else ""
             print(f"\r  {current:>6,} / {total:,}  {pct}  ", end="", flush=True)
 
-    roots = cfg['archive'].get('root_paths', [cfg['archive'].get('root_path')])
+    roots = get_archive_roots(cfg)
     logger.info("Scanning: %s", roots)
     stats = scanner.scan(progress_callback=on_progress)
     print()  # clear the \r progress line

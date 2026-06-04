@@ -38,6 +38,22 @@ def load_config() -> dict[str, Any]:
     return _config
 
 
+def get_archive_roots(cfg: dict[str, Any]) -> list[str]:
+    """Return the configured archive root paths.
+
+    Reads the canonical ``archive.root_paths`` list, falling back to the
+    legacy singular ``archive.root_path`` key when ``root_paths`` is absent.
+    This migration shim lives here and nowhere else — every caller (scanner,
+    UI, headless scan) goes through this function so the legacy-key handling
+    is defined exactly once. Falsy/empty entries are filtered out.
+    """
+    archive = cfg["archive"]
+    raw_paths = archive.get("root_paths")
+    if not raw_paths:
+        raw_paths = [archive.get("root_path")]
+    return [p for p in raw_paths if p]
+
+
 def _resolve_paths(cfg: dict[str, Any]) -> None:
     """Convert relative paths in the config to absolute paths."""
     db_path = Path(cfg["database"]["path"])

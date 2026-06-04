@@ -22,6 +22,7 @@ from typing import Callable
 import extract_msg
 from extract_msg.exceptions import InvalidFileFormatError, UnrecognizedMSGTypeError
 
+from email_archiver.config import get_archive_roots
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.text import clean_subject as _clean_subject_base
@@ -106,10 +107,7 @@ class FolderScanner:
     """
 
     def __init__(self, cfg: dict) -> None:
-        raw_paths = cfg["archive"].get("root_paths")
-        if not raw_paths:
-            raw_paths = [cfg["archive"].get("root_path")]
-        self._roots = [Path(p) for p in raw_paths if p]
+        self._roots = [Path(p) for p in get_archive_roots(cfg)]
         self._db_path = cfg["database"]["path"]
         self._batch_size: int = cfg["scanning"]["batch_size"]
         self._preview_len: int = cfg["scanning"]["body_preview_length"]

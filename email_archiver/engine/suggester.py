@@ -32,7 +32,6 @@ Fallback (empty DB):
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,10 +57,18 @@ class RankedSuggestion:
 
 
 def _folder_display_name(path: str) -> str:
-    """Return the last two components of a path for display."""
-    parts = Path(path).parts
+    """Return the last two components of a path for display.
+
+    Components are joined with a forward slash regardless of platform so the
+    string renders identically in logs and in the UI (which displays archive
+    paths with ``/`` separators). This is the single source of truth for the
+    compact "last two components" form — the UI uses ``RankedSuggestion.
+    display_name`` rather than recomputing it.
+    """
+    parts = path.replace("\\", "/").split("/")
+    parts = [p for p in parts if p]
     if len(parts) >= 2:
-        return os.path.join(parts[-2], parts[-1])
+        return "/".join(parts[-2:])
     return parts[-1] if parts else path
 
 
