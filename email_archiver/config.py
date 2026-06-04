@@ -16,6 +16,14 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 
+# Windows MAX_PATH is 260 (including the terminating NUL → 259 usable chars).
+# We stay a few chars under to leave headroom for the OS, COM marshalling, and
+# any internal use of long-path prefixes. This single budget is consumed by
+# BOTH the scanner (skips over-long existing paths) and the archiver (shortens
+# filenames so the path it writes never overflows). Used when config omits the
+# key so older config.yaml files keep working.
+DEFAULT_MAX_PATH_LENGTH = 255
+
 _config: dict[str, Any] | None = None
 
 
@@ -52,6 +60,23 @@ def get_archive_roots(cfg: dict[str, Any]) -> list[str]:
     if not raw_paths:
         raw_paths = [archive.get("root_path")]
     return [p for p in raw_paths if p]
+
+
+def get_max_path_length(cfg: dict[str, Any]) -> int:
+    """Return the unified maximum path-length budget (in chars).
+
+    Reads the canonical ``path.max_length`` key, falling back to
+    ``DEFAULT_MAX_PATH_LENGTH`` when the section/key is absent so older
+    ``config.yaml`` files (and the legacy ``scanning.max_path_length`` layout)
+    keep working. Both the scanner and the archiver go through this function so
+    the budget is defined in exactly one place — never split across a config
+    value and a module constant again.
+    """
+    path_cfg = cfg.get("path") or {}
+    value = path_cfg.get("max_length")
+    if value is None:
+        return DEFAULT_MAX_PATH_LENGTH
+    return int(value)
 
 
 def _resolve_paths(cfg: dict[str, Any]) -> None:

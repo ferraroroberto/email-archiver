@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from email_archiver.config import DEFAULT_MAX_PATH_LENGTH, get_max_path_length
+
 logger = logging.getLogger(__name__)
 
 # Outlook SaveAs format constant for .msg
@@ -32,9 +34,10 @@ _OL_MSG_FORMAT = 3
 # Regex to find the leading NNN_ prefix in filenames
 _RE_PREFIX = re.compile(r"^(\d+)")
 
-# Windows MAX_PATH is 260; stay a few chars under to leave headroom for the OS,
-# COM marshalling, and any internal use of long-path prefixes.
-_WINDOWS_MAX_PATH = 255
+# Maximum path length (in chars) the fitted filename must stay within. This is
+# the SAME budget the scanner uses — sourced from config via
+# ``get_max_path_length`` and threaded in through ``EmailArchiver``; see
+# ``config.DEFAULT_MAX_PATH_LENGTH`` for the rationale behind the value.
 _ELLIPSIS = "..."
 
 
@@ -67,7 +70,7 @@ def _fit_filename_to_path(
     stem: str,
     suffix: str,
     *,
-    max_path: int = _WINDOWS_MAX_PATH,
+    max_path: int = DEFAULT_MAX_PATH_LENGTH,
 ) -> str:
     """
     Build ``"{seq} - {stem}{suffix}"`` such that the full path
@@ -124,6 +127,18 @@ def get_next_sequence_number(folder_path: str) -> str:
 class EmailArchiver:
     """Saves an Outlook MailItem (COM object) to a target folder on disk."""
 
+    def __init__(self, cfg: dict[str, Any] | None = None) -> None:
+        """Build an archiver bound to a path-length budget.
+
+        ``cfg`` is the loaded config dict; the path budget is read from it via
+        the shared ``get_max_path_length`` accessor so the archiver and scanner
+        honour the same ``path.max_length`` knob. When ``cfg`` is omitted the
+        ``DEFAULT_MAX_PATH_LENGTH`` fallback is used.
+        """
+        self._max_path: int = (
+            get_max_path_length(cfg) if cfg is not None else DEFAULT_MAX_PATH_LENGTH
+        )
+
     def archive(
         self,
         mail_item: Any,
@@ -173,7 +188,9 @@ class EmailArchiver:
         subject: str,
     ) -> str:
         safe_subject = _sanitize_filename(subject)
-        filename = _fit_filename_to_path(folder_path, seq, safe_subject, ".msg")
+        filename = _fit_filename_to_path(
+            folder_path, seq, safe_subject, ".msg", max_path=self._max_path
+        )
         file_path = os.path.join(folder_path, filename)
 
         try:
@@ -236,7 +253,9 @@ class EmailArchiver:
                 stem = _sanitize_filename(Path(original_name).stem, max_len=60)
                 suffix = Path(original_name).suffix.lower()
 
-                att_filename = _fit_filename_to_path(folder_path, seq, stem, suffix)
+                att_filename = _fit_filename_to_path(
+                    folder_path, seq, stem, suffix, max_path=self._max_path
+                )
                 att_path = os.path.join(folder_path, att_filename)
                 # Avoid overwrite if multiple attachments share the same name.
                 # The disambiguation suffix is folded into the stem before fitting,
@@ -244,7 +263,8 @@ class EmailArchiver:
                 counter = 2
                 while os.path.exists(att_path):
                     att_filename = _fit_filename_to_path(
-                        folder_path, seq, f"{stem}_{counter}", suffix
+                        folder_path, seq, f"{stem}_{counter}", suffix,
+                        max_path=self._max_path,
                     )
                     att_path = os.path.join(folder_path, att_filename)
                     counter += 1

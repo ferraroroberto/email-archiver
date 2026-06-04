@@ -326,7 +326,7 @@ class ArchiveDialog:
                 messagebox.showerror("Outlook error", f"Cannot access Outlook:\n{exc}")
                 return
 
-            archiver = EmailArchiver()
+            archiver = EmailArchiver(self._cfg)
             result = archiver.archive(
                 mail_item=mail_item,
                 folder_path=folder_path,
