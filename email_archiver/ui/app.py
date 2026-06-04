@@ -21,6 +21,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from email_archiver.archiver.archiver import EmailArchiver
+from email_archiver.config import get_archive_roots
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
 from email_archiver.outlook.client import EmailData, OutlookClient
 from email_archiver.ui.dialogs import browse_folder
@@ -220,9 +221,11 @@ class ArchiveDialog:
             )
             rank_lbl.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 8))
 
-            # Folder path (last 2 components bold, rest grey)
-            path_parts = s.folder_path.replace("\\", "/").split("/")
-            short = "/".join(path_parts[-2:]) if len(path_parts) >= 2 else s.folder_path
+            # Folder path: last 2 components bold (from the engine's canonical
+            # display_name), the rest a grey prefix. Only the grey-prefix split
+            # is UI-specific styling — the compact tail is the engine's value.
+            short = s.display_name
+            path_parts = [p for p in s.folder_path.replace("\\", "/").split("/") if p]
             rest = "/".join(path_parts[:-2]) + "/" if len(path_parts) > 2 else ""
 
             path_frame = tk.Frame(card, bg=_CARD_BG)
@@ -289,7 +292,8 @@ class ArchiveDialog:
     # ------------------------------------------------ user interactions ----
 
     def _on_browse(self) -> None:
-        archive_root = self._cfg["archive"].get("root_paths", [self._cfg["archive"].get("root_path")])[0]
+        roots = get_archive_roots(self._cfg)
+        archive_root = roots[0] if roots else None
         chosen = browse_folder(self._root, initial_dir=archive_root)
         if chosen:
             self._do_archive(chosen)
@@ -370,7 +374,7 @@ class ScanWindow:
         tk.Label(hdr, text="🗂  Scan Archive", bg=_ACCENT, fg="white",
                  font=(ff, ft, "bold"), padx=16).pack(side="left")
 
-        roots = self._cfg['archive'].get('root_paths', [self._cfg['archive'].get('root_path')])
+        roots = get_archive_roots(self._cfg)
         text = "Archive roots:\n" + "\n".join(str(r) for r in roots)
         info = tk.Label(
             root,
