@@ -87,7 +87,7 @@ archiver/
 │   │
 │   └── ui/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
-│       └── dialogs.py          ← Confirm, browse, progress dialogs
+│       └── dialogs.py          ← Native folder-picker wrapper
 │
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
