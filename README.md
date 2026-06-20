@@ -68,6 +68,7 @@ archiver/
 │
 ├── email_archiver/              ← Main package
 │   ├── config.py                ← YAML loader, path resolution, logging setup
+│   ├── text.py                  ← Shared subject normalisation (Re:/Fwd: stripping)
 │   │
 │   ├── database/
 │   │   ├── models.py            ← SQLite schema, FTS5 setup, connection factory
