@@ -23,7 +23,7 @@ from typing import Any
 from email_archiver.archiver.archiver import EmailArchiver
 from email_archiver.config import get_archive_roots
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
-from email_archiver.outlook.client import EmailData, OutlookClient
+from email_archiver.outlook.client import EmailData, OutlookClient, get_selected_mail_item
 from email_archiver.ui.dialogs import browse_folder
 
 logger = logging.getLogger(__name__)
@@ -310,18 +310,14 @@ class ArchiveDialog:
             # The user's selection in Outlook won't have changed between
             # seeing suggestions and clicking Archive.
             import pythoncom
-            import win32com.client as _win32
 
             pythoncom.CoInitialize()
 
             try:
-                app = _win32.GetActiveObject("Outlook.Application")
-                explorer = app.ActiveExplorer()
-                if explorer is None or explorer.Selection.Count == 0:
+                mail_item = get_selected_mail_item()
+                if mail_item is None:
                     messagebox.showerror("Error", "No email is selected in Outlook.")
                     return
-                # Dispatch forces full COM interface resolution → MailItem with SaveAs
-                mail_item = _win32.Dispatch(explorer.Selection.Item(1))
             except Exception as exc:
                 messagebox.showerror("Outlook error", f"Cannot access Outlook:\n{exc}")
                 return
