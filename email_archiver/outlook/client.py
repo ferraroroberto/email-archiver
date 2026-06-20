@@ -98,6 +98,22 @@ def _get_recipients_smtp(mail_item: Any) -> str:
 
 # ------------------------------------------------------------- client ------
 
+
+def get_selected_mail_item() -> Any | None:
+    """
+    Return the currently selected Outlook MailItem via COM, or None if
+    nothing is selected. Raises on COM errors so the caller can surface
+    them appropriately.
+    """
+    import win32com.client  # noqa: PLC0415
+    app = win32com.client.GetActiveObject("Outlook.Application")
+    explorer = app.ActiveExplorer()
+    if explorer is None or explorer.Selection.Count == 0:
+        return None
+    # Dispatch forces full COM interface resolution → MailItem with SaveAs
+    return win32com.client.Dispatch(explorer.Selection.Item(1))
+
+
 class OutlookClient:
     """
     Wraps Outlook COM automation.
@@ -148,28 +164,16 @@ class OutlookClient:
             return None
 
         try:
-            app = win32com.client.GetActiveObject("Outlook.Application")
+            item = get_selected_mail_item()
         except Exception as exc:
-            logger.error("Cannot connect to running Outlook instance: %s", exc)
+            logger.error("Cannot access Outlook or selection: %s", exc)
+            return None
+
+        if item is None:
+            logger.warning("No email selected in Outlook.")
             return None
 
         try:
-            explorer = app.ActiveExplorer()
-            if explorer is None:
-                logger.warning("No active Outlook explorer window.")
-                return None
-
-            selection = explorer.Selection
-            if selection.Count == 0:
-                logger.warning("No email selected in Outlook.")
-                return None
-
-            # Dispatch forces win32com to resolve the full COM interface for
-            # this object. Without it, late-bound dynamic dispatch returns a
-            # generic Item wrapper that lacks MailItem-specific methods like
-            # SaveAs, which causes AttributeError: Item.SaveAs at archive time.
-            item = win32com.client.Dispatch(selection.Item(1))
-
             # Ensure it is a MailItem (Class == 43)
             if item.Class != 43:
                 logger.warning(
