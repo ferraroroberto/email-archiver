@@ -265,13 +265,6 @@ class EmailRepository:
 
         return suggestions[:max_results]
 
-    def get_all_folder_paths(self) -> list[str]:
-        """Return all indexed folder paths (used by suggestion engine fallback)."""
-        rows = self._conn.execute(
-            "SELECT folder_path FROM folders ORDER BY email_count DESC"
-        ).fetchall()
-        return [r["folder_path"] for r in rows]
-
     def get_last_scan_time(self) -> str:
         """Return ISO datetime of the most recent indexing operation."""
         row = self._conn.execute(
