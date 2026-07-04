@@ -1,0 +1,69 @@
+%% docs/architecture.mmd — this repo's own internal structure.
+%% Hand-authored, not generated — there is no structured source to crawl for a
+%% single repo's internal shape (the same reason a .fleet.toml `description` is
+%% hand-written, not scraped). Update this diagram in the same PR as any
+%% material structural change (a module added/moved/renamed, a new entry
+%% point, a data-flow change) — same anti-staleness contract as the
+%% `.fleet.toml` description field. See fleet-config's CLAUDE.md
+%% ("Internal architecture") for the fleet-wide convention this is a
+%% companion to (ferraroroberto/fleet-config#256).
+
+flowchart TB
+  subgraph entry["Entry points (Stream Deck buttons / CLI)"]
+    MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
+    MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
+    MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
+  end
+
+  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · setup_logging"]
+  TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping,\nused by both the scanner and the Outlook client"]
+
+  MAINSCAN --> CONFIG
+  MAINARCHIVE --> CONFIG
+  MAINUI --> CONFIG
+
+  subgraph ui["email_archiver/ui/"]
+    LAUNCHER["app.py: LauncherApp"]
+    ARCHIVEDIALOG["app.py: ArchiveDialog"]
+    SCANWINDOW["app.py: ScanWindow"]
+    DIALOGS["dialogs.py: browse_folder\n(native folder picker)"]
+  end
+  MAINUI --> LAUNCHER
+  MAINARCHIVE --> ARCHIVEDIALOG
+  MAINSCAN -->|no --no-ui| SCANWINDOW
+  LAUNCHER --> ARCHIVEDIALOG
+  LAUNCHER --> SCANWINDOW
+  ARCHIVEDIALOG --> DIALOGS
+
+  subgraph scan["Scan Archive data flow"]
+    SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits"]
+  end
+  SCANWINDOW --> SCANNER
+  MAINSCAN -->|--no-ui| SCANNER
+  SCANNER --> TEXT
+  SCANNER -->|os.walk + open .msg| ONEDRIVE["OneDrive-synced archive root(s)\n(.msg files on disk)"]
+  SCANNER -->|Message parsing| EXTRACTMSG["extract-msg (pip package)"]
+
+  subgraph db["email_archiver/database/"]
+    REPO["repository.py: EmailRepository\nall SQL — upsert_email, upsert_folder,\nsuggest_folders (FTS5 BM25 query)"]
+    MODELS["models.py\nDDL — emails table, emails_fts (FTS5),\nfolders table, sync triggers, get_connection/init_db"]
+  end
+  SCANNER --> REPO
+  REPO --> MODELS
+  MODELS -->|WAL journal| EMAILSDB["data/emails.db (SQLite)"]
+
+  subgraph archive["Archive Email data flow"]
+    OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback)"]
+    SUGGESTER["engine/suggester.py: SuggestionEngine\n3-stage blend: 0.45 FTS + 0.30 subject-thread\n+ 0.25 folder-name (rapidfuzz)"]
+    ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - filename sequencing, path-length fit,\nSaveAs .msg + SaveAsFile attachments"]
+  end
+  ARCHIVEDIALOG --> OUTLOOK
+  OUTLOOK -->|win32com| OUTLOOKCOM["Outlook COM\n(running Outlook.exe process)"]
+  OUTLOOK --> TEXT
+  OUTLOOK -->|EmailData| ARCHIVEDIALOG
+  ARCHIVEDIALOG --> SUGGESTER
+  SUGGESTER --> REPO
+  SUGGESTER -->|rapidfuzz| RAPIDFUZZ["rapidfuzz (pip package)"]
+  ARCHIVEDIALOG -->|user confirms folder| ARCHIVER
+  ARCHIVER -->|SaveAs / SaveAsFile via| OUTLOOKCOM
+  ARCHIVER -->|writes .msg + attachments| ONEDRIVE
