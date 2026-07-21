@@ -138,10 +138,12 @@ class OutlookClient:
 
         # Fallback: subprocess tasklist (slower but no extra dep)
         import subprocess
+        import sys
         try:
             result = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             return "OUTLOOK.EXE" in result.stdout.upper()
         except Exception:
