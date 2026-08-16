@@ -96,6 +96,56 @@ def _get_recipients_smtp(mail_item: Any) -> str:
     return "; ".join(a for a in addresses if a)
 
 
+def _tasklist_has_image(image_name: str) -> bool:
+    """
+    Return True if `image_name` (e.g. "OUTLOOK.EXE") appears in the Windows
+    process list, using the `tasklist` console tool.
+
+    A failed query is *not* the same fact as "the process is not running", so
+    every failure is logged before falling back to False — otherwise a broken
+    query is indistinguishable from a quiet machine.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    is_windows = sys.platform == "win32"
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/NH"],
+            capture_output=True, timeout=5,
+            # tasklist writes the OEM code page, not the parent's locale.
+            # text=True decodes with the ambient locale, which under
+            # PYTHONUTF8=1 is UTF-8: the OEM bytes then fail to decode, stdout
+            # comes back None, and the result silently reads as "not running".
+            encoding="oem" if is_windows else "utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if is_windows else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "Could not run tasklist to check for %s (%s: %s) - "
+            "treating as not running.", image_name, type(exc).__name__, exc,
+        )
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "tasklist exited %s while checking for %s (%s) - "
+            "treating as not running.",
+            result.returncode, image_name, (result.stderr or "").strip(),
+        )
+        return False
+
+    if not (result.stdout or "").strip():
+        logger.warning(
+            "tasklist returned no output while checking for %s - cannot tell "
+            "whether it is running; treating as not running.", image_name,
+        )
+        return False
+
+    return image_name.upper() in result.stdout.upper()
+
+
 # ------------------------------------------------------------- client ------
 
 
@@ -137,17 +187,7 @@ class OutlookClient:
             pass
 
         # Fallback: subprocess tasklist (slower but no extra dep)
-        import subprocess
-        import sys
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            return "OUTLOOK.EXE" in result.stdout.upper()
-        except Exception:
-            return False
+        return _tasklist_has_image("OUTLOOK.EXE")
 
     def get_selected_email(self) -> EmailData | None:
         """
