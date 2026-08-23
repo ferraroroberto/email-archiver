@@ -2,14 +2,18 @@
 Email archiver: saves .msg files and extracts attachments to disk.
 
 Naming convention (matches user spec):
-    Email:       NNN - sanitized_subject.msg
-    Attachments: NNN - filename.ext
+    Email:       YYYY-MM-DD - NNN - sanitized_subject.msg
+    Attachments: YYYY-MM-DD - NNN - filename.ext
 
-Where NNN is zero-padded to 3 digits (000–999).
+Where YYYY-MM-DD is the email's sent date in local time, and NNN is a
+zero-padded 3-digit sequence (000-999) shared by an email and its
+attachments. When the sent date cannot be resolved, the legacy undated form
+(``NNN - ...``) is used instead.
 
 Design decisions:
 - Sequence number is derived from the MAXIMUM existing numeric prefix in the
-  target folder, not a count, so it is safe even if files were deleted.
+  target folder, not a count, so it is safe even if files were deleted. The
+  scan recognises both the legacy and dated prefix forms.
 - Embedded images (ContentId set) are skipped; only real attachments are saved.
 - Subject sanitisation removes characters illegal on Windows file systems.
 - SaveAs uses olMSG format constant (3) to produce a proper .msg file.
@@ -31,8 +35,10 @@ logger = logging.getLogger(__name__)
 # Outlook SaveAs format constant for .msg
 _OL_MSG_FORMAT = 3
 
-# Regex to find the leading NNN_ prefix in filenames
-_RE_PREFIX = re.compile(r"^(\d+)")
+# Regexes to find the leading sequence number, in either filename form.
+# Dated is tried first since it is the more specific match.
+_RE_DATED_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} - (\d{3}) - ")
+_RE_LEGACY_PREFIX = re.compile(r"^(\d{3}) - ")
 
 # Maximum path length (in chars) the fitted filename must stay within. This is
 # the SAME budget the scanner uses — sourced from config via
@@ -70,16 +76,19 @@ def _fit_filename_to_path(
     stem: str,
     suffix: str,
     *,
+    date_prefix: str | None = None,
     max_path: int = DEFAULT_MAX_PATH_LENGTH,
 ) -> str:
     """
-    Build ``"{seq} - {stem}{suffix}"`` such that the full path
-    ``os.path.join(folder_path, filename)`` stays within ``max_path`` chars.
+    Build ``"{date_prefix} - {seq} - {stem}{suffix}"`` (or, when
+    ``date_prefix`` is None, the legacy ``"{seq} - {stem}{suffix}"``) such
+    that the full path ``os.path.join(folder_path, filename)`` stays within
+    ``max_path`` chars.
 
     If the stem has to be cut, an ellipsis is appended so the resulting
     filename still hints at the original subject. ``suffix`` is preserved.
     """
-    prefix = f"{seq} - "
+    prefix = f"{date_prefix} - {seq} - " if date_prefix else f"{seq} - "
     sep_len = 1  # path separator inserted by os.path.join
     filename_budget = max_path - len(folder_path) - sep_len
     fixed = len(prefix) + len(suffix)
@@ -101,7 +110,8 @@ def _fit_filename_to_path(
 
 def get_next_sequence_number(folder_path: str) -> str:
     """
-    Scan the folder for files starting with NNN_ and return (max + 1).
+    Scan the folder for files starting with either the legacy ``NNN - `` or
+    the dated ``YYYY-MM-DD - NNN - `` prefix and return (max + 1).
     Returns '001' if the folder is empty or has no numbered files.
     """
     try:
@@ -112,7 +122,7 @@ def get_next_sequence_number(folder_path: str) -> str:
 
     numbers: list[int] = []
     for fname in files:
-        m = _RE_PREFIX.match(fname)
+        m = _RE_DATED_PREFIX.match(fname) or _RE_LEGACY_PREFIX.match(fname)
         if m:
             numbers.append(int(m.group(1)))
 
@@ -120,6 +130,38 @@ def get_next_sequence_number(folder_path: str) -> str:
     if next_num > 999:
         logger.warning("Sequence number exceeds 999 in %s", folder_path)
     return f"{next_num:03d}"
+
+
+def _get_sent_date_prefix(mail_item: Any) -> str | None:
+    """
+    Resolve the email's sent date as a ``YYYY-MM-DD`` string in local time.
+
+    Tries ``SentOn`` (the actual send time) first, falling back to
+    ``ReceivedTime``. Returns ``None`` — and logs why — when neither
+    resolves, signalling the caller to fall back to the legacy undated
+    filename form rather than invent a placeholder date.
+    """
+    last_exc: Exception | None = None
+    for attr in ("SentOn", "ReceivedTime"):
+        try:
+            value = getattr(mail_item, attr)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        if value is None:
+            continue
+        try:
+            return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+        except AttributeError as exc:
+            last_exc = exc
+            continue
+
+    logger.warning(
+        "Could not resolve a sent date for this email (%s); "
+        "falling back to the legacy undated filename form",
+        last_exc if last_exc is not None else "SentOn and ReceivedTime both empty",
+    )
+    return None
 
 
 # ------------------------------------------------------------- archiver -----
@@ -162,14 +204,17 @@ class EmailArchiver:
             dest.mkdir(parents=True, exist_ok=True)
 
         seq = get_next_sequence_number(folder_path)
+        date_prefix = _get_sent_date_prefix(mail_item)
         result = ArchiveResult(sequence_number=seq)
 
         # ---- save .msg ----
-        result.email_path = self._save_msg(mail_item, folder_path, seq, subject)
+        result.email_path = self._save_msg(
+            mail_item, folder_path, seq, subject, date_prefix
+        )
 
         # ---- save attachments ----
         result.attachment_paths = self._save_attachments(
-            mail_item, folder_path, seq
+            mail_item, folder_path, seq, date_prefix
         )
 
         logger.info(
@@ -186,10 +231,12 @@ class EmailArchiver:
         folder_path: str,
         seq: str,
         subject: str,
+        date_prefix: str | None,
     ) -> str:
         safe_subject = _sanitize_filename(subject)
         filename = _fit_filename_to_path(
-            folder_path, seq, safe_subject, ".msg", max_path=self._max_path
+            folder_path, seq, safe_subject, ".msg",
+            date_prefix=date_prefix, max_path=self._max_path,
         )
         file_path = os.path.join(folder_path, filename)
 
@@ -207,6 +254,7 @@ class EmailArchiver:
         mail_item: Any,
         folder_path: str,
         seq: str,
+        date_prefix: str | None,
     ) -> list[str]:
         saved: list[str] = []
         att_index = 1
@@ -254,7 +302,8 @@ class EmailArchiver:
                 suffix = Path(original_name).suffix.lower()
 
                 att_filename = _fit_filename_to_path(
-                    folder_path, seq, stem, suffix, max_path=self._max_path
+                    folder_path, seq, stem, suffix,
+                    date_prefix=date_prefix, max_path=self._max_path,
                 )
                 att_path = os.path.join(folder_path, att_filename)
                 # Avoid overwrite if multiple attachments share the same name.
@@ -264,7 +313,7 @@ class EmailArchiver:
                 while os.path.exists(att_path):
                     att_filename = _fit_filename_to_path(
                         folder_path, seq, f"{stem}_{counter}", suffix,
-                        max_path=self._max_path,
+                        date_prefix=date_prefix, max_path=self._max_path,
                     )
                     att_path = os.path.join(folder_path, att_filename)
                     counter += 1
