@@ -36,18 +36,23 @@ Connects to the running Outlook instance, reads the currently selected email, qu
 
 ## File naming convention
 
-When an email is archived in a folder, files are named with a zero-padded 3-digit sequence number derived from the highest existing prefix in that folder, using ` - ` (space-dash-space) as the separator:
+When an email is archived in a folder, files are named `YYYY-MM-DD - NNN - <name>`, using ` - ` (space-dash-space) as the separator:
 
 ```
-023 - Project_Alpha_meeting_notes.msg
-023 - invoice.pdf
-023 - signed_contract.docx
+2026-03-14 - 023 - Project_Alpha_meeting_notes.msg
+2026-03-14 - 023 - invoice.pdf
+2026-03-14 - 023 - signed_contract.docx
 ```
 
-- The email gets `NNN - sanitized_subject.msg`
-- Each real attachment gets `NNN - original_filename.ext`
+- `YYYY-MM-DD` is the email's **sent** date (`SentOn`, falling back to `ReceivedTime`), normalized to local time — not the date it was archived. Attachments inherit the parent email's date, so a bundle stays contiguous.
+- `NNN` is a zero-padded 3-digit sequence number, derived from the highest existing prefix in that destination folder. It still groups a bundle (an email and its attachments share one `NNN`) and still increments per folder — its meaning and derivation are unchanged from before the date prefix was added.
+- The email gets `YYYY-MM-DD - NNN - sanitized_subject.msg`
+- Each real attachment gets `YYYY-MM-DD - NNN - original_filename.ext`
+- If the email's sent date cannot be resolved, archiving falls back to the legacy undated form (`NNN - sanitized_subject.msg`) and logs why, rather than inventing a placeholder date
+- Sequence allocation recognizes **both** the legacy `NNN - ` and the dated `YYYY-MM-DD - NNN - ` forms, so a folder holding a mix of old and newly-archived files still picks the correct next number and never collides
+- Existing archived files are never renamed — this only affects what gets written going forward
 - Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
-- The filename is dynamically shortened with a trailing `...` if the destination folder is deep enough that the full path would otherwise exceed Windows' 260-char `MAX_PATH` limit (e.g. `042 - Long_subject_starts_here....msg`)
+- The filename is dynamically shortened with a trailing `...` if the destination folder is deep enough that the full path would otherwise exceed Windows' 260-char `MAX_PATH` limit (e.g. `2026-03-14 - 042 - Long_subject_starts_here....msg`)
 
 ---
 
