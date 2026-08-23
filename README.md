@@ -30,13 +30,39 @@ Two commands, each launchable from a Stream Deck button or the command line:
 Walks the entire OneDrive archive from a configured root folder, opens every `.msg` file it finds, extracts metadata (subject, sender, recipients, date, body preview), and stores it in a local SQLite database with a full-text search index. Subsequent scans are incremental — only new or modified files are processed.
 
 ### 2. Archive Email
-Connects to the running Outlook instance, reads the currently selected email, queries the database to find the most relevant project folders, and presents ranked suggestions. You click a folder (or browse manually), confirm, and the email is saved as a `.msg` file plus all attachments — all consistently numbered — in under two seconds. The window closes immediately after saving (no confirmation popup); the log file records what was saved.
+Connects to the running Outlook instance, reads the currently selected email, queries the database to find the most relevant project folders, and presents ranked suggestions. You click a folder, confirm, and the email is saved as a `.msg` file plus all attachments — all consistently numbered — in under two seconds. The window closes immediately after saving (no confirmation popup); the log file records what was saved.
+
+When none of the suggestions is right there are two escapes, both in the dialog's bottom bar:
+
+| Button | What it does |
+|---|---|
+| **Browse folder…** | Opens the native folder picker, starting at the first configured archive root |
+| **Explorer folder** | Archives straight into the folder shown in the **foremost open File Explorer window** — the one you looked at last. No picker, no typing. |
+
+`Explorer folder` is for the case where the right destination is already open on screen. It only considers real filesystem folders (virtual shell locations like *This PC* or *Quick Access* are skipped), it is **not** limited to the configured archive roots, and if no Explorer window is showing a real folder it says so rather than guessing.
 
 ---
 
 ## File naming convention
 
-When an email is archived in a folder, files are named `YYYY-MM-DD - NNN - <name>`, using ` - ` (space-dash-space) as the separator:
+When an email is archived in a folder, files are named `NNN - <name>`, using ` - ` (space-dash-space) as the separator:
+
+```
+023 - Project_Alpha_meeting_notes.msg
+023 - invoice.pdf
+023 - signed_contract.docx
+```
+
+- `NNN` is a zero-padded 3-digit sequence number, derived from the highest existing prefix in that destination folder. It groups a bundle — an email and its attachments always share one `NNN` — and increments per folder.
+- The email gets `NNN - sanitized_subject.msg`
+- Each real attachment gets `NNN - original_filename.ext`
+- Existing archived files are never renamed — this only affects what gets written going forward
+- Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
+- The filename is dynamically shortened with a trailing `...` if the destination folder is deep enough that the full path would otherwise exceed Windows' 260-char `MAX_PATH` limit (e.g. `042 - Long_subject_starts_here....msg`)
+
+### Optional date prefix
+
+The email's sent date can be prefixed to every name in the bundle, for folders shared with a document archive that files everything as `YYYY-MM-DD - <slug>`:
 
 ```
 2026-03-14 - 023 - Project_Alpha_meeting_notes.msg
@@ -44,15 +70,21 @@ When an email is archived in a folder, files are named `YYYY-MM-DD - NNN - <name
 2026-03-14 - 023 - signed_contract.docx
 ```
 
+It is **off by default** and can be switched on two ways:
+
+- **Per archive** — the **Date prefix (YYYY-MM-DD)** checkbox in the archive dialog's bottom bar. Tick it before clicking `Archive`, `Browse folder…` or `Explorer folder`; it applies to that archive only and nothing is written to the config.
+- **Permanently** — `naming.date_prefix: true` in `config/config.yaml`. That sets the checkbox's starting position every time the dialog opens, so the per-archive checkbox can still override it in either direction.
+
+```yaml
+naming:
+  date_prefix: false   # default; true → 2026-03-14 - 023 - subject.msg
+```
+
 - `YYYY-MM-DD` is the email's **sent** date (`SentOn`, falling back to `ReceivedTime`), normalized to local time — not the date it was archived. Attachments inherit the parent email's date, so a bundle stays contiguous.
-- `NNN` is a zero-padded 3-digit sequence number, derived from the highest existing prefix in that destination folder. It still groups a bundle (an email and its attachments share one `NNN`) and still increments per folder — its meaning and derivation are unchanged from before the date prefix was added.
-- The email gets `YYYY-MM-DD - NNN - sanitized_subject.msg`
-- Each real attachment gets `YYYY-MM-DD - NNN - original_filename.ext`
-- If the email's sent date cannot be resolved, archiving falls back to the legacy undated form (`NNN - sanitized_subject.msg`) and logs why, rather than inventing a placeholder date
-- Sequence allocation recognizes **both** the legacy `NNN - ` and the dated `YYYY-MM-DD - NNN - ` forms, so a folder holding a mix of old and newly-archived files still picks the correct next number and never collides
-- Existing archived files are never renamed — this only affects what gets written going forward
-- Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
-- The filename is dynamically shortened with a trailing `...` if the destination folder is deep enough that the full path would otherwise exceed Windows' 260-char `MAX_PATH` limit (e.g. `2026-03-14 - 042 - Long_subject_starts_here....msg`)
+- `NNN` keeps exactly the same meaning and derivation with the prefix on
+- If the email's sent date cannot be resolved, that archive falls back to the undated form and logs why, rather than inventing a placeholder date
+- Sequence allocation recognizes **both** the `NNN - ` and the `YYYY-MM-DD - NNN - ` forms no matter which one is being written, so a folder holding a mix of both still picks the correct next number and never collides — the toggle is safe to flip at any time
+- Path shortening accounts for the 13 extra characters only when the prefix is actually applied
 
 ---
 
@@ -74,6 +106,7 @@ archiver/
 ├── email_archiver/              ← Main package
 │   ├── config.py                ← YAML loader, path resolution, logging setup
 │   ├── text.py                  ← Shared subject normalisation (Re:/Fwd: stripping)
+│   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
 │   ├── database/
 │   │   ├── models.py            ← SQLite schema, FTS5 setup, connection factory
@@ -152,7 +185,7 @@ archive:
     - "C:/Users/YourName/OneDrive/Archive/"
 ```
 
-All other defaults are sensible out of the box.
+All other defaults are sensible out of the box. The one knob worth knowing about is `naming.date_prefix` (default `false`) — see [File naming convention](#file-naming-convention).
 
 ### First scan
 
@@ -285,7 +318,8 @@ WAL journal mode is enabled so the archive command can read the DB while a scan 
 | **Incremental scan** | No — re-read all files every time | Yes — `mtime` check, skips unchanged files |
 | **Architecture** | 3 flat scripts + shared utils | Package with 6 separated modules |
 | **UI** | Blocking `window.mainloop()` per dialog | Background thread, non-blocking |
-| **Attachments** | (varies) | `NNN - filename.ext` (email: `NNN - subject.msg`) |
+| **Attachments** | (varies) | `NNN - filename.ext` (email: `NNN - subject.msg`), optional `YYYY-MM-DD - ` prefix |
+| **Save to open Explorer folder** | Separate script (`email-automation-save.py`) | `Explorer folder` button in the archive dialog |
 | **Exchange resolution** | Partial | Full `GetExchangeUser()` SMTP fallback |
 | **Logging** | `print()` statements | Structured `logging` to file + console |
 | **Config** | Hardcoded `.txt` params files | `config/config.yaml` |

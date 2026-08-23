@@ -24,6 +24,12 @@ CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 # key so older config.yaml files keep working.
 DEFAULT_MAX_PATH_LENGTH = 255
 
+# Archived filenames carry the sequence prefix only (``NNN - name.ext``) unless
+# the sent-date prefix is explicitly switched on. Off by default: the shorter
+# form leaves more MAX_PATH headroom in deep folders, and the date is already
+# inside the .msg. See ``get_date_prefix_enabled``.
+DEFAULT_DATE_PREFIX_ENABLED = False
+
 _config: dict[str, Any] | None = None
 
 
@@ -77,6 +83,23 @@ def get_max_path_length(cfg: dict[str, Any]) -> int:
     if value is None:
         return DEFAULT_MAX_PATH_LENGTH
     return int(value)
+
+
+def get_date_prefix_enabled(cfg: dict[str, Any]) -> bool:
+    """Return whether archived filenames get the email's sent date prefixed.
+
+    Reads ``naming.date_prefix``, falling back to
+    ``DEFAULT_DATE_PREFIX_ENABLED`` (``False``) when the section or key is
+    absent, so a ``config.yaml`` written before the toggle existed keeps the
+    default sequence-only naming. Like ``get_max_path_length``, this is the one
+    place the key is read — the archiver goes through it rather than reaching
+    into the config dict itself.
+    """
+    naming_cfg = cfg.get("naming") or {}
+    value = naming_cfg.get("date_prefix")
+    if value is None:
+        return DEFAULT_DATE_PREFIX_ENABLED
+    return bool(value)
 
 
 def _resolve_paths(cfg: dict[str, Any]) -> None:

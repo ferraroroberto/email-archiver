@@ -11,6 +11,16 @@ archive:
     - "C:/Users/YourName/OneDrive/Documentos/"
     - "C:/Users/YourName/OneDrive/Archive/"
 
+naming:
+  # Prepend the email's sent date to archived filenames.
+  #   false (default) → 023 - subject.msg
+  #   true            → 2026-03-14 - 023 - subject.msg
+  # The NNN sequence is always present and always shared by an email and its
+  # attachments. Sequence allocation reads both forms whichever way this is
+  # set, so it is safe to flip at any time — a folder holding a mix of dated
+  # and undated files still gets the correct next number.
+  date_prefix: false
+
 database:
   # Path relative to the project root or absolute
   path: "data/emails.db"

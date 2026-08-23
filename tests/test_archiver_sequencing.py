@@ -34,7 +34,7 @@ def test_empty_folder_starts_at_001(tmp_path):
     assert get_next_sequence_number(str(tmp_path)) == "001"
 
 
-def test_legacy_only_folder_picks_max_plus_one(tmp_path):
+def test_undated_only_folder_picks_max_plus_one(tmp_path):
     (tmp_path / "001 - alpha.msg").write_text("x")
     (tmp_path / "007 - beta.pdf").write_text("x")
     assert get_next_sequence_number(str(tmp_path)) == "008"
@@ -46,7 +46,7 @@ def test_dated_only_folder_picks_max_plus_one(tmp_path):
     assert get_next_sequence_number(str(tmp_path)) == "013"
 
 
-def test_mixed_legacy_and_dated_folder_never_collides(tmp_path):
+def test_mixed_undated_and_dated_folder_never_collides(tmp_path):
     (tmp_path / "023 - old_email.msg").write_text("x")
     (tmp_path / "2026-03-14 - 024 - new_email.msg").write_text("x")
     assert get_next_sequence_number(str(tmp_path)) == "025"

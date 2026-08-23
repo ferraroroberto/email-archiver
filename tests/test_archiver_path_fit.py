@@ -76,7 +76,7 @@ def test_date_prefix_accounted_for_in_truncation_budget():
     assert _ELLIPSIS + ".msg" in name
 
 
-def test_no_date_prefix_falls_back_to_legacy_form():
+def test_no_date_prefix_uses_the_default_undated_form():
     folder = r"C:\Users\me\OneDrive\Archive\Project Alpha"
     name = _fit_filename_to_path(
         folder, "042", "meeting_notes_q4", ".msg", date_prefix=None
