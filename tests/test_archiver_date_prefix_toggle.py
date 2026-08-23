@@ -1,24 +1,46 @@
 """Tests for the naming.date_prefix toggle end-to-end through EmailArchiver."""
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 from email_archiver.archiver.archiver import EmailArchiver
 from email_archiver.config import get_date_prefix_enabled
 
 
+class _FakeAttachment:
+    """A real (non-inline) attachment: no MAPI properties, so the archiver's
+    inline detection falls through both branches and saves it."""
+
+    def __init__(self, filename):
+        self.FileName = filename
+
+    @property
+    def PropertyAccessor(self):
+        raise AttributeError("no PropertyAccessor on this fake")
+
+    def SaveAsFile(self, path):  # noqa: N802 - COM-shaped API
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("att")
+
+
 class _FakeAttachments:
+    def __init__(self, items=()):
+        self._items = list(items)
+
     def __iter__(self):
-        return iter(())
+        return iter(self._items)
 
 
 class _FakeMailItem:
-    """Enough of a MailItem for the archiver: dates, SaveAs, no attachments."""
+    """Enough of a MailItem for the archiver: dates, SaveAs, attachments."""
 
-    def __init__(self, sent_on=datetime(2026, 3, 14, 9, 30)):
+    def __init__(self, sent_on=datetime(2026, 3, 14, 9, 30), attachments=()):
         self.SentOn = sent_on
         self.ReceivedTime = None
-        self.Attachments = _FakeAttachments()
+        self.Attachments = _FakeAttachments(
+            _FakeAttachment(n) for n in attachments
+        )
 
     def SaveAs(self, path, fmt):  # noqa: N802 - COM-shaped API
         with open(path, "w", encoding="utf-8") as fh:
@@ -98,6 +120,36 @@ def test_toggle_off_does_not_even_read_the_sent_date(tmp_path):
 
     result = EmailArchiver(_cfg()).archive(_ExplodingDates(), str(tmp_path), "Quiet")
     assert result.email_path.endswith("001 - Quiet.msg")
+
+
+def test_the_whole_bundle_shares_one_prefix_with_the_toggle_off(tmp_path):
+    result = EmailArchiver(_cfg()).archive(
+        _FakeMailItem(attachments=("invoice.pdf", "signed_contract.docx")),
+        str(tmp_path),
+        "Project Alpha",
+    )
+    names = sorted(os.path.basename(p) for p in
+                   [result.email_path, *result.attachment_paths])
+    assert names == [
+        "001 - Project Alpha.msg",
+        "001 - invoice.pdf",
+        "001 - signed_contract.docx",
+    ]
+
+
+def test_the_whole_bundle_shares_one_date_and_seq_with_the_toggle_on(tmp_path):
+    result = EmailArchiver(_cfg(date_prefix=True)).archive(
+        _FakeMailItem(attachments=("invoice.pdf", "signed_contract.docx")),
+        str(tmp_path),
+        "Project Alpha",
+    )
+    names = sorted(os.path.basename(p) for p in
+                   [result.email_path, *result.attachment_paths])
+    assert names == [
+        "2026-03-14 - 001 - Project Alpha.msg",
+        "2026-03-14 - 001 - invoice.pdf",
+        "2026-03-14 - 001 - signed_contract.docx",
+    ]
 
 
 def test_explicit_override_beats_the_config_in_both_directions(tmp_path):
