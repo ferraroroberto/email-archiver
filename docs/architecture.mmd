@@ -34,6 +34,9 @@ flowchart TB
   LAUNCHER --> ARCHIVEDIALOG
   LAUNCHER --> SCANWINDOW
   ARCHIVEDIALOG --> DIALOGS
+  ARCHIVEDIALOG -->|Explorer folder button| EXPLORER
+  EXPLORER["explorer.py: get_current_explorer_folder\nShell.Application windows + z-order pick"]
+  EXPLORER -->|Shell.Application / EnumWindows| SHELLCOM["Windows shell\n(open File Explorer windows)"]
 
   subgraph scan["Scan Archive data flow"]
     SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits"]
@@ -55,7 +58,7 @@ flowchart TB
   subgraph archive["Archive Email data flow"]
     OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback)"]
     SUGGESTER["engine/suggester.py: SuggestionEngine\n3-stage blend: 0.45 FTS + 0.30 subject-thread\n+ 0.25 folder-name (rapidfuzz)"]
-    ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - filename sequencing, path-length fit,\nSaveAs .msg + SaveAsFile attachments"]
+    ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - sequencing, optional YYYY-MM-DD prefix,\npath-length fit, SaveAs .msg + SaveAsFile attachments"]
   end
   ARCHIVEDIALOG --> OUTLOOK
   OUTLOOK -->|win32com| OUTLOOKCOM["Outlook COM\n(running Outlook.exe process)"]
@@ -64,6 +67,6 @@ flowchart TB
   ARCHIVEDIALOG --> SUGGESTER
   SUGGESTER --> REPO
   SUGGESTER -->|rapidfuzz| RAPIDFUZZ["rapidfuzz (pip package)"]
-  ARCHIVEDIALOG -->|user confirms folder| ARCHIVER
+  ARCHIVEDIALOG -->|user confirms folder + date-prefix checkbox| ARCHIVER
   ARCHIVER -->|SaveAs / SaveAsFile via| OUTLOOKCOM
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE

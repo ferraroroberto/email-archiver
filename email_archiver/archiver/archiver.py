@@ -2,18 +2,25 @@
 Email archiver: saves .msg files and extracts attachments to disk.
 
 Naming convention (matches user spec):
+    Email:       NNN - sanitized_subject.msg
+    Attachments: NNN - filename.ext
+
+NNN is a zero-padded 3-digit sequence (000-999) shared by an email and its
+attachments. With ``naming.date_prefix: true`` in the config, the email's sent
+date in local time is prefixed as well:
+
     Email:       YYYY-MM-DD - NNN - sanitized_subject.msg
     Attachments: YYYY-MM-DD - NNN - filename.ext
 
-Where YYYY-MM-DD is the email's sent date in local time, and NNN is a
-zero-padded 3-digit sequence (000-999) shared by an email and its
-attachments. When the sent date cannot be resolved, the legacy undated form
-(``NNN - ...``) is used instead.
+The toggle is off by default. When it is on but the sent date cannot be
+resolved, the undated form is used for that email instead.
 
 Design decisions:
 - Sequence number is derived from the MAXIMUM existing numeric prefix in the
   target folder, not a count, so it is safe even if files were deleted. The
-  scan recognises both the legacy and dated prefix forms.
+  scan recognises both prefix forms regardless of the toggle, so a folder
+  holding a mix of dated and undated files always allocates the next number
+  correctly and the toggle stays safe to flip at any time.
 - Embedded images (ContentId set) are skipped; only real attachments are saved.
 - Subject sanitisation removes characters illegal on Windows file systems.
 - SaveAs uses olMSG format constant (3) to produce a proper .msg file.
@@ -28,7 +35,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from email_archiver.config import DEFAULT_MAX_PATH_LENGTH, get_max_path_length
+from email_archiver.config import (
+    DEFAULT_DATE_PREFIX_ENABLED,
+    DEFAULT_MAX_PATH_LENGTH,
+    get_date_prefix_enabled,
+    get_max_path_length,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +50,7 @@ _OL_MSG_FORMAT = 3
 # Regexes to find the leading sequence number, in either filename form.
 # Dated is tried first since it is the more specific match.
 _RE_DATED_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} - (\d{3}) - ")
-_RE_LEGACY_PREFIX = re.compile(r"^(\d{3}) - ")
+_RE_UNDATED_PREFIX = re.compile(r"^(\d{3}) - ")
 
 # Maximum path length (in chars) the fitted filename must stay within. This is
 # the SAME budget the scanner uses — sourced from config via
@@ -80,10 +92,11 @@ def _fit_filename_to_path(
     max_path: int = DEFAULT_MAX_PATH_LENGTH,
 ) -> str:
     """
-    Build ``"{date_prefix} - {seq} - {stem}{suffix}"`` (or, when
-    ``date_prefix`` is None, the legacy ``"{seq} - {stem}{suffix}"``) such
-    that the full path ``os.path.join(folder_path, filename)`` stays within
-    ``max_path`` chars.
+    Build ``"{seq} - {stem}{suffix}"`` — or, when ``date_prefix`` is given,
+    ``"{date_prefix} - {seq} - {stem}{suffix}"`` — such that the full path
+    ``os.path.join(folder_path, filename)`` stays within ``max_path`` chars.
+    The date prefix costs 13 chars and comes out of the stem's budget, never
+    out of the path limit.
 
     If the stem has to be cut, an ellipsis is appended so the resulting
     filename still hints at the original subject. ``suffix`` is preserved.
@@ -110,8 +123,10 @@ def _fit_filename_to_path(
 
 def get_next_sequence_number(folder_path: str) -> str:
     """
-    Scan the folder for files starting with either the legacy ``NNN - `` or
+    Scan the folder for files starting with either the undated ``NNN - `` or
     the dated ``YYYY-MM-DD - NNN - `` prefix and return (max + 1).
+    Both forms are always recognised, independently of which form this run
+    writes, so a folder holding a mix never gets a colliding number.
     Returns '001' if the folder is empty or has no numbered files.
     """
     try:
@@ -122,7 +137,7 @@ def get_next_sequence_number(folder_path: str) -> str:
 
     numbers: list[int] = []
     for fname in files:
-        m = _RE_DATED_PREFIX.match(fname) or _RE_LEGACY_PREFIX.match(fname)
+        m = _RE_DATED_PREFIX.match(fname) or _RE_UNDATED_PREFIX.match(fname)
         if m:
             numbers.append(int(m.group(1)))
 
@@ -136,10 +151,11 @@ def _get_sent_date_prefix(mail_item: Any) -> str | None:
     """
     Resolve the email's sent date as a ``YYYY-MM-DD`` string in local time.
 
-    Tries ``SentOn`` (the actual send time) first, falling back to
-    ``ReceivedTime``. Returns ``None`` — and logs why — when neither
-    resolves, signalling the caller to fall back to the legacy undated
-    filename form rather than invent a placeholder date.
+    Only called when ``naming.date_prefix`` is on. Tries ``SentOn`` (the
+    actual send time) first, falling back to ``ReceivedTime``. Returns
+    ``None`` — and logs why — when neither resolves, signalling the caller to
+    fall back to the undated filename form rather than invent a placeholder
+    date.
     """
     last_exc: Exception | None = None
     for attr in ("SentOn", "ReceivedTime"):
@@ -158,7 +174,7 @@ def _get_sent_date_prefix(mail_item: Any) -> str | None:
 
     logger.warning(
         "Could not resolve a sent date for this email (%s); "
-        "falling back to the legacy undated filename form",
+        "falling back to the undated filename form",
         last_exc if last_exc is not None else "SentOn and ReceivedTime both empty",
     )
     return None
@@ -169,17 +185,35 @@ def _get_sent_date_prefix(mail_item: Any) -> str | None:
 class EmailArchiver:
     """Saves an Outlook MailItem (COM object) to a target folder on disk."""
 
-    def __init__(self, cfg: dict[str, Any] | None = None) -> None:
-        """Build an archiver bound to a path-length budget.
+    def __init__(
+        self,
+        cfg: dict[str, Any] | None = None,
+        *,
+        date_prefix: bool | None = None,
+    ) -> None:
+        """Build an archiver bound to a path-length budget and a naming form.
 
         ``cfg`` is the loaded config dict; the path budget is read from it via
         the shared ``get_max_path_length`` accessor so the archiver and scanner
-        honour the same ``path.max_length`` knob. When ``cfg`` is omitted the
-        ``DEFAULT_MAX_PATH_LENGTH`` fallback is used.
+        honour the same ``path.max_length`` knob, and the sent-date prefix
+        toggle via ``get_date_prefix_enabled`` (``naming.date_prefix``). When
+        ``cfg`` is omitted the ``DEFAULT_*`` fallbacks are used.
+
+        ``date_prefix`` overrides the configured toggle for this archiver only
+        — the archive dialog passes its checkbox state through here, so the
+        config value is the checkbox's *starting* position rather than the last
+        word. ``None`` (the default) means "use the config".
         """
         self._max_path: int = (
             get_max_path_length(cfg) if cfg is not None else DEFAULT_MAX_PATH_LENGTH
         )
+        self._date_prefix_enabled: bool
+        if date_prefix is not None:
+            self._date_prefix_enabled = date_prefix
+        elif cfg is not None:
+            self._date_prefix_enabled = get_date_prefix_enabled(cfg)
+        else:
+            self._date_prefix_enabled = DEFAULT_DATE_PREFIX_ENABLED
 
     def archive(
         self,
@@ -204,7 +238,9 @@ class EmailArchiver:
             dest.mkdir(parents=True, exist_ok=True)
 
         seq = get_next_sequence_number(folder_path)
-        date_prefix = _get_sent_date_prefix(mail_item)
+        date_prefix = (
+            _get_sent_date_prefix(mail_item) if self._date_prefix_enabled else None
+        )
         result = ArchiveResult(sequence_number=seq)
 
         # ---- save .msg ----

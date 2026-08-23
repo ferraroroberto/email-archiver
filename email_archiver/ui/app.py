@@ -21,8 +21,12 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from email_archiver.archiver.archiver import EmailArchiver
-from email_archiver.config import get_archive_roots
+from email_archiver.config import get_archive_roots, get_date_prefix_enabled
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
+from email_archiver.explorer import (
+    ExplorerUnavailableError,
+    get_current_explorer_folder,
+)
 from email_archiver.outlook.client import EmailData, OutlookClient, get_selected_mail_item
 from email_archiver.ui.dialogs import browse_folder
 
@@ -72,6 +76,11 @@ class ArchiveDialog:
         sh = self._root.winfo_screenheight()
         self._root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         self._root.attributes("-topmost", True)
+
+        # Must exist before _build_ui: the checkbox binds to it. Seeded from
+        # naming.date_prefix so the config sets the default position and the
+        # user can still flip it per archive.
+        self._date_prefix_var = tk.BooleanVar(value=get_date_prefix_enabled(cfg))
 
         self._build_ui()
         self._root.bind("<Escape>", lambda e: self._root.destroy())
@@ -139,12 +148,31 @@ class ArchiveDialog:
             font=(ff, fn),
         ).pack(side="left")
 
+        # Per-archive naming opt-in. Starts at the configured
+        # naming.date_prefix (off unless the config says otherwise); ticking it
+        # applies the date prefix to this archive only, without editing config.
+        tk.Checkbutton(
+            bottom, text="Date prefix (YYYY-MM-DD)",
+            variable=self._date_prefix_var,
+            bg=_BG, activebackground=_BG, fg="#333",
+            font=(ff, fn), padx=8,
+        ).pack(side="left", padx=(12, 0))
+
+        # Cancel is packed first so it sits furthest right; the Explorer-folder
+        # escape hatch is packed after it and therefore lands to its left.
         tk.Button(
             bottom, text="✗  Cancel",
             command=self._root.destroy,
             relief="flat", bg="#e0e0e0", padx=8, pady=4,
             font=(ff, fn),
         ).pack(side="right")
+
+        tk.Button(
+            bottom, text="🗔  Explorer folder",
+            command=self._on_explorer_folder,
+            relief="flat", bg="#e0e0e0", padx=8, pady=4,
+            font=(ff, fn),
+        ).pack(side="right", padx=(0, 8))
 
     # ------------------------------------------------ background loading ---
 
@@ -298,6 +326,38 @@ class ArchiveDialog:
         if chosen:
             self._do_archive(chosen)
 
+    def _on_explorer_folder(self) -> None:
+        """Archive into the folder shown in the foremost open Explorer window.
+
+        The destination is deliberately not restricted to the configured
+        archive roots — the point of this button is to reach a folder the
+        ranked suggestions could not.
+        """
+        try:
+            folder = get_current_explorer_folder()
+        except ExplorerUnavailableError as exc:
+            # Distinct from "nothing is open" — Windows could not be asked, so
+            # saying "open a folder in Explorer" would send the user chasing
+            # the wrong thing.
+            messagebox.showerror(
+                "Cannot read Explorer windows",
+                f"Windows could not tell us which folders are open:\n{exc}\n\n"
+                "Use 'Browse folder…' instead.",
+                parent=self._root,
+            )
+            return
+
+        if not folder:
+            messagebox.showinfo(
+                "No Explorer folder",
+                "No open File Explorer window is showing a real folder.\n\n"
+                "Open the destination folder in Explorer and try again, "
+                "or use 'Browse folder…'.",
+                parent=self._root,
+            )
+            return
+        self._do_archive(folder)
+
     def _do_archive(self, folder_path: str) -> None:
         if not self._email:
             messagebox.showerror("Error", "Email data not available.")
@@ -322,7 +382,9 @@ class ArchiveDialog:
                 messagebox.showerror("Outlook error", f"Cannot access Outlook:\n{exc}")
                 return
 
-            archiver = EmailArchiver(self._cfg)
+            archiver = EmailArchiver(
+                self._cfg, date_prefix=self._date_prefix_var.get()
+            )
             result = archiver.archive(
                 mail_item=mail_item,
                 folder_path=folder_path,
