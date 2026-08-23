@@ -23,7 +23,10 @@ from typing import Any
 from email_archiver.archiver.archiver import EmailArchiver
 from email_archiver.config import get_archive_roots, get_date_prefix_enabled
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
-from email_archiver.explorer import get_current_explorer_folder
+from email_archiver.explorer import (
+    ExplorerUnavailableError,
+    get_current_explorer_folder,
+)
 from email_archiver.outlook.client import EmailData, OutlookClient, get_selected_mail_item
 from email_archiver.ui.dialogs import browse_folder
 
@@ -330,7 +333,20 @@ class ArchiveDialog:
         archive roots — the point of this button is to reach a folder the
         ranked suggestions could not.
         """
-        folder = get_current_explorer_folder()
+        try:
+            folder = get_current_explorer_folder()
+        except ExplorerUnavailableError as exc:
+            # Distinct from "nothing is open" — Windows could not be asked, so
+            # saying "open a folder in Explorer" would send the user chasing
+            # the wrong thing.
+            messagebox.showerror(
+                "Cannot read Explorer windows",
+                f"Windows could not tell us which folders are open:\n{exc}\n\n"
+                "Use 'Browse folder…' instead.",
+                parent=self._root,
+            )
+            return
+
         if not folder:
             messagebox.showinfo(
                 "No Explorer folder",

@@ -1,7 +1,10 @@
 """Tests for the Explorer-window pick — the pure half, no COM required."""
 from __future__ import annotations
 
-from email_archiver.explorer import pick_foremost_folder
+import pytest
+
+import email_archiver.explorer as explorer
+from email_archiver.explorer import ExplorerUnavailableError, pick_foremost_folder
 
 
 def test_no_eligible_windows_returns_none():
@@ -33,3 +36,21 @@ def test_falls_back_to_newest_window_when_z_order_has_no_match():
     # the last-enumerated (newest) window is the closest stand-in.
     folders = {111: r"E:\archive\old", 222: r"E:\archive\newest"}
     assert pick_foremost_folder(folders, []) == r"E:\archive\newest"
+
+
+# ------------------------------------- unreachable shell vs nothing open ----
+
+def test_nothing_open_is_a_real_answer_of_none(monkeypatch):
+    monkeypatch.setattr(explorer, "_enumerate_explorer_folders", dict)
+    assert explorer.get_current_explorer_folder() is None
+
+
+def test_unreachable_shell_raises_rather_than_reading_as_nothing_open(monkeypatch):
+    # Failing to establish the fact must not be folded into "nothing is open" —
+    # they lead the user to two different fixes.
+    def boom():
+        raise OSError("COM server unavailable")
+
+    monkeypatch.setattr(explorer, "_enumerate_explorer_folders", boom)
+    with pytest.raises(ExplorerUnavailableError):
+        explorer.get_current_explorer_folder()

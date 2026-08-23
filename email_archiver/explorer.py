@@ -12,7 +12,10 @@ Two layers, deliberately split:
   tested directly.
 - ``get_current_explorer_folder`` does the Windows-specific part: enumerate the
   shell's open windows, keep the ones showing a real filesystem folder, read the
-  top-level window z-order, and hand both to the pure picker.
+  top-level window z-order, and hand both to the pure picker. It distinguishes
+  "the shell says nothing is open" (``None``) from "the shell could not be
+  asked" (``ExplorerUnavailableError``) — the second is not evidence of the
+  first.
 
 "Foremost" means highest in the z-order — the Explorer window the user looked
 at last, not an arbitrary one from the shell's collection. The archive dialog
@@ -29,6 +32,16 @@ logger = logging.getLogger(__name__)
 # Shell windows whose hosting executable is not Explorer (legacy Internet
 # Explorer instances still surface in the same collection) are not destinations.
 _EXPLORER_EXE = "explorer.exe"
+
+
+class ExplorerUnavailableError(RuntimeError):
+    """The Windows shell could not be queried at all.
+
+    Distinct from "no Explorer window is open", which is a real answer to the
+    question. Failing to establish the fact is its own state and gets its own
+    message — collapsing the two would tell the user to open a folder in
+    Explorer when the actual problem is that COM is unreachable.
+    """
 
 
 def pick_foremost_folder(
@@ -104,9 +117,11 @@ def get_current_explorer_folder() -> str | None:
     """
     Return the filesystem path shown in the foremost open File Explorer window.
 
-    Returns ``None`` — and logs why — when no Explorer window is showing a real
-    folder, or when the shell cannot be reached at all. The caller is expected
-    to tell the user rather than pick a destination of its own.
+    Returns ``None`` — and logs it — when the shell answered but no Explorer
+    window is showing a real folder. Raises ``ExplorerUnavailableError`` when
+    the shell could not be asked at all; the caller must not read that as
+    "nothing is open". Either way the caller tells the user rather than picking
+    a destination of its own.
     """
     try:
         import pythoncom  # noqa: PLC0415 - Windows-only, imported at use site
@@ -117,13 +132,13 @@ def get_current_explorer_folder() -> str | None:
         pythoncom.CoInitialize()
     except Exception as exc:
         logger.warning("Cannot initialise COM to read Explorer windows: %s", exc)
-        return None
+        raise ExplorerUnavailableError(str(exc)) from exc
 
     try:
         folders = _enumerate_explorer_folders()
     except Exception as exc:
         logger.warning("Cannot enumerate Explorer windows: %s", exc)
-        return None
+        raise ExplorerUnavailableError(str(exc)) from exc
 
     if not folders:
         logger.info("No open File Explorer window is showing a real folder")
