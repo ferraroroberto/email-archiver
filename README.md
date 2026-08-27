@@ -297,11 +297,10 @@ CREATE VIRTUAL TABLE emails_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 1'
 );
 
--- Aggregated folder stats (used by suggestion engine)
+-- Plain registry of folders the scanner has seen
 CREATE TABLE folders (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     folder_path  TEXT UNIQUE NOT NULL,
-    email_count  INTEGER NOT NULL DEFAULT 0,
     last_updated TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```

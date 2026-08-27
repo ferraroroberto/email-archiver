@@ -30,7 +30,6 @@ class EmailData:
     sender: str = ""
     recipients: str = ""           # semicolon-separated SMTP addresses
     date_sent: datetime | None = None
-    body: str = ""
     raw_item: Any = None           # the COM MailItem – only used by archiver
 
 
@@ -244,7 +243,6 @@ class OutlookClient:
                 sender=_get_sender_smtp(item),
                 recipients=_get_recipients_smtp(item),
                 date_sent=date_sent,
-                body=item.Body[:2000] if item.Body else "",
                 raw_item=item,
             )
 

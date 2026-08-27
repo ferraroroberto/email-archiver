@@ -5,8 +5,9 @@ Design notes:
 - SQLite FTS5 is used for full-text search over subject/sender/recipients/body.
   FTS5 is built into Python's sqlite3 on Windows; no extra dependency needed.
 - Triggers keep the FTS index in sync with the emails table automatically.
-- The folders table is a denormalized summary updated by the scanner for fast
-  folder-level scoring in the suggestion engine.
+- The folders table is a plain registry of folders the scanner has seen
+  (path + last-scanned timestamp); the suggestion engine scores folders by
+  aggregating per-email FTS matches in Python, not by reading this table.
 - WAL journal mode allows concurrent reads during a long scan without blocking
   the archive command.
 """
@@ -72,11 +73,10 @@ AFTER UPDATE ON emails BEGIN
 END;
 
 -- --------------------------------------------------------------- folders ---
--- Aggregated per-folder stats used by the suggestion engine for scoring.
+-- Plain registry of folders the scanner has seen (path + last-scanned time).
 CREATE TABLE IF NOT EXISTS folders (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     folder_path  TEXT    UNIQUE NOT NULL,
-    email_count  INTEGER NOT NULL DEFAULT 0,
     last_updated TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 

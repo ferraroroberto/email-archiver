@@ -101,7 +101,7 @@ class EmailRepository:
         )
 
     def upsert_folder(self, folder_path: str) -> None:
-        """Upsert folder record; email_count is refreshed separately."""
+        """Upsert folder record's last-seen timestamp."""
         self._conn.execute(
             """
             INSERT INTO folders (folder_path, last_updated)
@@ -110,17 +110,6 @@ class EmailRepository:
                 last_updated = datetime('now')
             """,
             (folder_path,),
-        )
-
-    def refresh_folder_counts(self) -> None:
-        """Recompute email_count for all folders from the emails table."""
-        self._conn.execute(
-            """
-            UPDATE folders SET email_count = (
-                SELECT COUNT(*) FROM emails
-                WHERE emails.folder_path = folders.folder_path
-            )
-            """
         )
 
     def delete_missing_emails(self, known_paths: Sequence[str]) -> int:
@@ -137,9 +126,6 @@ class EmailRepository:
             known_paths,
         )
         return cur.rowcount
-
-    def commit(self) -> None:
-        self._conn.commit()
 
     # -------------------------------------------------- read operations ----
 
