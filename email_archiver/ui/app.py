@@ -415,19 +415,31 @@ class ScanWindow:
 
     def __init__(self, cfg: dict) -> None:
         self._cfg = cfg
-        self._stop_flag: list[bool] = [False]
+        self._stop_flag = threading.Event()
+        self._start_btn: tk.Button | None = None
+        self._cancel_btn: tk.Button | None = None
 
-    def run(self) -> None:
-        root = tk.Tk()
-        root.title("Email Archiver – Scan Archive")
-        root.configure(bg=_BG)
-        root.resizable(False, False)
+        self._root = tk.Tk()
+        self._root.title("Email Archiver – Scan Archive")
+        self._root.configure(bg=_BG)
+        self._root.resizable(False, False)
 
+        self._build_ui()
+
+        self._root.update_idletasks()
+        sw, sh = self._root.winfo_screenwidth(), self._root.winfo_screenheight()
+        rw = 620
+        rh = self._root.winfo_reqheight() + 10
+        self._root.geometry(f"{rw}x{rh}+{(sw - rw) // 2}+{(sh - rh) // 2}")
+
+    # --------------------------------------------------------- UI build ----
+
+    def _build_ui(self) -> None:
         ff = self._cfg["ui"]["font_family"]
         fn = self._cfg["ui"]["font_size_normal"]
         ft = self._cfg["ui"]["font_size_title"]
 
-        hdr = tk.Frame(root, bg=_ACCENT, pady=10)
+        hdr = tk.Frame(self._root, bg=_ACCENT, pady=10)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🗂  Scan Archive", bg=_ACCENT, fg="white",
                  font=(ff, ft, "bold"), padx=16).pack(side="left")
@@ -435,122 +447,117 @@ class ScanWindow:
         roots = get_archive_roots(self._cfg)
         text = "Archive roots:\n" + "\n".join(str(r) for r in roots)
         info = tk.Label(
-            root,
+            self._root,
             text=text,
             bg=_BG, font=(ff, fn), anchor="w", padx=14, pady=8,
             wraplength=580, justify="left",
         )
         info.pack(fill="x")
 
-        bar = ttk.Progressbar(root, mode="indeterminate", length=560)
-        bar.pack(padx=14, pady=4)
+        self._bar = ttk.Progressbar(self._root, mode="indeterminate", length=560)
+        self._bar.pack(padx=14, pady=4)
 
-        status_var = tk.StringVar(value="Click 'Start Scan' to begin.")
-        status_lbl = tk.Label(root, textvariable=status_var,
+        self._status_var = tk.StringVar(value="Click 'Start Scan' to begin.")
+        status_lbl = tk.Label(self._root, textvariable=self._status_var,
                               bg=_BG, font=(ff, fn), fg="#555",
                               anchor="w", padx=14, pady=4, wraplength=560)
         status_lbl.pack(fill="x")
 
-        detail_var = tk.StringVar(value="")
-        tk.Label(root, textvariable=detail_var, bg=_BG,
+        self._detail_var = tk.StringVar(value="")
+        tk.Label(self._root, textvariable=self._detail_var, bg=_BG,
                  font=(ff, fn - 1), fg="#999", anchor="w",
                  padx=14, wraplength=560).pack(fill="x")
 
-        btn_frame = tk.Frame(root, bg=_BG)
+        btn_frame = tk.Frame(self._root, bg=_BG)
         btn_frame.pack(pady=10)
 
-        start_btn: list[tk.Button] = []
-        cancel_btn: list[tk.Button] = []
-
-        def on_progress(current: int, total: int, path: str) -> None:
-            if total > 0:
-                pct = int(current / total * 100)
-                bar["value"] = pct
-                status_var.set(f"Indexing {current:,} / {total:,}  ({pct}%)")
-            else:
-                status_var.set(f"Indexing {current:,} files…")
-            detail_var.set(path[-70:] if len(path) > 70 else path)
-
-        def on_quit() -> None:
-            root.destroy()
-
-        def do_scan() -> None:
-            start_btn[0].config(state="disabled", text="Scanning…")
-            cancel_btn[0].config(state="normal", text="✗  Cancel", command=on_cancel)
-            cancel_btn[0].pack(side="left", padx=6)
-            bar.config(mode="determinate")
-            self._stop_flag[0] = False
-
-            from email_archiver.scanner.scanner import FolderScanner
-
-            def worker() -> None:
-                try:
-                    scanner = FolderScanner(self._cfg)
-                    stats = scanner.scan(
-                        progress_callback=lambda c, t, p: root.after(
-                            0, lambda c=c, t=t, p=p: on_progress(c, t, p)
-                        ),
-                        stop_flag=self._stop_flag,
-                    )
-                    root.after(0, lambda: on_done(stats))
-                except Exception as exc:
-                    root.after(0, lambda: on_error(exc))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def on_done(stats: Any) -> None:
-            deleted_part = f", {stats.deleted:,} deleted" if stats.deleted else ""
-            was_cancelled = self._stop_flag[0]
-            if was_cancelled:
-                icon, label = "⏹", "Cancelled"
-                bar["value"] = int(stats.total_found and
-                                   (stats.newly_indexed + stats.updated + stats.skipped)
-                                   / stats.total_found * 100)
-            else:
-                icon, label = "✓", "Done"
-                bar["value"] = 100
-            status_var.set(
-                f"{icon}  {label} — {stats.newly_indexed:,} new, "
-                f"{stats.updated:,} updated, {stats.skipped:,} skipped"
-                f"{deleted_part}, {stats.errors:,} errors  "
-                f"({stats.duration_seconds:.1f}s)"
-            )
-            detail_var.set("")
-            start_btn[0].config(state="normal", text="↺  Scan Again")
-            cancel_btn[0].config(state="normal", text="✕  Quit", command=on_quit)
-
-        def on_error(exc: Exception) -> None:
-            status_var.set(f"⚠  Error: {exc}")
-            start_btn[0].config(state="normal", text="↺  Retry")
-            cancel_btn[0].config(state="normal", text="✕  Quit", command=on_quit)
-
-        def on_cancel() -> None:
-            self._stop_flag[0] = True
-            status_var.set("⏹  Cancelling… finishing current file, please wait.")
-            detail_var.set("")
-            cancel_btn[0].config(state="disabled", text="Cancelling…")
-
-        btn = tk.Button(btn_frame, text="▶  Start Scan",
-                        command=do_scan, relief="flat",
+        self._start_btn = tk.Button(btn_frame, text="▶  Start Scan",
+                        command=self._do_scan, relief="flat",
                         bg=_ACCENT, fg="white",
                         font=(ff, fn, "bold"), padx=12, pady=5)
-        btn.pack(side="left", padx=6)
-        start_btn.append(btn)
+        self._start_btn.pack(side="left", padx=6)
 
         # Secondary button: hidden at idle, shown once scan starts.
         # Text/command cycle: Cancel → Cancelling… → Quit.
-        cbtn = tk.Button(btn_frame, text="✗  Cancel", command=on_cancel,
-                         relief="flat", bg="#e0e0e0",
-                         font=(ff, fn), padx=8, pady=5)
-        cancel_btn.append(cbtn)
-        # cbtn is intentionally NOT packed here; do_scan() packs it.
+        self._cancel_btn = tk.Button(
+            btn_frame, text="✗  Cancel", command=self._on_cancel,
+            relief="flat", bg="#e0e0e0",
+            font=(ff, fn), padx=8, pady=5,
+        )
+        # _cancel_btn is intentionally NOT packed here; _do_scan() packs it.
 
-        root.update_idletasks()
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        rw = 620
-        rh = root.winfo_reqheight() + 10
-        root.geometry(f"{rw}x{rh}+{(sw - rw) // 2}+{(sh - rh) // 2}")
-        root.mainloop()
+    # ------------------------------------------------------------ handlers -
+
+    def _on_progress(self, current: int, total: int, path: str) -> None:
+        if total > 0:
+            pct = int(current / total * 100)
+            self._bar["value"] = pct
+            self._status_var.set(f"Indexing {current:,} / {total:,}  ({pct}%)")
+        else:
+            self._status_var.set(f"Indexing {current:,} files…")
+        self._detail_var.set(path[-70:] if len(path) > 70 else path)
+
+    def _on_quit(self) -> None:
+        self._root.destroy()
+
+    def _do_scan(self) -> None:
+        self._start_btn.config(state="disabled", text="Scanning…")
+        self._cancel_btn.config(state="normal", text="✗  Cancel", command=self._on_cancel)
+        self._cancel_btn.pack(side="left", padx=6)
+        self._bar.config(mode="determinate")
+        self._stop_flag.clear()
+
+        from email_archiver.scanner.scanner import FolderScanner
+
+        def worker() -> None:
+            try:
+                scanner = FolderScanner(self._cfg)
+                stats = scanner.scan(
+                    progress_callback=lambda c, t, p: self._root.after(
+                        0, lambda c=c, t=t, p=p: self._on_progress(c, t, p)
+                    ),
+                    stop_flag=self._stop_flag,
+                )
+                self._root.after(0, lambda: self._on_done(stats))
+            except Exception as exc:
+                self._root.after(0, lambda: self._on_error(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_done(self, stats: Any) -> None:
+        deleted_part = f", {stats.deleted:,} deleted" if stats.deleted else ""
+        was_cancelled = self._stop_flag.is_set()
+        if was_cancelled:
+            icon, label = "⏹", "Cancelled"
+            self._bar["value"] = int(stats.total_found and
+                               (stats.newly_indexed + stats.updated + stats.skipped)
+                               / stats.total_found * 100)
+        else:
+            icon, label = "✓", "Done"
+            self._bar["value"] = 100
+        self._status_var.set(
+            f"{icon}  {label} — {stats.newly_indexed:,} new, "
+            f"{stats.updated:,} updated, {stats.skipped:,} skipped"
+            f"{deleted_part}, {stats.errors:,} errors  "
+            f"({stats.duration_seconds:.1f}s)"
+        )
+        self._detail_var.set("")
+        self._start_btn.config(state="normal", text="↺  Scan Again")
+        self._cancel_btn.config(state="normal", text="✕  Quit", command=self._on_quit)
+
+    def _on_error(self, exc: Exception) -> None:
+        self._status_var.set(f"⚠  Error: {exc}")
+        self._start_btn.config(state="normal", text="↺  Retry")
+        self._cancel_btn.config(state="normal", text="✕  Quit", command=self._on_quit)
+
+    def _on_cancel(self) -> None:
+        self._stop_flag.set()
+        self._status_var.set("⏹  Cancelling… finishing current file, please wait.")
+        self._detail_var.set("")
+        self._cancel_btn.config(state="disabled", text="Cancelling…")
+
+    def run(self) -> None:
+        self._root.mainloop()
 
 
 # =========================================================== launcher app ===
