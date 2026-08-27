@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -116,7 +117,7 @@ class FolderScanner:
     def scan(
         self,
         progress_callback: ProgressCallback | None = None,
-        stop_flag: list[bool] | None = None,
+        stop_flag: threading.Event | None = None,
     ) -> ScanStats:
         """
         Run a full incremental scan of the archive root.
@@ -124,7 +125,8 @@ class FolderScanner:
         Args:
             progress_callback: called as (processed, total_estimate, current_path).
                                total_estimate may be 0 if unknown.
-            stop_flag: a single-element list [False]; set to [True] to abort.
+            stop_flag: set it to signal the scan should abort after the
+                       current file.
         """
         for root in self._roots:
             if not root.exists():
@@ -159,7 +161,7 @@ class FolderScanner:
         indexed_folders: set[str] = set()
 
         for idx, file_path in enumerate(all_msg_paths):
-            if stop_flag and stop_flag[0]:
+            if stop_flag is not None and stop_flag.is_set():
                 logger.info("Scan aborted by user after %d files.", idx)
                 break
 
@@ -218,7 +220,7 @@ class FolderScanner:
         # Remove DB entries for files that no longer exist on disk.
         # Only run the purge when the scan was not aborted mid-way, to avoid
         # deleting entries for files we simply haven't visited yet.
-        aborted = stop_flag and stop_flag[0]
+        aborted = stop_flag is not None and stop_flag.is_set()
         if not aborted:
             stats.deleted = repo.delete_missing_emails(all_msg_paths)
             if stats.deleted:
