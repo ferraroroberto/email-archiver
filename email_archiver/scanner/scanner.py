@@ -227,9 +227,6 @@ class FolderScanner:
                 logger.info("Purged %d deleted email(s) from index.", stats.deleted)
             conn.commit()
 
-        repo.refresh_folder_counts()
-        conn.commit()
-
         stats.duration_seconds = (datetime.now() - start).total_seconds()
         logger.info(
             "Scan complete: %d new, %d updated, %d skipped, %d errors in %.1fs",
