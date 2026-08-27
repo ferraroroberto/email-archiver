@@ -101,7 +101,7 @@ archiver/
 │   └── emails.db                ← SQLite database (auto-created on first scan)
 │
 ├── logs/
-│   └── archiver.log             ← Rotating log file
+│   └── archiver.log             ← Log file (plain FileHandler, not rotated)
 │
 ├── email_archiver/              ← Main package
 │   ├── config.py                ← YAML loader, path resolution, logging setup
@@ -127,6 +127,10 @@ archiver/
 │   └── ui/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Native folder-picker wrapper
+│
+├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, is_running regression)
+├── docs/
+│   └── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure
 │
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
@@ -229,6 +233,18 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 # Full launcher with both buttons + DB stats
 & .\.venv\Scripts\python.exe main_ui.py
 ```
+
+---
+
+## Verification
+
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, and the `is_running()` regression. Run it before declaring any change done:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/
+```
+
+`pytest` is a dev-only dependency — see `requirements.txt`.
 
 ---
 

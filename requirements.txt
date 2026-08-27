@@ -23,3 +23,6 @@ rapidfuzz>=3.0
 
 # Optional: faster process list for is_running() check
 psutil>=5.9
+
+# Dev dependency: test suite (tests/) – not required at runtime
+pytest>=8.0
