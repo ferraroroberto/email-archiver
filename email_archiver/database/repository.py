@@ -117,14 +117,30 @@ class EmailRepository:
         Remove DB entries whose files no longer exist on disk.
         Called at the end of a full scan to purge deleted emails.
         Returns the number of rows deleted.
+
+        Goes via a temp table rather than binding one SQL parameter per known
+        path: SQLite's ``SQLITE_LIMIT_VARIABLE_NUMBER`` is 32,766, so a
+        one-placeholder-per-file query raises ``OperationalError: too many SQL
+        variables`` once the archive passes that many files -- after the
+        indexing pass has already completed, aborting the purge (#43). The
+        temp table keeps this independent of file count; caller commits (same
+        pattern as ``upsert_email``/``upsert_folder``).
         """
         if not known_paths:
             return 0
-        placeholders = ",".join("?" * len(known_paths))
-        cur = self._conn.execute(
-            f"DELETE FROM emails WHERE file_path NOT IN ({placeholders})",
-            known_paths,
+        self._conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS tmp_known_paths (path TEXT PRIMARY KEY)"
         )
+        self._conn.execute("DELETE FROM tmp_known_paths")
+        self._conn.executemany(
+            "INSERT INTO tmp_known_paths (path) VALUES (?)",
+            [(p,) for p in known_paths],
+        )
+        cur = self._conn.execute(
+            "DELETE FROM emails WHERE file_path NOT IN "
+            "(SELECT path FROM tmp_known_paths)"
+        )
+        self._conn.execute("DROP TABLE tmp_known_paths")
         return cur.rowcount
 
     # -------------------------------------------------- read operations ----
