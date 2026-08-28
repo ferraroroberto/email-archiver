@@ -58,6 +58,12 @@ _RE_UNDATED_PREFIX = re.compile(r"^(\d{3}) - ")
 # ``config.DEFAULT_MAX_PATH_LENGTH`` for the rationale behind the value.
 _ELLIPSIS = "..."
 
+# Bound on the attachment de-duplication loop in ``_save_attachments`` — a
+# fitter regression (or a pathological folder with dozens of same-name
+# attachments already saved) degrades to a logged, skipped attachment instead
+# of hanging the caller's thread forever.
+_MAX_DEDUPE_ATTEMPTS = 100
+
 
 # ----------------------------------------------------------------- types ----
 
@@ -343,16 +349,35 @@ class EmailArchiver:
                 )
                 att_path = os.path.join(folder_path, att_filename)
                 # Avoid overwrite if multiple attachments share the same name.
-                # The disambiguation suffix is folded into the stem before fitting,
-                # so the final path still respects the Windows MAX_PATH budget.
+                # The disambiguating counter is appended to the *suffix* (not
+                # folded into the stem) so its width comes out of the stem's
+                # fit budget on every iteration via the normal `fixed` term —
+                # folding it into the stem instead left `stem_budget` (which
+                # depends only on folder/prefix/suffix length, never the
+                # stem) unchanged across iterations, so once truncation
+                # kicked in every attempt truncated to the exact same
+                # characters and `os.path.exists` never went False (#43).
+                # Bounded so a fitter regression degrades to a logged, skipped
+                # attachment instead of hanging the caller's thread.
                 counter = 2
                 while os.path.exists(att_path):
+                    if counter > _MAX_DEDUPE_ATTEMPTS:
+                        logger.error(
+                            "Could not find a non-colliding filename for "
+                            "attachment %r in %s after %d attempts; skipping",
+                            original_name, folder_path, _MAX_DEDUPE_ATTEMPTS,
+                        )
+                        att_path = None
+                        break
                     att_filename = _fit_filename_to_path(
-                        folder_path, seq, f"{stem}_{counter}", suffix,
+                        folder_path, seq, stem, f"_{counter}{suffix}",
                         date_prefix=date_prefix, max_path=self._max_path,
                     )
                     att_path = os.path.join(folder_path, att_filename)
                     counter += 1
+
+                if att_path is None:
+                    continue
 
                 attachment.SaveAsFile(att_path)
                 saved.append(att_path)
