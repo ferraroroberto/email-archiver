@@ -39,7 +39,7 @@ flowchart TB
   EXPLORER -->|Shell.Application / EnumWindows| SHELLCOM["Windows shell\n(open File Explorer windows)"]
 
   subgraph scan["Scan Archive data flow"]
-    SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits"]
+    SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits,\nreads the Outlook follow-up flag"]
   end
   SCANWINDOW --> SCANNER
   MAINSCAN -->|--no-ui| SCANNER
@@ -49,7 +49,7 @@ flowchart TB
 
   subgraph db["email_archiver/database/"]
     REPO["repository.py: EmailRepository\nall SQL — upsert_email, upsert_folder,\nsuggest_folders (FTS5 BM25 query)"]
-    MODELS["models.py\nDDL — emails table, emails_fts (FTS5),\nfolders table, sync triggers, get_connection/init_db"]
+    MODELS["models.py\nDDL — emails table, emails_fts (FTS5),\nfolders table, sync triggers, get_connection/init_db,\nALTERs in columns an older emails table lacks"]
   end
   SCANNER --> REPO
   REPO --> MODELS

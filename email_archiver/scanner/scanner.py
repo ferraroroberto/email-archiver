@@ -7,6 +7,10 @@ Design decisions:
 - Batch commits: writes to DB every `batch_size` records to balance memory
   usage vs. write overhead.
 - Errors in individual .msg files are logged and skipped; the scan continues.
+- Records Outlook's follow-up flag (`flag_status`) so downstream tools can turn
+  a flagged mail into a task. The flag is written into the .msg at archive time
+  by `SaveAs`, so flagging a message *after* it is archived changes nothing --
+  the file on disk is a snapshot. Flag first, then archive.
 - progress_callback(current, total, current_file) is called after each file
   so the UI can update a progress bar without polling.
 """
@@ -44,9 +48,25 @@ def _safe_str(value: object) -> str:
     return str(value).strip() if value else ""
 
 
+# MAPI PidTagFlagStatus, PT_LONG. The `0003` type suffix is part of the key and
+# a wrong one returns None rather than raising -- verified against .msg files
+# Outlook wrote with SaveAs: a flagged item reads 2, an unflagged item has no
+# 0x1090 property at all. So "absent" means unflagged, not "read failed".
+_PR_FLAG_STATUS = "10900003"
+FLAG_FOLLOWUP = 2
+
+
+def _flag_status(msg: object) -> int:
+    """The follow-up flag Outlook stored in the .msg, or 0 when there is none."""
+    try:
+        return int(msg.getPropertyVal(_PR_FLAG_STATUS) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def _extract_msg_metadata(
     file_path: str, body_preview_len: int
-) -> dict[str, str] | None:
+) -> dict[str, object] | None:
     """
     Open a .msg file and extract metadata.
     Returns None on any read error (error is logged).
@@ -74,6 +94,7 @@ def _extract_msg_metadata(
                 "recipients": recipients,
                 "body_preview": body,
                 "date_sent": date_sent,
+                "flag_status": _flag_status(msg),
             }
 
     except (InvalidFileFormatError, UnrecognizedMSGTypeError) as exc:

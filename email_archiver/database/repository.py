@@ -29,6 +29,10 @@ class EmailRecord:
     date_sent: str = ""
     body_preview: str = ""
     file_mtime: float = 0.0
+    # MAPI PidTagFlagStatus: 2 = flagged for follow-up, 0 = not flagged. The
+    # scanner always supplies it, so 0 here means "read, unflagged" -- unlike a
+    # NULL in the column, which means "indexed before the scanner read it".
+    flag_status: int = 0
     id: int | None = None
 
 
@@ -82,8 +86,8 @@ class EmailRepository:
             """
             INSERT INTO emails
                 (file_path, folder_path, filename, subject, sender,
-                 recipients, date_sent, body_preview, file_mtime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 recipients, date_sent, body_preview, file_mtime, flag_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_path) DO UPDATE SET
                 subject      = excluded.subject,
                 sender       = excluded.sender,
@@ -91,12 +95,14 @@ class EmailRepository:
                 date_sent    = excluded.date_sent,
                 body_preview = excluded.body_preview,
                 file_mtime   = excluded.file_mtime,
+                flag_status  = excluded.flag_status,
                 indexed_at   = datetime('now')
             """,
             (
                 rec.file_path, rec.folder_path, rec.filename,
                 rec.subject, rec.sender, rec.recipients,
                 rec.date_sent, rec.body_preview, rec.file_mtime,
+                rec.flag_status,
             ),
         )
 

@@ -287,7 +287,8 @@ CREATE TABLE emails (
     date_sent    TEXT,                   -- ISO-8601
     body_preview TEXT,                   -- first 500 chars of plain text
     file_mtime   REAL NOT NULL,          -- for incremental scan (os.stat)
-    indexed_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    indexed_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    flag_status  INTEGER                  -- Outlook follow-up flag; see below
 );
 
 -- FTS5 full-text index (kept in sync via triggers)
@@ -308,6 +309,17 @@ CREATE TABLE folders (
 The FTS5 index is automatically kept in sync with the `emails` table via `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` triggers — no manual maintenance needed.
 
 WAL journal mode is enabled so the archive command can read the DB while a scan is running in another process without blocking.
+
+### The follow-up flag (`flag_status`)
+
+`flag_status` records Outlook's follow-up flag, read from the archived `.msg` as MAPI `PidTagFlagStatus` (`0x1090`): **2** = flagged for follow-up, **1** = flagged then completed, **0** = read, and not flagged. It exists so other tools can turn a flagged mail into a task — task-os polls it read-only and raises one Inbox task per flagged message.
+
+Two things about it are easy to get wrong:
+
+- **Flag first, then archive.** The flag is written into the `.msg` at archive time, by the same `SaveAs` call that creates the file. The archived file is a snapshot: flagging a message in Outlook *after* it has been archived changes nothing on disk, and no re-scan will see it.
+- **`NULL` is not `0`.** A row indexed before this column existed reads `NULL`, meaning *the property was never read* — a different fact from `0`, *read, and not flagged*. Existing rows keep `NULL` until their file changes and is re-indexed. That is deliberate and costs nothing: Outlook does not preserve the flag through filing, so an already-archived backlog carries no flags to find (a random sample of 600 of ~18k archived files found none).
+
+The column is added to an existing database automatically on the next run — `init_db` ALTERs in any column the `emails` table is missing, because its `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists.
 
 ---
 
