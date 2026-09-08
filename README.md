@@ -277,7 +277,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing`, `bad_input`, `outlook_unavailable`, `com_unavailable`. |
+| `2` | The run could not start. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
 
