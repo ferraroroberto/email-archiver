@@ -105,7 +105,8 @@ archiver/
 │
 ├── email_archiver/              ← Main package
 │   ├── config.py                ← YAML loader, path resolution, logging setup
-│   ├── text.py                  ← Shared subject normalisation (Re:/Fwd: stripping)
+│   ├── text.py                  ← Shared subject + Message-ID normalisation
+│   ├── batch.py                 ← Headless plan/apply/revert orchestration (no COM, no tkinter)
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
 │   ├── database/
@@ -128,13 +129,14 @@ archiver/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Native folder-picker wrapper
 │
-├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, is_running regression)
+├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, is_running regression, Message-ID, batch verbs)
 ├── docs/
 │   └── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure
 │
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
+├── main_batch.py                ← Headless entry: plan / apply / revert the whole Inbox (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 └── requirements.txt
@@ -238,13 +240,68 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, and the `is_running()` regression. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
 ```
 
 `pytest` is a dev-only dependency — see `requirements.txt`.
+
+---
+
+## Batch mode (headless)
+
+`main_batch.py` is the archiver's headless face: three verbs that file the **whole Inbox** in one run instead of one selected mail at a time, each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
+& .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json
+& .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
+```
+
+| Verb | Reads | Does |
+|---|---|---|
+| `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10). Read-only. |
+| `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. |
+| `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes the category and moves the mail back to the Inbox. |
+
+An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
+
+### Identity: the Message-ID, not the EntryID
+
+Outlook rewrites a mail's `EntryID` when it is moved between folders, which is exactly what `apply` does to every mail it files. So the identity that ties the three verbs together is the **Internet Message-ID** (MAPI `PR_INTERNET_MESSAGE_ID`), stored without its angle brackets. The scanner records it for every `.msg` it indexes, which is what lets `plan` mark a mail as `already_archived` instead of offering to file it a second time. A mail carrying no Message-ID (rare — drafts, some system mail) is reported under `skipped` with `reason: "no_message_id"` and left alone, never guessed at.
+
+### Exit codes and error handling
+
+| Exit | Meaning |
+|---|---|
+| `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
+| `2` | The run could not start. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing`, `bad_input`, `outlook_unavailable`, `com_unavailable`. |
+
+Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`.
+
+`apply` fills in a result's `files` **before** it moves the mail, so a mail that was written to disk but failed to move is still fully revertible — that is why a result can carry `ok: false` and a non-empty `files` at the same time.
+
+Every document carries `schema_version`, so a consumer can refuse a shape it does not understand rather than read a field that silently moved.
+
+### Safety
+
+- `revert` deletes **only** the files it is given, and only those that resolve inside `archive.root_paths`. Anything else is refused per file with a reason (`outside_archive_roots`, `unresolvable_path`) and left on disk.
+- A file already gone is reported as `missing`, not as an error — running a revert twice is not a failure to explain.
+- Outlook closed at `plan` time is **started** (the registered `outlook.exe`, visible, exactly as your own shortcut would) and waited for, bounded by `--start-timeout` (60 s by default). A still-unreachable Outlook is a loud exit 2, never an empty Inbox nobody read.
+- Batch mode is meant to be spawned with a timeout. A COM modal — the address-book security prompt, a profile chooser — then blocks *this* process, which the caller can kill, and never the caller.
+- The `date_prefix` flag is per mail and comes from the caller. Batch mode deliberately does **not** read the global `naming.date_prefix` toggle, because the right form depends on the destination folder.
+
+### Configuration
+
+```yaml
+outlook:
+  archive_folder: "Archive"           # created under the mailbox root if missing
+  category: "Archived by task-os"     # stamped by apply, removed by revert
+```
+
+Both keys are optional and fall back to the values above. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated.
 
 ---
 
@@ -288,7 +345,8 @@ CREATE TABLE emails (
     body_preview TEXT,                   -- first 500 chars of plain text
     file_mtime   REAL NOT NULL,          -- for incremental scan (os.stat)
     indexed_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    flag_status  INTEGER                  -- Outlook follow-up flag; see below
+    flag_status  INTEGER,                 -- Outlook follow-up flag; see below
+    message_id   TEXT                     -- Internet Message-ID; see below
 );
 
 -- FTS5 full-text index (kept in sync via triggers)
@@ -320,6 +378,13 @@ Two things about it are easy to get wrong:
 - **`NULL` is not `0`.** A row indexed before this column existed reads `NULL`, meaning *the property was never read* — a different fact from `0`, *read, and not flagged*. Existing rows keep `NULL` until their file changes and is re-indexed. That is deliberate and costs nothing: Outlook does not preserve the flag through filing, so an already-archived backlog carries no flags to find (a random sample of 600 of ~18k archived files found none).
 
 The column is added to an existing database automatically on the next run — `init_db` ALTERs in any column the `emails` table is missing, because its `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists.
+
+### The Internet Message-ID (`message_id`)
+
+`message_id` records the mail's `Message-ID` header (MAPI `PR_INTERNET_MESSAGE_ID`, `0x1035001F`) read back out of the archived `.msg`, stored **without** its angle brackets so both sides of the app spell it the same way. It exists for [batch mode](#batch-mode-headless): it is the only identity that survives a mail being moved between Outlook folders, so it is what lets `plan` recognise a mail that is already filed and what pairs a `revert` with the files written for it.
+
+- **`NULL` is not `""`.** A row indexed before this column existed reads `NULL`, *the header was never read*; a `.msg` that genuinely carries no `Message-ID` reads `""`. Neither ever matches a lookup — two mails with no Message-ID are not the same mail.
+- Added to an existing database the same way `flag_status` was, plus an index on the column created **after** the ALTER — declaring it alongside the `CREATE TABLE` would run it against a column an existing database does not have yet and take the whole scan down with it.
 
 ---
 

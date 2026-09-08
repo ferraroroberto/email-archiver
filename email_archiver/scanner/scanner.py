@@ -11,6 +11,10 @@ Design decisions:
   a flagged mail into a task. The flag is written into the .msg at archive time
   by `SaveAs`, so flagging a message *after* it is archived changes nothing --
   the file on disk is a snapshot. Flag first, then archive.
+- Records the Internet Message-ID (`message_id`) so the batch verbs can tell an
+  Inbox mail that is already archived from one that is not, and can pair a
+  revert with the files written for it. Outlook's EntryID cannot serve: it
+  changes when the mail is moved between folders.
 - progress_callback(current, total, current_file) is called after each file
   so the UI can update a progress bar without polling.
 """
@@ -31,6 +35,7 @@ from email_archiver.config import get_archive_roots, get_max_path_length
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.text import clean_subject as _clean_subject_base
+from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,35 @@ def _flag_status(msg: object) -> int:
         return 0
 
 
+# MAPI PidTagInternetMessageId, PT_UNICODE. Same key shape as the flag above:
+# the `001F` type suffix is part of the key. extract-msg exposes the header as
+# `.messageId`, but that property is absent on some message classes, so the raw
+# proptag is the fallback rather than the other way round.
+_PR_INTERNET_MESSAGE_ID = "1035001F"
+
+
+def _message_id(msg: object) -> str:
+    """The Internet Message-ID stored in the .msg, normalised, or ``""``.
+
+    This is the identity the batch verbs pair a live Outlook mail with the file
+    archived from it: Outlook's ``EntryID`` changes the moment a mail is moved
+    between folders, the Message-ID does not. ``""`` means the file carries no
+    such header (rare -- drafts, some system mail), which is a real answer the
+    batch layer reports rather than a read failure.
+    """
+    raw = None
+    try:
+        raw = msg.messageId
+    except (AttributeError, TypeError, ValueError):
+        raw = None
+    if not raw:
+        try:
+            raw = msg.getPropertyVal(_PR_INTERNET_MESSAGE_ID)
+        except (AttributeError, TypeError, ValueError):
+            raw = None
+    return normalize_message_id(raw)
+
+
 def _extract_msg_metadata(
     file_path: str, body_preview_len: int
 ) -> dict[str, object] | None:
@@ -95,6 +129,7 @@ def _extract_msg_metadata(
                 "body_preview": body,
                 "date_sent": date_sent,
                 "flag_status": _flag_status(msg),
+                "message_id": _message_id(msg),
             }
 
     except (InvalidFileFormatError, UnrecognizedMSGTypeError) as exc:

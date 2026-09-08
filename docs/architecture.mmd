@@ -13,14 +13,16 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert,\none JSON document on stdout"]
   end
 
-  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · setup_logging"]
-  TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping,\nused by both the scanner and the Outlook client"]
+  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nsetup_logging"]
+  TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping ·\nnormalize_message_id — one spelling of the\nMessage-ID for the scanner and the Outlook client"]
 
   MAINSCAN --> CONFIG
   MAINARCHIVE --> CONFIG
   MAINUI --> CONFIG
+  MAINBATCH --> CONFIG
 
   subgraph ui["email_archiver/ui/"]
     LAUNCHER["app.py: LauncherApp"]
@@ -70,3 +72,15 @@ flowchart TB
   ARCHIVEDIALOG -->|user confirms folder + date-prefix checkbox| ARCHIVER
   ARCHIVER -->|SaveAs / SaveAsFile via| OUTLOOKCOM
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE
+
+  subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
+    BATCH["batch.py\nplan · apply · revert —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites)"]
+  end
+  CALLER["another local app (task-os)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
+  MAINBATCH --> BATCH
+  BATCH -->|ensure_running · iter_inbox · find_by_message_id · move_to · set_category| OUTLOOK
+  OUTLOOK -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
+  BATCH -->|plan: rank folders per mail| SUGGESTER
+  BATCH -->|plan: already archived?| REPO
+  BATCH -->|apply: per-mail date_prefix| ARCHIVER
+  BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
