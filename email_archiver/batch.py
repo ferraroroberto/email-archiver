@@ -70,6 +70,11 @@ ERROR_NOT_IN_ARCHIVE = "not_in_archive_folder"  # revert cannot find it back
 ERROR_BAD_DECISION = "bad_decision"             # caller sent an unusable entry
 ERROR_ARCHIVE_FAILED = "archive_failed"         # disk write / Outlook SaveAs
 ERROR_MOVE_FAILED = "move_failed"               # files are on disk, mail is not
+# The move landed and only the tag did not. Its own code because the two are
+# genuinely different states to recover from: after a move_failed the mail is
+# still in the Inbox, after a category_failed it is already filed and only
+# looks untouched in Outlook.
+ERROR_CATEGORY_FAILED = "category_failed"
 
 # Per-file outcomes in a revert result.
 REFUSED_OUTSIDE_ROOTS = "outside_archive_roots"
@@ -356,13 +361,27 @@ def apply(
             moved = client.move_to(item, archive_folder)
             result["moved"] = True
             result["entry_id"] = client.entry_id(moved)
-            client.set_category(moved, category)
-            result["categorized"] = True
         except Exception as exc:
             logger.exception("Moving %s to %r failed", message_id, archive_folder)
             result["error"] = {
                 "code": ERROR_MOVE_FAILED,
                 "message": f"{type(exc).__name__}: {exc}",
+            }
+            results.append(result)
+            continue
+
+        # Tagged in its own step: a category that would not stick is a
+        # different state from a move that did not happen, and the caller
+        # recovers from the two differently.
+        try:
+            client.set_category(moved, category)
+            result["categorized"] = True
+        except Exception as exc:
+            logger.exception("Tagging %s with %r failed", message_id, category)
+            result["error"] = {
+                "code": ERROR_CATEGORY_FAILED,
+                "message": f"the mail was filed and moved, but not tagged: "
+                           f"{type(exc).__name__}: {exc}",
             }
             results.append(result)
             continue

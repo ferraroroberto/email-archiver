@@ -103,6 +103,7 @@ class FakeOutlookClient:
     def __init__(self, inbox: list[_FakeMailItem]) -> None:
         self.folders: dict[str | None, list[_FakeMailItem]] = {None: list(inbox)}
         self.move_should_fail = False
+        self.category_should_fail = False
         self.moves: list[tuple[str, str | None]] = []
 
     # -- the surface batch.py calls -------------------------------------------
@@ -148,6 +149,8 @@ class FakeOutlookClient:
         return item
 
     def set_category(self, item: _FakeMailItem, name: str) -> None:
+        if self.category_should_fail:
+            raise RuntimeError("the store refused the category")
         item.Categories = with_category(item.Categories, name)
         item.Save()
 
@@ -435,6 +438,32 @@ def test_apply_keeps_the_written_files_when_the_move_fails(cfg, archive_root):
     assert result["files"] and Path(result["files"][0]).exists(), (
         "the files are on disk, so the caller must be told about them"
     )
+
+
+def test_apply_tells_a_failed_tag_apart_from_a_failed_move(cfg, archive_root):
+    """Two different states to recover from, so two different codes.
+
+    After a move_failed the mail is still in the Inbox; after a
+    category_failed it is already filed and only *looks* untouched in Outlook.
+    Folding the second into the first would send a caller looking in the wrong
+    folder.
+    """
+    dest = archive_root / "Project Alpha"
+    item = _mail("a@example.invalid", "Tagged badly")
+    client = FakeOutlookClient([item])
+    client.category_should_fail = True
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is False
+    assert result["error"]["code"] == batch.ERROR_CATEGORY_FAILED
+    assert result["moved"] is True, "the move did happen and must be reported so"
+    assert result["categorized"] is False
+    assert client.folders["Archive"] == [item], "the mail really is filed"
+    assert result["files"] and Path(result["files"][0]).exists()
 
 
 def test_apply_accepts_a_bracketed_message_id_from_the_caller(cfg, archive_root):

@@ -138,8 +138,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config()
-    except (FileNotFoundError, KeyError) as exc:
-        return _fail(verb, ERROR_CONFIG_MISSING, str(exc))
+    except Exception as exc:
+        # Deliberately broad: this process's whole contract is "exit 2 with a
+        # JSON error document when the run cannot start". A malformed YAML, an
+        # unreadable path, a missing section — anything that stops the config
+        # loading has to come out as that document, not as a traceback on
+        # stderr with nothing on stdout, which is what a spawning caller would
+        # see as a crash it cannot classify.
+        return _fail(verb, ERROR_CONFIG_MISSING, f"{type(exc).__name__}: {exc}")
     setup_logging(cfg)
 
     # Read the caller's input before touching Outlook: a malformed file should

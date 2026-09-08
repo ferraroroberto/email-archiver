@@ -279,7 +279,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
 | `2` | The run could not start. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing`, `bad_input`, `outlook_unavailable`, `com_unavailable`. |
 
-Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`.
+Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
 
 `apply` fills in a result's `files` **before** it moves the mail, so a mail that was written to disk but failed to move is still fully revertible — that is why a result can carry `ok: false` and a non-empty `files` at the same time.
 
@@ -385,6 +385,7 @@ The column is added to an existing database automatically on the next run — `i
 
 - **`NULL` is not `""`.** A row indexed before this column existed reads `NULL`, *the header was never read*; a `.msg` that genuinely carries no `Message-ID` reads `""`. Neither ever matches a lookup — two mails with no Message-ID are not the same mail.
 - Added to an existing database the same way `flag_status` was, plus an index on the column created **after** the ALTER — declaring it alongside the `CREATE TABLE` would run it against a column an existing database does not have yet and take the whole scan down with it.
+- **The existing backlog is not backfilled.** Scanning is incremental on `mtime`, so a `.msg` indexed before this column existed is skipped and keeps its `NULL` — its Message-ID is in the file, but nothing has read it. Everything archived from now on is indexed with its id on the next scan (a new file is never skipped), so `plan`'s already-archived detection is complete for the batch workflow's own loop and blind only to mail filed before it. To cover the backlog too, force a full re-read by deleting `data/emails.db` and re-scanning — the same cost as a first scan.
 
 ---
 
