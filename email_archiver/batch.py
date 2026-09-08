@@ -37,7 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from email_archiver.archiver.archiver import EmailArchiver
+from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import (
     get_archive_roots,
     get_outlook_archive_folder,
@@ -103,13 +103,32 @@ def _engine_for(cfg: dict[str, Any], candidates: int) -> SuggestionEngine:
     return SuggestionEngine(tuned)
 
 
-def _candidate_dict(suggestion: Any) -> dict[str, Any]:
+def _candidate_dict(
+    cfg: dict[str, Any], suggestion: Any, date_prefix_cache: dict[str, bool]
+) -> dict[str, Any]:
+    """A ranked candidate, plus the ``date_prefix`` form its own folder would
+    get under ``cfg`` — inferred per folder when ``naming.date_prefix`` is
+    ``"auto"``, otherwise the config's fixed boolean. The caller (task-os)
+    hands this straight back as the ``date_prefix`` on its ``apply``
+    decision for the folder it picks; see ``resolve_date_prefix_for_folder``.
+
+    ``date_prefix_cache`` is ``plan``'s own dict, keyed by folder path and
+    shared across every mail in the run: a handful of folders tend to be
+    everyone's top suggestion, so without it a full-Inbox plan would re-list
+    the same OneDrive-backed folder once per mail that suggests it — exactly
+    the redundant-listing cost the per-``archive()`` single-pass guarantee is
+    there to avoid, just reappearing one layer up.
+    """
+    folder_path = suggestion.folder_path
+    if folder_path not in date_prefix_cache:
+        date_prefix_cache[folder_path] = resolve_date_prefix_for_folder(cfg, folder_path)
     return {
-        "folder_path": suggestion.folder_path,
+        "folder_path": folder_path,
         "display_name": suggestion.display_name,
         "score": round(suggestion.score, 4),
         "match_count": suggestion.match_count,
         "sample_subjects": list(suggestion.sample_subjects),
+        "date_prefix": date_prefix_cache[folder_path],
     }
 
 
@@ -223,6 +242,8 @@ def plan(
     mails: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     already = 0
+    # Shared across every mail in this run — see _candidate_dict.
+    date_prefix_cache: dict[str, bool] = {}
 
     try:
         for mail in client.iter_inbox(preview_len):
@@ -242,7 +263,7 @@ def plan(
                 entry["candidates"] = []
             else:
                 entry["candidates"] = [
-                    _candidate_dict(s)
+                    _candidate_dict(cfg, s, date_prefix_cache)
                     for s in engine.suggest(EmailData(
                         subject=mail.subject,
                         sender=mail.sender,

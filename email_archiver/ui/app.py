@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
-from email_archiver.archiver.archiver import EmailArchiver
+from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import get_archive_roots, get_date_prefix_enabled
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
 from email_archiver.explorer import (
@@ -305,6 +305,31 @@ class ArchiveDialog:
             ).pack()
 
             card.columnconfigure(1, weight=1)
+
+            # Highlighting a suggestion (mouse over its card) pre-ticks the
+            # date-prefix checkbox to the form that folder already uses — see
+            # _on_suggestion_highlighted. Bound on every descendant too, since
+            # <Enter> only fires on the exact widget the pointer is over, not
+            # its ancestors; the card is built by now so this walks the whole
+            # tree of children just created above.
+            self._bind_highlight(card, s.folder_path)
+
+    def _bind_highlight(self, widget: tk.Widget, folder_path: str) -> None:
+        widget.bind(
+            "<Enter>", lambda _e, fp=folder_path: self._on_suggestion_highlighted(fp)
+        )
+        for child in widget.winfo_children():
+            self._bind_highlight(child, folder_path)
+
+    def _on_suggestion_highlighted(self, folder_path: str) -> None:
+        """Pre-tick (or untick) the date-prefix checkbox to the form
+        ``folder_path`` would actually get, per ``naming.date_prefix`` —
+        inferred from the folder's own contents when the config is
+        ``"auto"``, the config's fixed boolean otherwise. The user can still
+        override it by hand before clicking Archive."""
+        self._date_prefix_var.set(
+            resolve_date_prefix_for_folder(self._cfg, folder_path)
+        )
 
     def _show_error(self, msg: str) -> None:
         for w in self._suggestions_frame.winfo_children():

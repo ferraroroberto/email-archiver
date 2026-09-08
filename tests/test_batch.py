@@ -19,12 +19,14 @@ Everything on screen here is synthetic: no real folder name, address or subject.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from email_archiver import batch
+from email_archiver.archiver import archiver as archiver_module
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.outlook.client import (
@@ -248,8 +250,80 @@ def test_plan_lists_every_inbox_mail_with_ranked_candidates(cfg, archive_root):
     assert first["candidates"], "a seeded index must produce candidates"
     assert set(first["candidates"][0]) == {
         "folder_path", "display_name", "score", "match_count", "sample_subjects",
+        "date_prefix",
     }
     assert first["candidates"][0]["folder_path"] == str(archive_root / "Project Alpha")
+    # cfg's naming.date_prefix is False (not "auto"), so every candidate gets
+    # the fixed config value regardless of what its folder holds.
+    assert first["candidates"][0]["date_prefix"] is False
+
+
+def test_plan_infers_date_prefix_per_candidate_folder_in_auto_mode(cfg, archive_root):
+    """naming.date_prefix: auto — each candidate's date_prefix reflects what
+    its own folder already holds, not one fixed value for every candidate."""
+    cfg["naming"]["date_prefix"] = "auto"
+    _seed_index(cfg, archive_root, {
+        "Project Alpha": ["Project Alpha kickoff"],
+        "Project Beta": ["Project Beta retro"],
+    })
+    dated_folder = archive_root / "Project Alpha"
+    undated_folder = archive_root / "Project Beta"
+    dated_folder.mkdir(parents=True, exist_ok=True)
+    undated_folder.mkdir(parents=True, exist_ok=True)
+    (dated_folder / "2026-01-01 - 001 - a.msg").write_text("x")
+    (dated_folder / "2026-01-02 - 002 - b.msg").write_text("x")
+    (undated_folder / "001 - a.msg").write_text("x")
+    (undated_folder / "002 - b.msg").write_text("x")
+
+    client = FakeOutlookClient([
+        _mail("a@example.invalid", "Project Alpha weekly update"),
+        _mail("b@example.invalid", "Project Beta retro follow-up"),
+    ])
+    doc = batch.plan(client, cfg, candidates=5)
+
+    by_folder = {
+        c["folder_path"]: c["date_prefix"]
+        for m in doc["mails"] for c in m["candidates"]
+    }
+    assert by_folder[str(dated_folder)] is True
+    assert by_folder[str(undated_folder)] is False
+
+
+def test_plan_lists_a_shared_candidate_folder_only_once_per_run(
+    cfg, archive_root, monkeypatch
+):
+    """A folder that two different mails both suggest must only be listed
+    once for the whole plan() run, not once per mail that suggests it — a
+    full-Inbox plan has a handful of popular folders and many mails, so an
+    uncached per-candidate os.listdir would re-list the same OneDrive-backed
+    folder over and over (the caching in _candidate_dict's date_prefix_cache
+    exists to prevent exactly that)."""
+    cfg["naming"]["date_prefix"] = "auto"
+    _seed_index(cfg, archive_root, {"Project Alpha": ["Project Alpha kickoff"]})
+    folder = archive_root / "Project Alpha"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "2026-01-01 - 001 - a.msg").write_text("x")
+
+    client = FakeOutlookClient([
+        _mail("a@example.invalid", "Project Alpha weekly update"),
+        _mail("b@example.invalid", "Project Alpha budget question"),
+    ])
+
+    real_listdir = os.listdir
+    calls: list[str] = []
+
+    def _counting_listdir(path):
+        calls.append(str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(archiver_module.os, "listdir", _counting_listdir)
+
+    doc = batch.plan(client, cfg, candidates=1)
+
+    assert [m["candidates"][0]["folder_path"] for m in doc["mails"]] == [
+        str(folder), str(folder),
+    ]
+    assert calls.count(str(folder)) == 1
 
 
 def test_plan_honours_the_candidate_cap_not_the_config(cfg, archive_root):

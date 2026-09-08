@@ -27,8 +27,13 @@ DEFAULT_MAX_PATH_LENGTH = 255
 # Archived filenames carry the sequence prefix only (``NNN - name.ext``) unless
 # the sent-date prefix is explicitly switched on. Off by default: the shorter
 # form leaves more MAX_PATH headroom in deep folders, and the date is already
-# inside the .msg. See ``get_date_prefix_enabled``.
+# inside the .msg. See ``get_date_prefix_mode`` / ``get_date_prefix_enabled``.
 DEFAULT_DATE_PREFIX_ENABLED = False
+
+# The third ``naming.date_prefix`` value (alongside ``true``/``false``): infer
+# the form per destination folder from what it already holds. See
+# ``email_archiver.archiver.archiver.infer_date_prefix``.
+DATE_PREFIX_AUTO = "auto"
 
 # Where batch `apply` parks a mail once it is on disk, and the category it
 # stamps on it. The folder is looked up by name directly under the mailbox's
@@ -92,21 +97,41 @@ def get_max_path_length(cfg: dict[str, Any]) -> int:
     return int(value)
 
 
-def get_date_prefix_enabled(cfg: dict[str, Any]) -> bool:
-    """Return whether archived filenames get the email's sent date prefixed.
+def get_date_prefix_mode(cfg: dict[str, Any]) -> bool | str:
+    """Return the raw ``naming.date_prefix`` setting: ``True``, ``False``, or
+    the literal ``"auto"`` (case-insensitive in the YAML, normalised here).
 
-    Reads ``naming.date_prefix``, falling back to
-    ``DEFAULT_DATE_PREFIX_ENABLED`` (``False``) when the section or key is
-    absent, so a ``config.yaml`` written before the toggle existed keeps the
-    default sequence-only naming. Like ``get_max_path_length``, this is the one
-    place the key is read — the archiver goes through it rather than reaching
-    into the config dict itself.
+    Falls back to ``DEFAULT_DATE_PREFIX_ENABLED`` (``False``) when the
+    section or key is absent, so a ``config.yaml`` written before the toggle
+    existed keeps the default sequence-only naming. This is the one place
+    the raw key is read — the archiver goes through it (or the narrower
+    ``get_date_prefix_enabled`` below) rather than reaching into the config
+    dict itself. ``"auto"`` means "infer per destination folder"; resolving
+    that inference is the archiver's job, not this accessor's.
     """
     naming_cfg = cfg.get("naming") or {}
     value = naming_cfg.get("date_prefix")
     if value is None:
         return DEFAULT_DATE_PREFIX_ENABLED
+    if isinstance(value, str) and value.strip().lower() == DATE_PREFIX_AUTO:
+        return DATE_PREFIX_AUTO
     return bool(value)
+
+
+def get_date_prefix_enabled(cfg: dict[str, Any]) -> bool:
+    """Return whether archived filenames get the email's sent date prefixed,
+    as a plain boolean starting position — ``"auto"`` resolves to ``False``
+    here since no destination folder is known yet.
+
+    Used where only a boolean makes sense (the dialog checkbox's initial
+    position before any suggestion is highlighted); a caller that needs to
+    honour ``"auto"`` by inferring from a folder should use
+    ``get_date_prefix_mode`` together with
+    ``email_archiver.archiver.archiver.resolve_date_prefix_for_folder``
+    instead.
+    """
+    mode = get_date_prefix_mode(cfg)
+    return mode if isinstance(mode, bool) else False
 
 
 def get_outlook_archive_folder(cfg: dict[str, Any]) -> str:

@@ -6,6 +6,7 @@ from datetime import datetime
 from email_archiver.archiver.archiver import (
     _get_sent_date_prefix,
     get_next_sequence_number,
+    infer_date_prefix,
 )
 
 
@@ -57,6 +58,42 @@ def test_dated_prefix_year_is_not_mistaken_for_sequence(tmp_path):
     # as the sequence number. It must not.
     (tmp_path / "2026-03-14 - 001 - only_file.msg").write_text("x")
     assert get_next_sequence_number(str(tmp_path)) == "002"
+
+
+# ---------------------------------------------------------------- infer_date_prefix ---
+
+def test_infer_date_prefix_none_on_empty_folder(tmp_path):
+    assert infer_date_prefix(str(tmp_path)) is None
+
+
+def test_infer_date_prefix_none_when_folder_has_no_numbered_files(tmp_path):
+    (tmp_path / "notes.txt").write_text("x")
+    (tmp_path / "random file.msg").write_text("x")
+    assert infer_date_prefix(str(tmp_path)) is None
+
+
+def test_infer_date_prefix_true_for_majority_dated_folder(tmp_path):
+    (tmp_path / "2026-01-01 - 001 - a.msg").write_text("x")
+    (tmp_path / "2026-01-02 - 002 - b.msg").write_text("x")
+    (tmp_path / "003 - c.msg").write_text("x")
+    assert infer_date_prefix(str(tmp_path)) is True
+
+
+def test_infer_date_prefix_false_for_majority_undated_folder(tmp_path):
+    (tmp_path / "001 - a.msg").write_text("x")
+    (tmp_path / "002 - b.msg").write_text("x")
+    (tmp_path / "2026-01-01 - 003 - c.msg").write_text("x")
+    assert infer_date_prefix(str(tmp_path)) is False
+
+
+def test_infer_date_prefix_none_on_a_tie(tmp_path):
+    (tmp_path / "001 - a.msg").write_text("x")
+    (tmp_path / "2026-01-01 - 002 - b.msg").write_text("x")
+    assert infer_date_prefix(str(tmp_path)) is None
+
+
+def test_infer_date_prefix_none_when_folder_does_not_exist(tmp_path):
+    assert infer_date_prefix(str(tmp_path / "does-not-exist")) is None
 
 
 # ------------------------------------------------------------- _get_sent_date_prefix ---
