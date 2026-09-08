@@ -578,6 +578,7 @@ def test_revert_deletes_the_files_and_puts_the_mail_back(cfg, archive_root):
     assert set(result) == {
         "message_id", "ok", "deleted", "missing", "refused", "file_errors",
         "moved_back", "category_removed", "entry_id", "error",
+        "index_rows_removed",
     }
     assert result["ok"] is True
     assert sorted(result["deleted"]) == sorted(str(Path(p)) for p in applied["files"])
@@ -587,6 +588,116 @@ def test_revert_deletes_the_files_and_puts_the_mail_back(cfg, archive_root):
     assert client.folders[None] == [item]
     assert client.folders["Archive"] == []
     assert item.Categories == ""
+    # No row was ever indexed for this mail (no scan ran), so there is
+    # nothing to remove -- this is not the stale-index regression below.
+    assert result["index_rows_removed"] == 0
+
+
+def _index_archived_file(cfg, applied, message_id="a@example.invalid", subject=""):
+    """Simulate the scan that normally indexes a freshly archived file.
+
+    ``apply`` only writes the file to disk -- ``main_scan.py`` is what
+    populates the index. The stale-row regression this guards only shows up
+    once a row exists, so the test has to write one by hand rather than rely
+    on ``apply`` to have done it.
+    """
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    file_path = applied["files"][0]
+    repo.upsert_email(EmailRecord(
+        file_path=file_path,
+        folder_path=str(Path(file_path).parent),
+        filename=Path(file_path).name,
+        subject=subject,
+        message_id=message_id,
+    ))
+    conn.commit()
+    conn.close()
+
+
+def _index_decoy_row(cfg, applied, subject):
+    """A second, unrelated row filed in the same folder as ``applied``'s file.
+
+    Gives the suggestion engine's FTS index something to rank for that folder
+    once the row for the reverted mail itself is gone -- otherwise "offered
+    again with candidates" can't be told apart from "offered again with an
+    empty candidate list because the index is now empty".
+    """
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    folder = Path(applied["files"][0]).parent
+    decoy_path = str(folder / "decoy.msg")
+    repo.upsert_email(EmailRecord(
+        file_path=decoy_path,
+        folder_path=str(folder),
+        filename="decoy.msg",
+        subject=subject,
+    ))
+    conn.commit()
+    conn.close()
+
+
+def test_revert_removes_the_index_row_so_the_next_plan_offers_the_mail_again(
+    cfg, archive_root
+):
+    """Regression for #57: revert used to leave the index row for the deleted
+    ``.msg`` in place, so the next `plan` reported the mail `already_archived`
+    at a path that no longer existed instead of offering it again."""
+    subject = "Stale index row"
+    item = _mail("a@example.invalid", subject)
+    client = FakeOutlookClient([item])
+    applied = _apply_one(cfg, archive_root, client)
+    _index_archived_file(cfg, applied, subject=subject)
+    _index_decoy_row(cfg, applied, subject=subject)
+
+    doc = batch.revert(client, cfg, [
+        {"message_id": "a@example.invalid", "files": applied["files"]},
+    ])
+    result = doc["results"][0]
+    assert result["ok"] is True
+    assert result["index_rows_removed"] == 1
+
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    assert repo.find_path_by_message_id("a@example.invalid") is None
+    conn.close()
+
+    plan_doc = batch.plan(client, cfg)
+    mail = plan_doc["mails"][0]
+    assert mail["already_archived"] is None
+    assert mail["candidates"], "the mail must be offered again with candidates"
+
+
+def test_revert_leaves_the_index_row_when_the_file_delete_fails(
+    cfg, archive_root, monkeypatch
+):
+    """A revert whose file delete failed must leave the row alone -- the file
+    is still there, so the index still describing it is correct, not stale."""
+    item = _mail("a@example.invalid", "Delete failure")
+    client = FakeOutlookClient([item])
+    applied = _apply_one(cfg, archive_root, client)
+    _index_archived_file(cfg, applied)
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if str(self) == str(Path(applied["files"][0])):
+            raise PermissionError("simulated: file is locked")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    doc = batch.revert(client, cfg, [
+        {"message_id": "a@example.invalid", "files": applied["files"]},
+    ])
+    result = doc["results"][0]
+    assert result["file_errors"]
+    assert result["index_rows_removed"] == 0
+
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    assert repo.find_path_by_message_id("a@example.invalid") == applied["files"][0]
+    conn.close()
 
 
 def test_revert_refuses_a_file_outside_the_archive_roots(cfg, tmp_path):
