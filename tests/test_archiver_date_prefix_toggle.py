@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from email_archiver.archiver.archiver import EmailArchiver
-from email_archiver.config import get_date_prefix_enabled
+from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
+from email_archiver.config import get_date_prefix_enabled, get_date_prefix_mode
 
 
 class _FakeAttachment:
@@ -70,6 +70,22 @@ def test_explicit_true_is_on():
 
 def test_explicit_false_is_off():
     assert get_date_prefix_enabled({"naming": {"date_prefix": False}}) is False
+
+
+def test_mode_returns_true_false_or_auto():
+    assert get_date_prefix_mode({}) is False
+    assert get_date_prefix_mode({"naming": {"date_prefix": True}}) is True
+    assert get_date_prefix_mode({"naming": {"date_prefix": False}}) is False
+    assert get_date_prefix_mode({"naming": {"date_prefix": "auto"}}) == "auto"
+    # Case-insensitive, since it comes from hand-edited YAML.
+    assert get_date_prefix_mode({"naming": {"date_prefix": "AUTO"}}) == "auto"
+
+
+def test_enabled_resolves_auto_to_false():
+    # get_date_prefix_enabled has no folder to infer from, so "auto" is a
+    # starting position of False — the UI resolves the real value per
+    # suggestion via resolve_date_prefix_for_folder instead.
+    assert get_date_prefix_enabled({"naming": {"date_prefix": "auto"}}) is False
 
 
 # ------------------------------------------------------------- archiving ----
@@ -187,3 +203,95 @@ def test_toggle_on_still_continues_an_undated_folders_sequence(tmp_path):
         _FakeMailItem(), str(tmp_path), "Next one"
     )
     assert result.email_path.endswith("2026-03-14 - 013 - Next one.msg")
+
+
+# --------------------------------------------------- naming.date_prefix: auto ----
+
+def test_auto_writes_the_dated_form_into_an_already_dated_folder(tmp_path):
+    # Acceptance criterion: auto writes the dated form with no checkbox/
+    # explicit-argument interaction at all — the config alone decides.
+    (tmp_path / "2026-01-01 - 001 - earlier.msg").write_text("x")
+    (tmp_path / "2026-01-02 - 002 - earlier2.msg").write_text("x")
+    result = EmailArchiver(_cfg(date_prefix="auto")).archive(
+        _FakeMailItem(), str(tmp_path), "Next one"
+    )
+    assert result.email_path.endswith("2026-03-14 - 003 - Next one.msg")
+
+
+def test_auto_writes_the_undated_form_into_an_already_undated_folder(tmp_path):
+    (tmp_path / "001 - earlier.msg").write_text("x")
+    result = EmailArchiver(_cfg(date_prefix="auto")).archive(
+        _FakeMailItem(), str(tmp_path), "Next one"
+    )
+    assert result.email_path.endswith("002 - Next one.msg")
+
+
+def test_auto_falls_back_to_undated_on_an_empty_folder(tmp_path):
+    result = EmailArchiver(_cfg(date_prefix="auto")).archive(
+        _FakeMailItem(), str(tmp_path), "First one"
+    )
+    assert result.email_path.endswith("001 - First one.msg")
+
+
+def test_auto_falls_back_to_undated_on_a_tied_folder(tmp_path):
+    (tmp_path / "001 - a.msg").write_text("x")
+    (tmp_path / "2026-01-01 - 002 - b.msg").write_text("x")
+    result = EmailArchiver(_cfg(date_prefix="auto")).archive(
+        _FakeMailItem(), str(tmp_path), "Next one"
+    )
+    assert result.email_path.endswith("003 - Next one.msg")
+
+
+# --------------------------------------------------------------- precedence ----
+# explicit constructor override > config "auto" (per-folder inference) >
+# config boolean.
+
+def test_explicit_override_beats_auto_inference(tmp_path):
+    (tmp_path / "2026-01-01 - 001 - earlier.msg").write_text("x")
+    # Folder is majority-dated, but the explicit override says no prefix.
+    result = EmailArchiver(_cfg(date_prefix="auto"), date_prefix=False).archive(
+        _FakeMailItem(), str(tmp_path), "Overridden"
+    )
+    assert result.email_path.endswith("002 - Overridden.msg")
+
+
+def test_explicit_override_true_beats_auto_inference_toward_dated(tmp_path):
+    (tmp_path / "001 - earlier.msg").write_text("x")
+    # Folder is majority-undated, but the explicit override forces the date.
+    result = EmailArchiver(_cfg(date_prefix="auto"), date_prefix=True).archive(
+        _FakeMailItem(), str(tmp_path), "Overridden"
+    )
+    assert result.email_path.endswith("2026-03-14 - 002 - Overridden.msg")
+
+
+def test_auto_beats_the_config_boolean_it_replaces(tmp_path):
+    # Sanity check on precedence order, not just presence: "auto" governs
+    # once selected, the (now-irrelevant) DEFAULT_DATE_PREFIX_ENABLED value
+    # never leaks in as a silent third form.
+    (tmp_path / "2026-01-01 - 001 - earlier.msg").write_text("x")
+    result = EmailArchiver(_cfg(date_prefix="auto")).archive(
+        _FakeMailItem(), str(tmp_path), "Next one"
+    )
+    assert "2026-03-14" in result.email_path
+
+
+# ---------------------------------------------- resolve_date_prefix_for_folder ----
+# The dialog (hover pre-tick) and batch plan (per-candidate date_prefix) both
+# go through this to answer "what would EmailArchiver pick for this folder,
+# absent an explicit override" without constructing an EmailArchiver at all.
+
+def test_resolve_for_folder_infers_in_auto_mode(tmp_path):
+    (tmp_path / "2026-01-01 - 001 - a.msg").write_text("x")
+    (tmp_path / "2026-01-02 - 002 - b.msg").write_text("x")
+    assert resolve_date_prefix_for_folder(_cfg(date_prefix="auto"), str(tmp_path)) is True
+
+
+def test_resolve_for_folder_falls_back_to_false_on_ambiguous_auto(tmp_path):
+    assert resolve_date_prefix_for_folder(_cfg(date_prefix="auto"), str(tmp_path)) is False
+
+
+def test_resolve_for_folder_ignores_folder_contents_when_not_auto(tmp_path):
+    (tmp_path / "2026-01-01 - 001 - a.msg").write_text("x")
+    (tmp_path / "2026-01-02 - 002 - b.msg").write_text("x")
+    # Folder is majority-dated, but the config forces the undated form.
+    assert resolve_date_prefix_for_folder(_cfg(date_prefix=False), str(tmp_path)) is False

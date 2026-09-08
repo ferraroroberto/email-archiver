@@ -13,13 +13,17 @@ archive:
 
 naming:
   # Prepend the email's sent date to archived filenames.
-  #   false (default) → 023 - subject.msg
-  #   true            → 2026-03-14 - 023 - subject.msg
+  #   false            → 023 - subject.msg
+  #   true             → 2026-03-14 - 023 - subject.msg
+  #   auto (default)   → infer per destination folder from what it already
+  #                       holds (majority of existing numbered files wins;
+  #                       falls back to the undated form when the folder is
+  #                       empty, has no numbered files, or ties)
   # The NNN sequence is always present and always shared by an email and its
   # attachments. Sequence allocation reads both forms whichever way this is
   # set, so it is safe to flip at any time — a folder holding a mix of dated
   # and undated files still gets the correct next number.
-  date_prefix: false
+  date_prefix: auto
 
 outlook:
   # Batch mode only (main_batch.py). After `apply` has written a mail to disk

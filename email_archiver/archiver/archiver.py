@@ -6,14 +6,21 @@ Naming convention (matches user spec):
     Attachments: NNN - filename.ext
 
 NNN is a zero-padded 3-digit sequence (000-999) shared by an email and its
-attachments. With ``naming.date_prefix: true`` in the config, the email's sent
-date in local time is prefixed as well:
+attachments. With the sent-date prefix in effect, the email's sent date in
+local time is prefixed as well:
 
     Email:       YYYY-MM-DD - NNN - sanitized_subject.msg
     Attachments: YYYY-MM-DD - NNN - filename.ext
 
-The toggle is off by default. When it is on but the sent date cannot be
-resolved, the undated form is used for that email instead.
+``naming.date_prefix`` in the config controls this per folder:
+    false (default) → never prefix
+    true            → always prefix
+    "auto"          → infer the form from what the destination folder
+                       already holds (see ``infer_date_prefix``), falling
+                       back to the undated form when inference is ambiguous
+
+Whichever form is chosen, if the sent date cannot be resolved the undated
+form is used for that email instead.
 
 Design decisions:
 - Sequence number is derived from the MAXIMUM existing numeric prefix in the
@@ -21,6 +28,8 @@ Design decisions:
   scan recognises both prefix forms regardless of the toggle, so a folder
   holding a mix of dated and undated files always allocates the next number
   correctly and the toggle stays safe to flip at any time.
+- ``infer_date_prefix`` shares that same listing pass (see ``_scan_folder``):
+  the archiver never lists a destination folder twice for one archive call.
 - Embedded images (ContentId set) are skipped; only real attachments are saved.
 - Subject sanitisation removes characters illegal on Windows file systems.
 - SaveAs uses olMSG format constant (3) to produce a proper .msg file.
@@ -36,9 +45,10 @@ from pathlib import Path
 from typing import Any
 
 from email_archiver.config import (
+    DATE_PREFIX_AUTO,
     DEFAULT_DATE_PREFIX_ENABLED,
     DEFAULT_MAX_PATH_LENGTH,
-    get_date_prefix_enabled,
+    get_date_prefix_mode,
     get_max_path_length,
 )
 
@@ -127,6 +137,57 @@ def _fit_filename_to_path(
     return f"{prefix}{stem[:stem_budget]}{suffix}"
 
 
+@dataclass
+class _FolderScan:
+    """The result of one ``os.listdir`` pass over a destination folder."""
+
+    next_sequence: str
+    inferred_date_prefix: bool | None
+
+
+def _scan_folder(folder_path: str) -> _FolderScan:
+    """
+    List ``folder_path`` once and derive both the next sequence number and
+    the per-folder date-prefix inference from that single pass.
+
+    This is the one place that actually calls ``os.listdir`` on a
+    destination folder — ``get_next_sequence_number`` and
+    ``infer_date_prefix`` are thin, independently-testable wrappers around
+    it, but ``EmailArchiver.archive`` calls this directly so a real archive
+    never lists a OneDrive-backed folder twice.
+    """
+    try:
+        files = os.listdir(folder_path)
+    except OSError as exc:
+        logger.error("Cannot list folder %s: %s", folder_path, exc)
+        return _FolderScan(next_sequence="001", inferred_date_prefix=None)
+
+    numbers: list[int] = []
+    dated = 0
+    undated = 0
+    for fname in files:
+        m = _RE_DATED_PREFIX.match(fname)
+        if m:
+            numbers.append(int(m.group(1)))
+            dated += 1
+            continue
+        m = _RE_UNDATED_PREFIX.match(fname)
+        if m:
+            numbers.append(int(m.group(1)))
+            undated += 1
+
+    next_num = (max(numbers) + 1) if numbers else 1
+    if next_num > 999:
+        logger.warning("Sequence number exceeds 999 in %s", folder_path)
+    next_sequence = f"{next_num:03d}"
+
+    # Empty/unnumbered (0 == 0) and a genuine tie both mean "no clear form" —
+    # neither is worth forcing a guess on, so both come out as None.
+    inferred: bool | None = None if dated == undated else dated > undated
+
+    return _FolderScan(next_sequence=next_sequence, inferred_date_prefix=inferred)
+
+
 def get_next_sequence_number(folder_path: str) -> str:
     """
     Scan the folder for files starting with either the undated ``NNN - `` or
@@ -135,22 +196,46 @@ def get_next_sequence_number(folder_path: str) -> str:
     writes, so a folder holding a mix never gets a colliding number.
     Returns '001' if the folder is empty or has no numbered files.
     """
-    try:
-        files = os.listdir(folder_path)
-    except OSError as exc:
-        logger.error("Cannot list folder %s: %s", folder_path, exc)
-        return "001"
+    return _scan_folder(folder_path).next_sequence
 
-    numbers: list[int] = []
-    for fname in files:
-        m = _RE_DATED_PREFIX.match(fname) or _RE_UNDATED_PREFIX.match(fname)
-        if m:
-            numbers.append(int(m.group(1)))
 
-    next_num = (max(numbers) + 1) if numbers else 1
-    if next_num > 999:
-        logger.warning("Sequence number exceeds 999 in %s", folder_path)
-    return f"{next_num:03d}"
+def infer_date_prefix(folder_path: str) -> bool | None:
+    """
+    Infer which filename form ``folder_path`` already uses, from the same
+    dated-vs-undated counts ``get_next_sequence_number`` derives.
+
+    Majority wins: ``True`` when more of the folder's existing numbered
+    files use the dated ``YYYY-MM-DD - NNN - `` form than the undated
+    ``NNN - `` form, ``False`` for the reverse. Returns ``None`` when the
+    folder is empty, has no numbered files, or the two forms tie — callers
+    fall back to the undated form in that case rather than guess.
+    """
+    return _scan_folder(folder_path).inferred_date_prefix
+
+
+def resolve_date_prefix_for_folder(cfg: dict[str, Any], folder_path: str) -> bool:
+    """
+    The date-prefix form ``EmailArchiver.archive`` would pick for
+    ``folder_path`` under ``cfg``, absent an explicit per-call override.
+
+    ``naming.date_prefix: auto`` infers from the folder's own contents,
+    falling back to ``False`` when inference is ambiguous; ``true``/``false``
+    apply uniformly regardless of the folder. Used by batch ``plan`` to
+    report each candidate's form so the caller can hand it straight back to
+    an ``apply`` decision.
+    """
+    mode = get_date_prefix_mode(cfg)
+    inferred = infer_date_prefix(folder_path) if mode == DATE_PREFIX_AUTO else None
+    return _resolve_date_prefix_mode(mode, inferred)
+
+
+def _resolve_date_prefix_mode(mode: bool | str, inferred: bool | None) -> bool:
+    """Shared by ``EmailArchiver`` and ``resolve_date_prefix_for_folder``:
+    ``"auto"`` uses ``inferred`` (``False`` when it is ``None``), otherwise
+    ``mode`` is already the plain boolean to use."""
+    if mode == DATE_PREFIX_AUTO:
+        return bool(inferred) if inferred is not None else False
+    return bool(mode)
 
 
 def _get_sent_date_prefix(mail_item: Any) -> str | None:
@@ -201,25 +286,27 @@ class EmailArchiver:
 
         ``cfg`` is the loaded config dict; the path budget is read from it via
         the shared ``get_max_path_length`` accessor so the archiver and scanner
-        honour the same ``path.max_length`` knob, and the sent-date prefix
-        toggle via ``get_date_prefix_enabled`` (``naming.date_prefix``). When
-        ``cfg`` is omitted the ``DEFAULT_*`` fallbacks are used.
+        honour the same ``path.max_length`` knob, and the sent-date prefix mode
+        via ``get_date_prefix_mode`` (``naming.date_prefix``: ``True``,
+        ``False`` or ``"auto"``). When ``cfg`` is omitted the ``DEFAULT_*``
+        fallbacks are used.
 
-        ``date_prefix`` overrides the configured toggle for this archiver only
-        — the archive dialog passes its checkbox state through here, so the
-        config value is the checkbox's *starting* position rather than the last
-        word. ``None`` (the default) means "use the config".
+        ``date_prefix`` overrides the configured mode for this archiver only
+        — the archive dialog passes its checkbox state through here, and batch
+        mode passes the caller's per-mail decision, so the config is only the
+        *starting* position, never the last word. ``None`` (the default) means
+        "use the config": ``auto`` then infers the form per destination folder
+        at ``archive()`` time, falling back to the undated form when
+        inference is ambiguous.
         """
         self._max_path: int = (
             get_max_path_length(cfg) if cfg is not None else DEFAULT_MAX_PATH_LENGTH
         )
-        self._date_prefix_enabled: bool
-        if date_prefix is not None:
-            self._date_prefix_enabled = date_prefix
-        elif cfg is not None:
-            self._date_prefix_enabled = get_date_prefix_enabled(cfg)
-        else:
-            self._date_prefix_enabled = DEFAULT_DATE_PREFIX_ENABLED
+        # Explicit override always wins over the config; None defers to it.
+        self._date_prefix_override: bool | None = date_prefix
+        self._date_prefix_mode: bool | str = (
+            get_date_prefix_mode(cfg) if cfg is not None else DEFAULT_DATE_PREFIX_ENABLED
+        )
 
     def archive(
         self,
@@ -243,9 +330,15 @@ class EmailArchiver:
             logger.info("Creating destination folder: %s", dest)
             dest.mkdir(parents=True, exist_ok=True)
 
-        seq = get_next_sequence_number(folder_path)
+        # One listing pass covers both the next sequence number and (when the
+        # config mode is "auto") the per-folder date-prefix inference.
+        scan = _scan_folder(folder_path)
+        seq = scan.next_sequence
+        date_prefix_enabled = self._resolve_date_prefix_enabled(
+            scan.inferred_date_prefix
+        )
         date_prefix = (
-            _get_sent_date_prefix(mail_item) if self._date_prefix_enabled else None
+            _get_sent_date_prefix(mail_item) if date_prefix_enabled else None
         )
         result = ArchiveResult(sequence_number=seq)
 
@@ -264,6 +357,15 @@ class EmailArchiver:
             seq, result.email_path, len(result.attachment_paths),
         )
         return result
+
+    def _resolve_date_prefix_enabled(self, inferred: bool | None) -> bool:
+        """Precedence for this call: explicit constructor override beats the
+        config outright; otherwise the config decides — ``"auto"`` via
+        ``inferred`` (already derived from this same destination folder by
+        ``archive``), a plain boolean applied as-is."""
+        if self._date_prefix_override is not None:
+            return self._date_prefix_override
+        return _resolve_date_prefix_mode(self._date_prefix_mode, inferred)
 
     # -------------------------------------------------- private helpers ----
 

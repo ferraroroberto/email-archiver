@@ -70,20 +70,23 @@ The email's sent date can be prefixed to every name in the bundle, for folders s
 2026-03-14 - 023 - signed_contract.docx
 ```
 
-It is **off by default** and can be switched on two ways:
-
-- **Per archive** — the **Date prefix (YYYY-MM-DD)** checkbox in the archive dialog's bottom bar. Tick it before clicking `Archive`, `Browse folder…` or `Explorer folder`; it applies to that archive only and nothing is written to the config.
-- **Permanently** — `naming.date_prefix: true` in `config/config.yaml`. That sets the checkbox's starting position every time the dialog opens, so the per-archive checkbox can still override it in either direction.
+`naming.date_prefix` in `config/config.yaml` controls the default form:
 
 ```yaml
 naming:
-  date_prefix: false   # default; true → 2026-03-14 - 023 - subject.msg
+  date_prefix: auto   # default; true → always dated, false → never dated
 ```
+
+- **`auto` (default)** — infer the form per destination folder from what it already holds: majority of existing numbered files wins (dated vs. undated), falling back to the undated form when the folder is empty, has no numbered files, or ties. This is what makes an unattended batch run (see [Batch mode](#batch-mode-headless), which has no checkbox) file into a mixed archive correctly without any per-mail configuration — a folder that already files everything as `YYYY-MM-DD - NNN - <name>` (for instance a tree shared with a dated document archive) keeps getting the dated form, the rest keep the undated form.
+- **`true` / `false`** — force that form for every folder, ignoring its contents.
+- **Per archive** — the **Date prefix (YYYY-MM-DD)** checkbox in the archive dialog's bottom bar starts pre-ticked to whatever the highlighted suggestion's own folder would get (inferred when the config is `auto`, the fixed config value otherwise), and can still be flipped by hand before clicking `Archive`, `Browse folder…` or `Explorer folder`; nothing is written to the config either way.
+
+Precedence when a decision is not left to inference: an explicit per-archive choice (the ticked/unticked checkbox, or a batch `apply` decision's `date_prefix`) always wins over the config, `auto` inference is next, and the config's fixed boolean is the last resort.
 
 - `YYYY-MM-DD` is the email's **sent** date (`SentOn`, falling back to `ReceivedTime`), normalized to local time — not the date it was archived. Attachments inherit the parent email's date, so a bundle stays contiguous.
 - `NNN` keeps exactly the same meaning and derivation with the prefix on
 - If the email's sent date cannot be resolved, that archive falls back to the undated form and logs why, rather than inventing a placeholder date
-- Sequence allocation recognizes **both** the `NNN - ` and the `YYYY-MM-DD - NNN - ` forms no matter which one is being written, so a folder holding a mix of both still picks the correct next number and never collides — the toggle is safe to flip at any time
+- Sequence allocation recognizes **both** the `NNN - ` and the `YYYY-MM-DD - NNN - ` forms no matter which one is being written, so a folder holding a mix of both still picks the correct next number and never collides — the toggle is safe to flip at any time, and inference reads that same single folder listing
 - Path shortening accounts for the 13 extra characters only when the prefix is actually applied
 
 ---
@@ -191,7 +194,7 @@ archive:
     - "C:/Users/YourName/OneDrive/Archive/"
 ```
 
-All other defaults are sensible out of the box. The one knob worth knowing about is `naming.date_prefix` (default `false`) — see [File naming convention](#file-naming-convention).
+All other defaults are sensible out of the box. The one knob worth knowing about is `naming.date_prefix` (default `auto`) — see [File naming convention](#file-naming-convention).
 
 ### First scan
 
@@ -262,7 +265,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 | Verb | Reads | Does |
 |---|---|---|
-| `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10). Read-only. |
+| `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. Read-only. |
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes the category and moves the mail back to the Inbox. |
 
@@ -291,7 +294,7 @@ Every document carries `schema_version`, so a consumer can refuse a shape it doe
 - A file already gone is reported as `missing`, not as an error — running a revert twice is not a failure to explain.
 - Outlook closed at `plan` time is **started** (the registered `outlook.exe`, visible, exactly as your own shortcut would) and waited for, bounded by `--start-timeout` (60 s by default). A still-unreachable Outlook is a loud exit 2, never an empty Inbox nobody read.
 - Batch mode is meant to be spawned with a timeout. A COM modal — the address-book security prompt, a profile chooser — then blocks *this* process, which the caller can kill, and never the caller.
-- The `date_prefix` flag is per mail and comes from the caller. Batch mode deliberately does **not** read the global `naming.date_prefix` toggle, because the right form depends on the destination folder.
+- The `date_prefix` flag on an `apply` decision is per mail and comes from the caller. Batch mode deliberately does **not** re-read the global `naming.date_prefix` toggle itself for `apply` — the right form depends on the destination folder, so each `plan` candidate already carries the `date_prefix` that folder would get under the configured mode (inferred per folder when `naming.date_prefix: auto`, the fixed config value otherwise); the caller normally just hands that value straight back on the decision for the folder it picked.
 
 ### Configuration
 
