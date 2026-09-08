@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS emails (
     body_preview TEXT,                      -- first N chars of plain-text body
     file_mtime   REAL    NOT NULL,          -- os.stat().st_mtime for change detection
     indexed_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-    flag_status  INTEGER                    -- MAPI PidTagFlagStatus; see _COLUMNS
+    flag_status  INTEGER,                   -- MAPI PidTagFlagStatus; see _COLUMNS
+    message_id   TEXT                       -- Internet Message-ID; see _COLUMNS
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_folder  ON emails(folder_path);
@@ -101,7 +102,24 @@ _COLUMNS: dict[str, str] = {
     # different fact from 0, "read, and not flagged". Rows indexed before this
     # build keep NULL until their file changes and is re-read.
     "flag_status": "INTEGER",
+    # Internet Message-ID (MAPI PR_INTERNET_MESSAGE_ID, 0x1035001F), stored
+    # without its angle brackets -- see text.normalize_message_id. It is the
+    # only identity that survives a mail being moved between Outlook folders
+    # (EntryID does not), so the batch verbs use it to tell an Inbox mail that
+    # is already archived from one that is not, and to pair a revert with the
+    # files that were written for it. Nullable like flag_status: NULL means
+    # "indexed before the scanner read the header", not "this mail has none"
+    # (that is stored as an empty string).
+    "message_id": "TEXT",
 }
+
+# Indexes over columns that only exist after `_add_missing_columns` has run.
+# They cannot live in `_DDL`, which `init_db` executes *before* the migration:
+# on an existing database the index would be created against a column the table
+# does not have yet and the whole script would fail.
+_POST_MIGRATION_DDL = """
+CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
+"""
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> list[str]:
@@ -141,5 +159,6 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     added = _add_missing_columns(conn)
     if added:
         logger.info("Added column(s) to emails: %s", ", ".join(added))
+    conn.executescript(_POST_MIGRATION_DDL)
     conn.commit()
     return conn

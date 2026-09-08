@@ -33,6 +33,10 @@ class EmailRecord:
     # scanner always supplies it, so 0 here means "read, unflagged" -- unlike a
     # NULL in the column, which means "indexed before the scanner read it".
     flag_status: int = 0
+    # Internet Message-ID without angle brackets (see text.normalize_message_id).
+    # "" means the .msg carried no Message-ID header -- a real answer, and the
+    # reason a lookup by id never matches on the empty string.
+    message_id: str = ""
     id: int | None = None
 
 
@@ -86,8 +90,9 @@ class EmailRepository:
             """
             INSERT INTO emails
                 (file_path, folder_path, filename, subject, sender,
-                 recipients, date_sent, body_preview, file_mtime, flag_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 recipients, date_sent, body_preview, file_mtime, flag_status,
+                 message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_path) DO UPDATE SET
                 subject      = excluded.subject,
                 sender       = excluded.sender,
@@ -96,13 +101,14 @@ class EmailRepository:
                 body_preview = excluded.body_preview,
                 file_mtime   = excluded.file_mtime,
                 flag_status  = excluded.flag_status,
+                message_id   = excluded.message_id,
                 indexed_at   = datetime('now')
             """,
             (
                 rec.file_path, rec.folder_path, rec.filename,
                 rec.subject, rec.sender, rec.recipients,
                 rec.date_sent, rec.body_preview, rec.file_mtime,
-                rec.flag_status,
+                rec.flag_status, rec.message_id,
             ),
         )
 
@@ -157,6 +163,28 @@ class EmailRepository:
             "SELECT file_mtime FROM emails WHERE file_path = ?", (file_path,)
         ).fetchone()
         return row["file_mtime"] if row else None
+
+    def find_path_by_message_id(self, message_id: str) -> str | None:
+        """Return the archived ``.msg`` path for a Message-ID, or ``None``.
+
+        Used by the batch ``plan`` verb to mark an Inbox mail that has already
+        been filed. An empty ``message_id`` never matches: rows written before
+        the column existed read NULL and rows for a ``.msg`` carrying no
+        Message-ID header read ``""``, and neither is evidence that *this*
+        mail is the one already on disk.
+
+        Only the most recently indexed match is returned when the same mail was
+        filed into more than one folder -- the caller only needs proof that it
+        was archived at all.
+        """
+        if not message_id:
+            return None
+        row = self._conn.execute(
+            "SELECT file_path FROM emails WHERE message_id = ? "
+            "ORDER BY indexed_at DESC LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        return row["file_path"] if row else None
 
     def count_emails(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM emails").fetchone()

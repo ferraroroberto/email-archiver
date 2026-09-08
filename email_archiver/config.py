@@ -30,6 +30,13 @@ DEFAULT_MAX_PATH_LENGTH = 255
 # inside the .msg. See ``get_date_prefix_enabled``.
 DEFAULT_DATE_PREFIX_ENABLED = False
 
+# Where batch `apply` parks a mail once it is on disk, and the category it
+# stamps on it. The folder is looked up by name directly under the mailbox's
+# root and created if missing; the category makes it obvious in Outlook which
+# mails a batch run touched, and is what `revert` removes again.
+DEFAULT_ARCHIVE_FOLDER = "Archive"
+DEFAULT_ARCHIVED_CATEGORY = "Archived by task-os"
+
 _config: dict[str, Any] | None = None
 
 
@@ -100,6 +107,35 @@ def get_date_prefix_enabled(cfg: dict[str, Any]) -> bool:
     if value is None:
         return DEFAULT_DATE_PREFIX_ENABLED
     return bool(value)
+
+
+def get_outlook_archive_folder(cfg: dict[str, Any]) -> str:
+    """Return the Outlook folder batch ``apply`` moves a filed mail into.
+
+    Reads ``outlook.archive_folder``, falling back to
+    ``DEFAULT_ARCHIVE_FOLDER``. Like the other accessors here this is the one
+    place the key is read, so the batch layer never reaches into the config
+    dict itself. A blank value falls back rather than resolving to the mailbox
+    root, which would "move" the mail somewhere no one expects.
+    """
+    outlook_cfg = cfg.get("outlook") or {}
+    value = outlook_cfg.get("archive_folder")
+    return str(value).strip() if value and str(value).strip() else DEFAULT_ARCHIVE_FOLDER
+
+
+def get_outlook_category(cfg: dict[str, Any]) -> str:
+    """Return the Outlook category batch ``apply`` stamps on a filed mail.
+
+    Reads ``outlook.category``, falling back to
+    ``DEFAULT_ARCHIVED_CATEGORY``. ``revert`` removes exactly this category, so
+    changing it between an apply and its revert leaves the old one in place --
+    the files and the folder move still revert correctly.
+    """
+    outlook_cfg = cfg.get("outlook") or {}
+    value = outlook_cfg.get("category")
+    return (
+        str(value).strip() if value and str(value).strip() else DEFAULT_ARCHIVED_CATEGORY
+    )
 
 
 def _resolve_paths(cfg: dict[str, Any]) -> None:

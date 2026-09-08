@@ -17,6 +17,30 @@ RE_REPLY_PREFIX = re.compile(r"^\s*(re|rv|fwd?)\s*:?\s*", re.IGNORECASE)
 _RE_MSG_SUFFIX = re.compile(r"\s*\.msg$", re.IGNORECASE)
 
 
+def normalize_message_id(raw: str | None) -> str:
+    """Return the Internet Message-ID in the one canonical form this app stores.
+
+    Two sources have to agree on it or the batch verbs cannot pair a live mail
+    with the file archived from it: Outlook COM reads MAPI
+    ``PR_INTERNET_MESSAGE_ID`` (``0x1035001F``) off the live item, while the
+    scanner reads the same header back out of the ``.msg`` on disk. Both spell
+    it ``<local@domain>`` most of the time, but neither guarantees the angle
+    brackets or the surrounding whitespace, so the stored form drops both.
+
+    Case is deliberately preserved: RFC 5322 makes the left-hand side of a
+    Message-ID case-sensitive, so folding it would merge ids that are genuinely
+    distinct. Returns ``""`` for a missing or empty id -- a real answer ("this
+    mail has no Message-ID"), which the caller reports and skips rather than
+    treating as an identity.
+    """
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    if s.startswith("<") and s.endswith(">") and len(s) > 1:
+        s = s[1:-1].strip()
+    return s
+
+
 def clean_subject(raw: str | None, *, strip_msg_suffix: bool = False) -> str:
     """Return a normalised subject string.
 

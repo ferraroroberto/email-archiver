@@ -21,6 +21,14 @@ naming:
   # and undated files still gets the correct next number.
   date_prefix: false
 
+outlook:
+  # Batch mode only (main_batch.py). After `apply` has written a mail to disk
+  # it moves the mail out of the Inbox into this folder, looked up by name
+  # directly under the mailbox root and created if it does not exist, and
+  # stamps it with the category below. `revert` reverses both.
+  archive_folder: "Archive"
+  category: "Archived by task-os"
+
 database:
   # Path relative to the project root or absolute
   path: "data/emails.db"
