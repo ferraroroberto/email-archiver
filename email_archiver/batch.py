@@ -435,6 +435,7 @@ def _blank_revert_result(message_id: str) -> dict[str, Any]:
         "moved_back": False,
         "category_removed": False,
         "entry_id": "",
+        "index_rows_removed": 0,
         "error": None,
     }
 
@@ -455,73 +456,49 @@ def revert(
     (gone now), ``missing`` (already gone — not an error, a revert run twice),
     ``refused`` (policy said no) and ``file_errors`` (the delete was attempted
     and the OS said no).
+
+    Deleting a ``.msg`` also removes its index row in the same step (via
+    ``EmailRepository.delete_by_path``, next to ``delete_missing_emails``'s
+    end-of-scan sweep): otherwise the row survives until the next full scan,
+    and ``plan`` in between reports the mail ``already_archived`` at a path
+    that no longer exists instead of offering it again. A file whose delete
+    failed leaves its row alone — the file is still there, so the row is
+    still correct. Reported per result as ``index_rows_removed``.
     """
     archive_folder = get_outlook_archive_folder(cfg)
     category = get_outlook_category(cfg)
     roots = _archive_roots(cfg)
     results: list[dict[str, Any]] = []
 
-    for raw in items:
-        message_id = normalize_message_id(raw.get("message_id"))
-        result = _blank_revert_result(message_id)
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    try:
+        for raw in items:
+            message_id = normalize_message_id(raw.get("message_id"))
+            result = _blank_revert_result(message_id)
 
-        for raw_path in raw.get("files") or []:
-            resolved, refusal = _resolve_under_roots(str(raw_path), roots)
-            if resolved is None:
-                result["refused"].append({"path": str(raw_path), "reason": refusal})
-                continue
-            try:
-                resolved.unlink()
-                result["deleted"].append(str(resolved))
-            except FileNotFoundError:
-                result["missing"].append(str(resolved))
-            except OSError as exc:
-                result["file_errors"].append(
-                    {"path": str(resolved), "message": f"{type(exc).__name__}: {exc}"}
-                )
+            for raw_path in raw.get("files") or []:
+                resolved, refusal = _resolve_under_roots(str(raw_path), roots)
+                if resolved is None:
+                    result["refused"].append({"path": str(raw_path), "reason": refusal})
+                    continue
+                try:
+                    resolved.unlink()
+                    result["deleted"].append(str(resolved))
+                except FileNotFoundError:
+                    result["missing"].append(str(resolved))
+                except OSError as exc:
+                    result["file_errors"].append(
+                        {"path": str(resolved), "message": f"{type(exc).__name__}: {exc}"}
+                    )
+                    continue
+                if resolved.suffix.lower() == ".msg":
+                    result["index_rows_removed"] += repo.delete_by_path(str(resolved))
+            conn.commit()
 
-        if not message_id:
-            result["error"] = {
-                "code": ERROR_BAD_DECISION,
-                "message": "an item needs a message_id to move the mail back",
-            }
-            results.append(result)
-            continue
-
-        try:
-            item = client.find_by_message_id(message_id, archive_folder)
-        except Exception as exc:
-            item = None
-            logger.warning("Archive-folder lookup for %s failed: %s", message_id, exc)
-
-        if item is None:
-            result["error"] = {
-                "code": ERROR_NOT_IN_ARCHIVE,
-                "message": (
-                    f"no mail with this Message-ID is in {archive_folder!r}; "
-                    "the files listed above were still processed"
-                ),
-            }
-            results.append(result)
-            continue
-
-        try:
-            client.clear_category(item, category)
-            result["category_removed"] = True
-            moved = client.move_to(item, None)
-            result["moved_back"] = True
-            result["entry_id"] = client.entry_id(moved)
-        except Exception as exc:
-            logger.exception("Moving %s back to the Inbox failed", message_id)
-            result["error"] = {
-                "code": ERROR_MOVE_FAILED,
-                "message": f"{type(exc).__name__}: {exc}",
-            }
-            results.append(result)
-            continue
-
-        result["ok"] = not result["refused"] and not result["file_errors"]
-        results.append(result)
+            results.append(_finish_revert_item(client, archive_folder, category, result, message_id))
+    finally:
+        conn.close()
 
     doc = _envelope("revert", cfg)
     reverted = sum(1 for r in results if r["ok"])
@@ -533,3 +510,52 @@ def revert(
     doc["results"] = results
     logger.info("Revert: %d of %d mail(s) restored.", reverted, len(results))
     return doc
+
+
+def _finish_revert_item(
+    client: Any,
+    archive_folder: str,
+    category: str,
+    result: dict[str, Any],
+    message_id: str,
+) -> dict[str, Any]:
+    """The Outlook side of one ``revert`` item, after its files are handled."""
+    if not message_id:
+        result["error"] = {
+            "code": ERROR_BAD_DECISION,
+            "message": "an item needs a message_id to move the mail back",
+        }
+        return result
+
+    try:
+        item = client.find_by_message_id(message_id, archive_folder)
+    except Exception as exc:
+        item = None
+        logger.warning("Archive-folder lookup for %s failed: %s", message_id, exc)
+
+    if item is None:
+        result["error"] = {
+            "code": ERROR_NOT_IN_ARCHIVE,
+            "message": (
+                f"no mail with this Message-ID is in {archive_folder!r}; "
+                "the files listed above were still processed"
+            ),
+        }
+        return result
+
+    try:
+        client.clear_category(item, category)
+        result["category_removed"] = True
+        moved = client.move_to(item, None)
+        result["moved_back"] = True
+        result["entry_id"] = client.entry_id(moved)
+    except Exception as exc:
+        logger.exception("Moving %s back to the Inbox failed", message_id)
+        result["error"] = {
+            "code": ERROR_MOVE_FAILED,
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+        return result
+
+    result["ok"] = not result["refused"] and not result["file_errors"]
+    return result

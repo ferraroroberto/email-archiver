@@ -155,6 +155,16 @@ class EmailRepository:
         self._conn.execute("DROP TABLE tmp_known_paths")
         return cur.rowcount
 
+    def delete_by_path(self, file_path: str) -> int:
+        """Remove the index row for one file, if any. Returns rows deleted.
+
+        Called by ``batch.revert`` right after it unlinks a ``.msg`` it
+        deleted, so the index and the disk agree without waiting for the
+        next full scan's :meth:`delete_missing_emails` sweep. Caller commits.
+        """
+        cur = self._conn.execute("DELETE FROM emails WHERE file_path = ?", (file_path,))
+        return cur.rowcount
+
     # -------------------------------------------------- read operations ----
 
     def get_mtime(self, file_path: str) -> float | None:

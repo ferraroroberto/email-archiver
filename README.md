@@ -267,7 +267,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 |---|---|---|
 | `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. Read-only. |
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. |
-| `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes the category and moves the mail back to the Inbox. |
+| `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -292,6 +292,7 @@ Every document carries `schema_version`, so a consumer can refuse a shape it doe
 
 - `revert` deletes **only** the files it is given, and only those that resolve inside `archive.root_paths`. Anything else is refused per file with a reason (`outside_archive_roots`, `unresolvable_path`) and left on disk.
 - A file already gone is reported as `missing`, not as an error — running a revert twice is not a failure to explain.
+- Deleting a `.msg` also removes its row from the index in the same step (`index_rows_removed` in the result), so `plan` offers the mail again right away instead of waiting for the next full scan to notice the file is gone. A file whose delete failed keeps its row — the file is still there, so the row is still correct.
 - Outlook closed at `plan` time is **started** (the registered `outlook.exe`, visible, exactly as your own shortcut would) and waited for, bounded by `--start-timeout` (60 s by default). A still-unreachable Outlook is a loud exit 2, never an empty Inbox nobody read.
 - Batch mode is meant to be spawned with a timeout. A COM modal — the address-book security prompt, a profile chooser — then blocks *this* process, which the caller can kill, and never the caller.
 - The `date_prefix` flag on an `apply` decision is per mail and comes from the caller. Batch mode deliberately does **not** re-read the global `naming.date_prefix` toggle itself for `apply` — the right form depends on the destination folder, so each `plan` candidate already carries the `date_prefix` that folder would get under the configured mode (inferred per folder when `naming.date_prefix: auto`, the fixed config value otherwise); the caller normally just hands that value straight back on the decision for the folder it picked.

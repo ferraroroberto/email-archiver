@@ -84,3 +84,4 @@ flowchart TB
   BATCH -->|plan: already archived?| REPO
   BATCH -->|apply: per-mail date_prefix| ARCHIVER
   BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
+  BATCH -->|revert: delete_by_path per deleted .msg| REPO
