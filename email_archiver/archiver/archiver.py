@@ -58,8 +58,10 @@ logger = logging.getLogger(__name__)
 _OL_MSG_FORMAT = 3
 
 # Regexes to find the leading sequence number, in either filename form.
-# Dated is tried first since it is the more specific match.
-_RE_DATED_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} - (\d{3}) - ")
+# Dated is tried first since it is the more specific match. Applied in exactly
+# one place — ``split_sequence_prefix`` below; every caller reads a filename
+# through that, so the naming rules stay owned by this module.
+_RE_DATED_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2}) - (\d{3}) - ")
 _RE_UNDATED_PREFIX = re.compile(r"^(\d{3}) - ")
 
 # Maximum path length (in chars) the fitted filename must stay within. This is
@@ -86,7 +88,49 @@ class ArchiveResult:
 
 # ---------------------------------------------------------------- helpers ---
 
-def _sanitize_filename(text: str, max_len: int = 80) -> str:
+@dataclass(frozen=True)
+class SequencePrefix:
+    """A filename's leading sequence field, split into its parts.
+
+    ``"023 - report.pdf"`` → ``SequencePrefix("", "023", "report.pdf")`` and
+    ``"2026-03-14 - 023 - report.pdf"`` →
+    ``SequencePrefix("2026-03-14", "023", "report.pdf")``. Keeping the date
+    prefix as written (rather than a bool) is what lets a caller rewrite the
+    number without touching the form or re-deriving the date.
+    """
+
+    date_prefix: str  # "" for the undated form, "YYYY-MM-DD" otherwise
+    number: str       # the three digits exactly as written
+    rest: str         # everything after the prefix — the name itself
+
+    @property
+    def dated(self) -> bool:
+        return bool(self.date_prefix)
+
+    def with_number(self, number: str) -> str:
+        """The same filename carrying ``number`` instead, in the same form."""
+        head = f"{self.date_prefix} - " if self.date_prefix else ""
+        return f"{head}{number} - {self.rest}"
+
+
+def split_sequence_prefix(filename: str) -> SequencePrefix | None:
+    """Split ``filename``'s leading sequence field, or ``None`` when it has none.
+
+    Both forms are always recognised, dated first since it is the more specific
+    match — the same rule sequence allocation has always used, now shared with
+    :mod:`email_archiver.renumber` so the two can never drift apart on what
+    counts as a numbered file.
+    """
+    m = _RE_DATED_PREFIX.match(filename)
+    if m:
+        return SequencePrefix(m.group(1), m.group(2), filename[m.end():])
+    m = _RE_UNDATED_PREFIX.match(filename)
+    if m:
+        return SequencePrefix("", m.group(1), filename[m.end():])
+    return None
+
+
+def sanitize_filename(text: str, max_len: int = 80) -> str:
     """
     Remove characters illegal on Windows NTFS and truncate.
     Keeps ASCII letters/digits + a small set of safe punctuation.
@@ -166,14 +210,13 @@ def _scan_folder(folder_path: str) -> _FolderScan:
     dated = 0
     undated = 0
     for fname in files:
-        m = _RE_DATED_PREFIX.match(fname)
-        if m:
-            numbers.append(int(m.group(1)))
-            dated += 1
+        parsed = split_sequence_prefix(fname)
+        if parsed is None:
             continue
-        m = _RE_UNDATED_PREFIX.match(fname)
-        if m:
-            numbers.append(int(m.group(1)))
+        numbers.append(int(parsed.number))
+        if parsed.dated:
+            dated += 1
+        else:
             undated += 1
 
     next_num = (max(numbers) + 1) if numbers else 1
@@ -377,7 +420,7 @@ class EmailArchiver:
         subject: str,
         date_prefix: str | None,
     ) -> str:
-        safe_subject = _sanitize_filename(subject)
+        safe_subject = sanitize_filename(subject)
         filename = _fit_filename_to_path(
             folder_path, seq, safe_subject, ".msg",
             date_prefix=date_prefix, max_path=self._max_path,
@@ -442,7 +485,7 @@ class EmailArchiver:
 
             try:
                 original_name = attachment.FileName or f"attachment_{att_index}"
-                stem = _sanitize_filename(Path(original_name).stem, max_len=60)
+                stem = sanitize_filename(Path(original_name).stem, max_len=60)
                 suffix = Path(original_name).suffix.lower()
 
                 att_filename = _fit_filename_to_path(

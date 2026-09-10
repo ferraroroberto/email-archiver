@@ -1,5 +1,5 @@
 """
-Headless batch mode: plan / apply / revert the whole Inbox with JSON I/O.
+Headless batch mode: plan / apply / revert / renumber, with JSON I/O.
 
 This module is what ``main_batch.py`` runs and what the tests exercise. It is
 pure orchestration over :class:`~email_archiver.outlook.client.OutlookClient`,
@@ -39,6 +39,13 @@ Design decisions:
   roots.** Anything resolving outside ``archive.root_paths`` is refused per
   file with a reason rather than deleted, so a malformed or hostile items file
   cannot reach the rest of the disk.
+- **Renumbering is opt-in and reported, never implied.** ``apply`` and
+  ``revert`` leave the sequence exactly as they always have unless
+  ``--renumber`` is passed; with it, each touched folder is renumbered once and
+  the document carries the old → new map under ``renumbered`` so the consumer
+  can heal the ``.msg`` paths it stored. A folder that could *not* be
+  renumbered is listed under ``renumber_refused`` with its reason — never an
+  empty map, which means something else entirely ("already in order").
 """
 from __future__ import annotations
 
@@ -50,7 +57,6 @@ from typing import Any
 
 from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import (
-    get_archive_roots,
     get_outlook_archive_folder,
     get_outlook_category,
 )
@@ -58,6 +64,13 @@ from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
 from email_archiver.outlook.client import EmailData, is_message_changed_error
+from email_archiver.paths import (
+    REFUSED_OUTSIDE_ROOTS,
+    REFUSED_UNRESOLVABLE,
+    archive_roots as _archive_roots,
+    resolve_under_roots as _resolve_under_roots,
+)
+from email_archiver.renumber import RenumberResult, renumber_folder
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
@@ -87,9 +100,10 @@ ERROR_MOVE_FAILED = "move_failed"               # files are on disk, mail is not
 # looks untouched in Outlook.
 ERROR_CATEGORY_FAILED = "category_failed"
 
-# Per-file outcomes in a revert result.
-REFUSED_OUTSIDE_ROOTS = "outside_archive_roots"
-REFUSED_UNRESOLVABLE = "unresolvable_path"
+# The per-file outcomes in a revert result — REFUSED_OUTSIDE_ROOTS and
+# REFUSED_UNRESOLVABLE — are imported above from `paths`, which owns the
+# archive-root guard now that `renumber` applies it too. They stay readable as
+# `batch.REFUSED_*`, which is where consumers and tests look for them.
 
 # Which reference finished an `apply` move, reported as the result's
 # `move_via`. Three genuinely different stories about the same mail, and the
@@ -173,52 +187,6 @@ def _mail_dict(mail: Any) -> dict[str, Any]:
     }
 
 
-def _is_within(child: Path, root: Path) -> bool:
-    """Whether ``child`` is ``root`` or lives underneath it.
-
-    Compared through ``os.path.normcase`` rather than
-    ``Path.is_relative_to`` alone: on Windows the two paths routinely differ in
-    case (the config spells a root one way, ``resolve()`` another) and a
-    case-sensitive comparison would refuse a file that is genuinely inside the
-    archive. The trailing separator is what stops ``C:\\Archive`` from matching
-    ``C:\\ArchiveOther``.
-    """
-    child_s = os.path.normcase(str(child))
-    root_s = os.path.normcase(str(root))
-    if child_s == root_s:
-        return True
-    return child_s.startswith(root_s.rstrip("\\/") + os.sep)
-
-
-def _resolve_under_roots(
-    raw_path: str, roots: list[Path]
-) -> tuple[Path | None, str | None]:
-    """Resolve a path and require it to sit under one of the archive roots.
-
-    Returns ``(path, None)`` when it does, ``(None, reason)`` when it does not.
-    The refusal is deliberately not an exception: ``revert`` reports it per file
-    and carries on with the rest of the bundle.
-    """
-    try:
-        resolved = Path(raw_path).resolve()
-    except (OSError, ValueError):
-        return None, REFUSED_UNRESOLVABLE
-    for root in roots:
-        if _is_within(resolved, root):
-            return resolved, None
-    return None, REFUSED_OUTSIDE_ROOTS
-
-
-def _archive_roots(cfg: dict[str, Any]) -> list[Path]:
-    resolved: list[Path] = []
-    for raw in get_archive_roots(cfg):
-        try:
-            resolved.append(Path(raw).resolve())
-        except (OSError, ValueError):
-            logger.warning("Ignoring unresolvable archive root: %r", raw)
-    return resolved
-
-
 def _envelope(verb: str, cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "verb": verb,
@@ -227,6 +195,57 @@ def _envelope(verb: str, cfg: dict[str, Any]) -> dict[str, Any]:
         "archive_folder": get_outlook_archive_folder(cfg),
         "category": get_outlook_category(cfg),
     }
+
+
+def _unique_folders(paths: list[str]) -> list[str]:
+    """The distinct folders in ``paths``, first spelling wins.
+
+    Deduplicated case-insensitively because Windows hands the same folder back
+    spelled several ways, and renumbering one folder twice in a run would
+    reorder what the first pass just fixed.
+    """
+    seen: set[str] = set()
+    folders: list[str] = []
+    for raw in paths:
+        folder = os.path.normpath(raw)
+        key = os.path.normcase(folder)
+        if key in seen:
+            continue
+        seen.add(key)
+        folders.append(folder)
+    return folders
+
+
+def _renumber_folders(
+    cfg: dict[str, Any], repo: EmailRepository, folders: list[str]
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Renumber each touched folder once; return ``(renumbered, refused)``.
+
+    ``renumbered`` is the map a consumer heals its stored paths from, keyed by
+    folder. A folder that could not be renumbered at all is **not** an empty
+    map in there — an empty map means "already in order", which is a different
+    fact — it goes into ``refused`` with its reason.
+    """
+    roots = _archive_roots(cfg)
+    renumbered: dict[str, list[dict[str, Any]]] = {}
+    refused: list[dict[str, Any]] = []
+
+    for folder in folders:
+        try:
+            result = renumber_folder(folder, repo, roots)
+        except Exception as exc:  # one folder's failure is not the run's
+            logger.exception("Renumbering %r failed", folder)
+            refused.append({
+                "folder_path": folder,
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+        if result.refused:
+            refused.append({"folder_path": folder, "reason": result.refused})
+            continue
+        renumbered[result.folder_path] = result.renamed
+
+    return renumbered, refused
 
 
 def error_document(verb: str, code: str, message: str) -> dict[str, Any]:
@@ -343,6 +362,8 @@ def apply(
     client: Any,
     cfg: dict[str, Any],
     decisions: list[dict[str, Any]],
+    *,
+    renumber: bool = False,
 ) -> dict[str, Any]:
     """Archive each decided mail, move it out of the Inbox and tag it.
 
@@ -361,6 +382,13 @@ def apply(
 
     Whatever happens to one mail, the next is still attempted; the per-mail
     ``error`` says what went wrong and ``files`` says what is already on disk.
+
+    With ``renumber`` on, every destination folder this run put a bundle in is
+    renumbered once afterwards — a mail older than the folder's newest file
+    took ``max + 1`` on the way in, and this is what puts it back in date order
+    — and the document carries the old → new map per folder under
+    ``renumbered``. Off (the default), the verb behaves exactly as before and
+    neither key appears.
     """
     archive_folder = get_outlook_archive_folder(cfg)
     category = get_outlook_category(cfg)
@@ -373,10 +401,16 @@ def apply(
             results.append(
                 _apply_one(client, cfg, repo, raw, archive_folder, category)
             )
+        doc = _envelope("apply", cfg)
+        if renumber:
+            # Only a folder this run actually wrote into, and only once each.
+            doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
+                cfg, repo,
+                _unique_folders([r["folder_path"] for r in results if r["files"]]),
+            )
     finally:
         conn.close()
 
-    doc = _envelope("apply", cfg)
     applied = sum(1 for r in results if r["ok"])
     doc["counts"] = {
         "requested": len(results),
@@ -607,6 +641,8 @@ def revert(
     client: Any,
     cfg: dict[str, Any],
     items: list[dict[str, Any]],
+    *,
+    renumber: bool = False,
 ) -> dict[str, Any]:
     """Delete the listed archive files and put each mail back in the Inbox.
 
@@ -627,6 +663,11 @@ def revert(
     that no longer exists instead of offering it again. A file whose delete
     failed leaves its row alone — the file is still there, so the row is
     still correct. Reported per result as ``index_rows_removed``.
+
+    With ``renumber`` on, every folder this run deleted a file from is
+    renumbered once afterwards, closing the gap the delete left, and the
+    document carries the old → new map per folder under ``renumbered``. Off
+    (the default), the verb behaves exactly as before and neither key appears.
     """
     archive_folder = get_outlook_archive_folder(cfg)
     category = get_outlook_category(cfg)
@@ -660,10 +701,19 @@ def revert(
             conn.commit()
 
             results.append(_finish_revert_item(client, archive_folder, category, result, message_id))
+        doc = _envelope("revert", cfg)
+        if renumber:
+            # The source folders: a gap only exists where a file really went.
+            doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
+                cfg, repo,
+                _unique_folders([
+                    os.path.dirname(path)
+                    for r in results for path in r["deleted"]
+                ]),
+            )
     finally:
         conn.close()
 
-    doc = _envelope("revert", cfg)
     reverted = sum(1 for r in results if r["ok"])
     doc["counts"] = {
         "requested": len(results),
@@ -722,3 +772,54 @@ def _finish_revert_item(
 
     result["ok"] = not result["refused"] and not result["file_errors"]
     return result
+
+
+# --------------------------------------------------------------- renumber ---
+
+def renumber(
+    cfg: dict[str, Any], folder_path: str, *, dry_run: bool = False
+) -> dict[str, Any]:
+    """Renumber one folder and return the old → new map.
+
+    The only verb that touches neither Outlook nor COM: it reads a folder
+    listing and the index, and renames files. ``dry_run`` reports exactly the
+    same map without changing anything on disk.
+
+    The map is reported under the same ``renumbered`` key ``apply --renumber``
+    and ``revert --renumber`` use, so a consumer healing its stored ``.msg``
+    paths reads one shape whichever verb produced it.
+    """
+    normalised = os.path.normpath(folder_path)
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    try:
+        result = renumber_folder(
+            folder_path, repo, _archive_roots(cfg), dry_run=dry_run
+        )
+    except Exception as exc:
+        # Never a traceback over an empty stdout: this process's contract is one
+        # JSON document, in one shape, whatever happened. A run that stopped
+        # part-way is refused with its reason and reports no map — a map the
+        # disk may not match is worse to hand a consumer than none at all.
+        logger.exception("Renumbering %r failed", normalised)
+        result = RenumberResult(
+            folder_path=normalised,
+            dry_run=dry_run,
+            refused=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        conn.close()
+
+    doc = _envelope("renumber", cfg)
+    doc["dry_run"] = result.dry_run
+    doc["folder_path"] = result.folder_path
+    doc["first_number"] = result.first_number
+    doc["last_number"] = result.last_number
+    doc["counts"] = result.counts()
+    doc["skipped"] = result.skipped
+    doc["renumbered"] = {} if result.refused else {result.folder_path: result.renamed}
+    doc["renumber_refused"] = (
+        [{"folder_path": result.folder_path, "reason": result.refused}]
+        if result.refused else []
+    )
+    return doc

@@ -13,11 +13,12 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert,\none JSON document on stdout"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber,\none JSON document on stdout"]
   end
 
   CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nsetup_logging"]
   TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping ·\nnormalize_message_id — one spelling of the\nMessage-ID for the scanner and the Outlook client"]
+  PATHS["email_archiver/paths.py\nis_within · resolve_under_roots · archive_roots —\nthe one archive.root_paths guard, shared by\nrevert's deletes and renumber's renames"]
 
   MAINSCAN --> CONFIG
   MAINARCHIVE --> CONFIG
@@ -74,7 +75,8 @@ flowchart TB
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE
 
   subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
-    BATCH["batch.py\nplan · apply · revert —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]
+    BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]
+    RENUMBER["renumber.py: renumber_folder\nbundles a number with its files, orders them by\nsent date, hands out contiguous numbers from the\nfolder's lowest, two-phase renames, returns the\nold-to-new map the consumer heals its paths from"]
   end
   CALLER["another local app (task-os)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
@@ -85,3 +87,10 @@ flowchart TB
   BATCH -->|apply: per-mail date_prefix,\nskipped entirely for a reused mail| ARCHIVER
   BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
   BATCH -->|revert: delete_by_path per deleted .msg| REPO
+  BATCH -->|renumber verb, or --renumber on apply / revert:\nonce per touched folder| RENUMBER
+  RENUMBER --> PATHS
+  BATCH --> PATHS
+  RENUMBER -->|split_sequence_prefix · sanitize_filename —\nthe naming rules stay the archiver's| ARCHIVER
+  RENUMBER -->|read_msg_facts: date, Message-ID, attachment names\nfor a .msg the index has not seen yet| SCANNER
+  RENUMBER -->|one listing pass, then os.rename per changed file| ONEDRIVE
+  RENUMBER -->|find_in_folder · update_path · delete_by_path| REPO

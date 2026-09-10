@@ -1,24 +1,28 @@
 """
-Headless batch entry point – plan / apply / revert the whole Outlook Inbox.
+Headless batch entry point – plan / apply / revert / renumber, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os), never used
 interactively: every verb prints exactly one JSON document on stdout, logs to
 the usual log file and to stderr, and never opens a window.
 
     python main_batch.py plan --candidates 5 > plan.json
-    python main_batch.py apply --decisions decisions.json
-    python main_batch.py revert --items revert.json
+    python main_batch.py apply --decisions decisions.json [--renumber]
+    python main_batch.py revert --items revert.json [--renumber]
+    python main_batch.py renumber --folder "<a folder>" [--dry-run]
 
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
        still have failed, each with its own `error` inside the document
-    2  the run could not start: no config, unreadable input, or Outlook
-       unreachable. stdout carries `{"error": {"code", "message"}}` instead
+    2  the run could not start: no config, unreadable input, a folder outside
+       the archive roots, or Outlook unreachable. stdout carries
+       `{"error": {"code", "message"}}` instead
 
-Why a separate process rather than a library call: every verb drives Outlook
-over COM, and a COM modal (the address-book security prompt, a profile chooser)
-blocks whatever thread it is raised on. Spawning this with a timeout means such
-a prompt hangs *this* process, which the caller can kill, and never the caller.
+Why a separate process rather than a library call: the Inbox verbs drive
+Outlook over COM, and a COM modal (the address-book security prompt, a profile
+chooser) blocks whatever thread it is raised on. Spawning this with a timeout
+means such a prompt hangs *this* process, which the caller can kill, and never
+the caller. ``renumber`` is the exception that proves the rule: it reads a
+folder and the index and touches no COM at all, so it never starts Outlook.
 """
 from __future__ import annotations
 
@@ -123,11 +127,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "--decisions", required=True,
         help="JSON file: [{message_id, folder_path, date_prefix}, ...]",
     )
+    p_apply.add_argument(
+        "--renumber", action="store_true",
+        help="Afterwards, renumber every destination folder this run wrote "
+             "into and report the old-to-new map under `renumbered`.",
+    )
 
     p_revert = sub.add_parser("revert", help="Undo an apply: delete files, move back.")
     p_revert.add_argument(
         "--items", required=True,
         help="JSON file: [{message_id, files: [...]}, ...]",
+    )
+    p_revert.add_argument(
+        "--renumber", action="store_true",
+        help="Afterwards, close the gaps in every folder this run deleted from "
+             "and report the old-to-new map under `renumbered`.",
+    )
+
+    p_renumber = sub.add_parser(
+        "renumber",
+        help="Renumber one folder into date order and print the old-to-new map.",
+    )
+    p_renumber.add_argument(
+        "--folder", required=True,
+        help="The folder to renumber. Must be inside archive.root_paths.",
+    )
+    p_renumber.add_argument(
+        "--dry-run", action="store_true",
+        help="Report the same map without renaming anything.",
     )
     return parser
 
@@ -163,6 +190,18 @@ def main(argv: list[str] | None = None) -> int:
     if verb == "plan" and args.candidates < 1:
         return _fail(verb, ERROR_BAD_INPUT, "--candidates must be at least 1")
 
+    if verb == "renumber":
+        # No Outlook, no COM: this verb only reads a folder and the index.
+        document = batch.renumber(cfg, args.folder, dry_run=args.dry_run)
+        if document["renumber_refused"]:
+            refusal = document["renumber_refused"][0]
+            return _fail(
+                verb, ERROR_BAD_INPUT,
+                f"{refusal['folder_path']}: {refusal['reason']}",
+            )
+        _emit(document)
+        return EXIT_OK
+
     try:
         import pythoncom  # noqa: PLC0415
     except ImportError as exc:
@@ -184,9 +223,9 @@ def main(argv: list[str] | None = None) -> int:
         if verb == "plan":
             document = batch.plan(client, cfg, candidates=args.candidates)
         elif verb == "apply":
-            document = batch.apply(client, cfg, payload)
+            document = batch.apply(client, cfg, payload, renumber=args.renumber)
         else:
-            document = batch.revert(client, cfg, payload)
+            document = batch.revert(client, cfg, payload, renumber=args.renumber)
     finally:
         pythoncom.CoUninitialize()
 
