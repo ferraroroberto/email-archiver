@@ -266,7 +266,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | Verb | Reads | Does |
 |---|---|---|
 | `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. Read-only. |
-| `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. |
+| `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
@@ -287,6 +287,19 @@ Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `
 `apply` fills in a result's `files` **before** it moves the mail, so a mail that was written to disk but failed to move is still fully revertible — that is why a result can carry `ok: false` and a non-empty `files` at the same time.
 
 Every document carries `schema_version`, so a consumer can refuse a shape it does not understand rather than read a field that silently moved.
+
+### Retrying a mail that was written but never moved
+
+A mail can end up with its files on disk and its place in the Inbox kept: `SaveAs` leaves the in-memory Outlook item flagged as modified often enough that the `Move` right after it is refused with *"the operation cannot be performed because the message has been changed"* (MAPI `0x80040109`). That mail is reported `move_failed`, and every later `plan` reports it `already_archived` — its `.msg` is in the index — so without a retry path it could never leave the Inbox.
+
+Two things make it retryable:
+
+- **`apply` moves a reference it re-acquires from the store by EntryID**, not the one it just wrote to disk, and on a `0x80040109` from that reference too it saves it once and retries the move. Which of the three paths finished the move is logged and reported per result as `move_via`: `refetched` (the re-acquired reference was enough), `saved_retry` (it took a `Save()` and one more attempt) or `original` (the re-acquire failed, so the original reference was moved). A move that fails for any *other* reason is still a plain `move_failed`, never retried.
+- **`apply` accepts a decision for a mail `plan` reported `already_archived`** and finishes it: it writes nothing, moves the mail to the `Archive` folder, tags it, and reports the existing file as `files` with `reused: true` and an empty `sequence_number` (none was allocated). This is what a consumer offers as *retry* on such a mail. The one exception is an index row whose file is gone — no longer proof of anything, so that mail is archived for real instead.
+
+One case is beyond both defences and is called out by name in the result: when the running Outlook process itself is holding the item, every write to it is refused for the life of that process — a re-acquired reference and a `Save()` are refused exactly like the original. The mail keeps its `move_failed`, and the message says what to do: **restart Outlook, then apply the same decision again**. It then completes on the first attempt, and because the files are already on disk it writes nothing.
+
+`plan` also states `in_inbox` on every mail it reports. It is always `true` — `plan` enumerates the Inbox — but it is the fact that separates an `already_archived` mail *still sitting in the Inbox* from one that is properly filed and gone, so a consumer can key a retry offer off the document rather than off an assumption.
 
 ### Safety
 

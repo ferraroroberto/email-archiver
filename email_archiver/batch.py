@@ -24,6 +24,17 @@ Design decisions:
 - **``files`` is filled in before the move**, so a mail that was written to disk
   but failed to move is still fully revertible from the ``apply`` output. That
   is why an entry can carry ``ok: false`` and a non-empty ``files`` at once.
+- **A mail is never archived twice.** ``apply`` re-checks the index per
+  decision: a mail already filed there (the one ``plan`` reports
+  ``already_archived``, still in the Inbox because an earlier run's move
+  failed) is *finished* rather than re-written — ``reused: true``, the existing
+  file reported back, nothing new on disk.
+- **The reference that is moved is not the one that was archived.**
+  ``MailItem.SaveAs`` can leave an item flagged as modified and ``Move`` then
+  refuses it with MAPI_E_OBJECT_CHANGED, which is how a mail ends up with its
+  files written and its place in the Inbox kept. ``apply`` moves a reference
+  re-acquired by EntryID, and on that refusal saves and retries once; which
+  path finished it is logged and reported as ``move_via``.
 - **``revert`` deletes only what it is given, and only inside the archive
   roots.** Anything resolving outside ``archive.root_paths`` is refused per
   file with a reason rather than deleted, so a malformed or hostile items file
@@ -46,7 +57,7 @@ from email_archiver.config import (
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
-from email_archiver.outlook.client import EmailData
+from email_archiver.outlook.client import EmailData, is_message_changed_error
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
@@ -79,6 +90,14 @@ ERROR_CATEGORY_FAILED = "category_failed"
 # Per-file outcomes in a revert result.
 REFUSED_OUTSIDE_ROOTS = "outside_archive_roots"
 REFUSED_UNRESOLVABLE = "unresolvable_path"
+
+# Which reference finished an `apply` move, reported as the result's
+# `move_via`. Three genuinely different stories about the same mail, and the
+# one place that says whether the re-acquire is earning its keep on this
+# mailbox — see `_move_out_of_inbox`.
+MOVE_VIA_REFETCHED = "refetched"     # a reference read back out of the store
+MOVE_VIA_ORIGINAL = "original"       # the re-acquire failed; the original moved
+MOVE_VIA_SAVED_RETRY = "saved_retry"  # refused with 0x80040109, saved, retried
 
 
 # ---------------------------------------------------------------- helpers ---
@@ -144,6 +163,13 @@ def _mail_dict(mail: Any) -> dict[str, Any]:
         "body_preview": mail.body_preview,
         "attachment_count": mail.attachment_count,
         "flag_status": mail.flag_status,
+        # Always true today — ``plan`` enumerates the Inbox, so a mail it
+        # reports is in it by construction. Stated anyway because it is the
+        # fact that makes an ``already_archived`` mail *retryable*: its files
+        # are on disk but it never left the Inbox, and a consumer reading only
+        # ``already_archived`` cannot tell that from a mail that is properly
+        # filed and gone (issue #59).
+        "in_inbox": True,
     }
 
 
@@ -303,6 +329,12 @@ def _blank_apply_result(message_id: str, folder_path: str) -> dict[str, Any]:
         "entry_id": "",
         "moved": False,
         "categorized": False,
+        # True when the mail was already on disk and this run only finished it
+        # in Outlook — nothing was written, and `files` is what was found, not
+        # what was created. `sequence_number` stays empty: none was allocated.
+        "reused": False,
+        # Which reference the move went through, "" when it never happened.
+        "move_via": "",
         "error": None,
     }
 
@@ -319,6 +351,14 @@ def apply(
     never reads the global ``naming.date_prefix`` toggle, because the caller
     infers the form the destination folder actually uses.
 
+    A decision for a mail the index already holds — the one ``plan`` reported
+    ``already_archived``, still sitting in the Inbox because an earlier run
+    wrote its files and then failed to move it — writes **nothing**: the
+    existing ``.msg`` is reported back as ``files``, ``reused`` is true, and
+    the mail is moved and tagged like any other. That is what makes such a mail
+    finishable at all; re-archiving it would file a second copy beside the
+    first (issue #59).
+
     Whatever happens to one mail, the next is still attempted; the per-mail
     ``error`` says what went wrong and ``files`` says what is already on disk.
     """
@@ -326,38 +366,97 @@ def apply(
     category = get_outlook_category(cfg)
     results: list[dict[str, Any]] = []
 
-    for raw in decisions:
-        message_id = normalize_message_id(raw.get("message_id"))
-        folder_path = str(raw.get("folder_path") or "")
-        result = _blank_apply_result(message_id, folder_path)
+    conn = init_db(cfg["database"]["path"])
+    repo = EmailRepository(conn)
+    try:
+        for raw in decisions:
+            results.append(
+                _apply_one(client, cfg, repo, raw, archive_folder, category)
+            )
+    finally:
+        conn.close()
 
-        if not message_id or not folder_path:
-            result["error"] = {
-                "code": ERROR_BAD_DECISION,
-                "message": "a decision needs both a message_id and a folder_path",
-            }
-            results.append(result)
-            continue
+    doc = _envelope("apply", cfg)
+    applied = sum(1 for r in results if r["ok"])
+    doc["counts"] = {
+        "requested": len(results),
+        "applied": applied,
+        "failed": len(results) - applied,
+    }
+    doc["results"] = results
+    logger.info("Apply: %d of %d mail(s) filed.", applied, len(results))
+    return doc
 
-        item = None
-        try:
-            item = client.find_by_message_id(message_id, None)
-        except Exception as exc:  # a COM failure on one lookup, not the run
-            result["error"] = {
-                "code": ERROR_NOT_IN_INBOX,
-                "message": f"Inbox lookup failed: {type(exc).__name__}: {exc}",
-            }
-            results.append(result)
-            continue
 
-        if item is None:
-            result["error"] = {
-                "code": ERROR_NOT_IN_INBOX,
-                "message": "no mail with this Message-ID is in the Inbox",
-            }
-            results.append(result)
-            continue
+def _archived_file_to_reuse(repo: EmailRepository, message_id: str) -> str | None:
+    """The ``.msg`` this mail is already filed as, when it really is on disk.
 
+    An index row is not proof the file is still there: a row can outlive its
+    file (a manual delete, a move in Explorer). Reporting ``reused`` over a
+    path that no longer exists would leave the mail tagged and filed in Outlook
+    with nothing on disk to show for it, so an unbacked row falls through to a
+    normal archive instead.
+    """
+    path = repo.find_path_by_message_id(message_id)
+    if not path:
+        return None
+    if Path(path).exists():
+        return path
+    logger.info(
+        "The index has %s at %r but the file is gone; archiving it again.",
+        message_id, path,
+    )
+    return None
+
+
+def _apply_one(
+    client: Any,
+    cfg: dict[str, Any],
+    repo: EmailRepository,
+    raw: dict[str, Any],
+    archive_folder: str,
+    category: str,
+) -> dict[str, Any]:
+    """One decision, start to finish. Never raises: every failure is a result."""
+    message_id = normalize_message_id(raw.get("message_id"))
+    folder_path = str(raw.get("folder_path") or "")
+    result = _blank_apply_result(message_id, folder_path)
+
+    if not message_id or not folder_path:
+        result["error"] = {
+            "code": ERROR_BAD_DECISION,
+            "message": "a decision needs both a message_id and a folder_path",
+        }
+        return result
+
+    try:
+        item = client.find_by_message_id(message_id, None)
+    except Exception as exc:  # a COM failure on one lookup, not the run
+        result["error"] = {
+            "code": ERROR_NOT_IN_INBOX,
+            "message": f"Inbox lookup failed: {type(exc).__name__}: {exc}",
+        }
+        return result
+
+    if item is None:
+        result["error"] = {
+            "code": ERROR_NOT_IN_INBOX,
+            "message": "no mail with this Message-ID is in the Inbox",
+        }
+        return result
+
+    reused = _archived_file_to_reuse(repo, message_id)
+    if reused:
+        # Nothing to write: an earlier run already wrote this bundle and only
+        # the Outlook half of it is unfinished. Writing again would file a
+        # second copy of the same mail beside the first.
+        logger.info(
+            "Mail %s is already archived as %r; finishing it in Outlook "
+            "without writing anything.", message_id, reused,
+        )
+        result["reused"] = True
+        result["files"] = [reused]
+    else:
         try:
             mail = client.read_mail(item)
             archiver = EmailArchiver(
@@ -370,56 +469,120 @@ def apply(
                 "code": ERROR_ARCHIVE_FAILED,
                 "message": f"{type(exc).__name__}: {exc}",
             }
-            results.append(result)
-            continue
+            return result
 
         result["sequence_number"] = archived.sequence_number
         # Filled in before the move on purpose: if the move fails these files
         # exist and the caller must be able to revert them.
         result["files"] = [archived.email_path, *archived.attachment_paths]
 
-        try:
-            moved = client.move_to(item, archive_folder)
-            result["moved"] = True
-            result["entry_id"] = client.entry_id(moved)
-        except Exception as exc:
-            logger.exception("Moving %s to %r failed", message_id, archive_folder)
-            result["error"] = {
-                "code": ERROR_MOVE_FAILED,
-                "message": f"{type(exc).__name__}: {exc}",
-            }
-            results.append(result)
-            continue
+    try:
+        moved, via = _move_out_of_inbox(client, item, archive_folder, message_id)
+        result["moved"] = True
+        result["move_via"] = via
+        result["entry_id"] = client.entry_id(moved)
+    except Exception as exc:
+        logger.exception("Moving %s to %r failed", message_id, archive_folder)
+        result["error"] = {
+            "code": ERROR_MOVE_FAILED,
+            "message": f"{type(exc).__name__}: {exc}{_move_remedy(exc)}",
+        }
+        return result
 
-        # Tagged in its own step: a category that would not stick is a
-        # different state from a move that did not happen, and the caller
-        # recovers from the two differently.
-        try:
-            client.set_category(moved, category)
-            result["categorized"] = True
-        except Exception as exc:
-            logger.exception("Tagging %s with %r failed", message_id, category)
-            result["error"] = {
-                "code": ERROR_CATEGORY_FAILED,
-                "message": f"the mail was filed and moved, but not tagged: "
-                           f"{type(exc).__name__}: {exc}",
-            }
-            results.append(result)
-            continue
+    # Tagged in its own step: a category that would not stick is a different
+    # state from a move that did not happen, and the caller recovers from the
+    # two differently.
+    try:
+        client.set_category(moved, category)
+        result["categorized"] = True
+    except Exception as exc:
+        logger.exception("Tagging %s with %r failed", message_id, category)
+        result["error"] = {
+            "code": ERROR_CATEGORY_FAILED,
+            "message": f"the mail was filed and moved, but not tagged: "
+                       f"{type(exc).__name__}: {exc}",
+        }
+        return result
 
-        result["ok"] = True
-        results.append(result)
+    result["ok"] = True
+    return result
 
-    doc = _envelope("apply", cfg)
-    applied = sum(1 for r in results if r["ok"])
-    doc["counts"] = {
-        "requested": len(results),
-        "applied": applied,
-        "failed": len(results) - applied,
-    }
-    doc["results"] = results
-    logger.info("Apply: %d of %d mail(s) filed.", applied, len(results))
-    return doc
+
+def _move_remedy(exc: Exception) -> str:
+    """The sentence appended to a ``move_failed`` message, when there is one.
+
+    A move refused as *the message has been changed* even after the re-acquire
+    and the save-and-retry is its own condition, and a recoverable one: the
+    files are on disk, the mail is still in the Inbox, and the state that
+    refuses the write is held by the running Outlook process itself — a
+    restart clears it and re-applying the same decision then finishes the mail
+    without writing anything (observed on the mail in issue #59: refused on a
+    freshly re-acquired reference *and* on ``Save()``, moved on the first
+    attempt after Outlook was restarted). Saying so here is what makes the
+    next occurrence diagnosable from the run's own output.
+    """
+    if not is_message_changed_error(exc):
+        return ""
+    return (
+        " — Outlook refused the move as a changed message twice, on a "
+        "re-acquired reference and after saving it. The files are on disk and "
+        "the mail is still in the Inbox: restarting Outlook and applying this "
+        "same decision again finishes it without writing anything."
+    )
+
+
+def _move_out_of_inbox(
+    client: Any, item: Any, archive_folder: str, message_id: str
+) -> tuple[Any, str]:
+    """Move a just-archived mail out of the Inbox; return it and how it went.
+
+    ``MailItem.SaveAs`` can leave the in-memory item flagged as modified, and
+    ``Move`` on that same reference is then refused with MAPI_E_OBJECT_CHANGED
+    — the mail keeps its place in the Inbox with its files already on disk, and
+    the next ``plan`` reports it ``already_archived``, so batch mode could
+    never file it (issue #59). Two defences, in order:
+
+    1. move a reference re-acquired from the store by EntryID, which carries
+       none of the original's modified state;
+    2. on a 0x80040109 anyway, ``Save()`` that reference — which is what clears
+       the flag — and retry the move exactly once.
+
+    Any other failure is raised untouched: a store that refuses a move for a
+    different reason is a different problem, and retrying it would only hide
+    it. Which of the three paths ran is logged and reported as ``move_via``,
+    because "the re-acquire was enough" and "it took a save and a retry" are
+    the two facts that say whether this fix is holding on a real mailbox.
+    """
+    target, via = item, MOVE_VIA_ORIGINAL
+    try:
+        fresh = client.refetch(item)
+    except Exception as exc:  # a refetch that raises is still just a fallback
+        fresh = None
+        logger.warning("Re-acquiring %s by EntryID raised %s: %s",
+                       message_id, type(exc).__name__, exc)
+    if fresh is not None:
+        target, via = fresh, MOVE_VIA_REFETCHED
+    else:
+        logger.info(
+            "Could not re-acquire %s from the store; moving the original "
+            "reference.", message_id,
+        )
+
+    try:
+        moved = client.move_to(target, archive_folder)
+    except Exception as exc:
+        if not is_message_changed_error(exc):
+            raise
+        logger.info(
+            "Outlook refused to move %s (the message has been changed) on the "
+            "%s reference; saving it and retrying once.", message_id, via,
+        )
+        client.save_item(target)
+        moved = client.move_to(target, archive_folder)
+        via = MOVE_VIA_SAVED_RETRY
+
+    logger.info("Moved %s to %r via the %s reference.", message_id, archive_folder, via)
+    return moved, via
 
 
 # ----------------------------------------------------------------- revert ---

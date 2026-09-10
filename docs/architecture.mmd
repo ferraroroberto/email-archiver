@@ -74,14 +74,14 @@ flowchart TB
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE
 
   subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
-    BATCH["batch.py\nplan · apply · revert —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites)"]
+    BATCH["batch.py\nplan · apply · revert —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]
   end
   CALLER["another local app (task-os)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
-  BATCH -->|ensure_running · iter_inbox · find_by_message_id · move_to · set_category| OUTLOOK
+  BATCH -->|ensure_running · iter_inbox · find_by_message_id ·\nrefetch · save_item · move_to · set_category| OUTLOOK
   OUTLOOK -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER
-  BATCH -->|plan: already archived?| REPO
-  BATCH -->|apply: per-mail date_prefix| ARCHIVER
+  BATCH -->|plan + apply: already archived?| REPO
+  BATCH -->|apply: per-mail date_prefix,\nskipped entirely for a reused mail| ARCHIVER
   BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
   BATCH -->|revert: delete_by_path per deleted .msg| REPO

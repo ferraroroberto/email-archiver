@@ -11,8 +11,9 @@ Design decisions:
   important for the fast-launch requirement. ensure_running() is its deliberate
   opposite, used only by batch mode, which has no user to open Outlook for it.
 - The batch surface (ensure_running / iter_inbox / find_by_message_id /
-  move_to / set_category / clear_category) lives here too, so batch.py stays
-  pure orchestration and can be driven by a fake client in tests.
+  refetch / save_item / move_to / set_category / clear_category) lives here
+  too, so batch.py stays pure orchestration and can be driven by a fake client
+  in tests.
 """
 from __future__ import annotations
 
@@ -239,6 +240,36 @@ DASL_FLAG_STATUS = "http://schemas.microsoft.com/mapi/proptag/0x10900003"
 # COM object. Outlook's first start on a cold profile is genuinely slow.
 DEFAULT_START_TIMEOUT_SECONDS = 60.0
 _POLL_INTERVAL_SECONDS = 1.0
+
+# MAPI_E_OBJECT_CHANGED. Outlook raises it from MailItem.Move (and Delete, and
+# Save) when it considers the in-memory item to have been modified since it was
+# obtained — which SaveAs can leave an item as, on the very reference the
+# archiver just wrote to disk. Batch mode tells this one refusal apart from
+# every other move failure because it is the only one worth retrying.
+MAPI_E_OBJECT_CHANGED = 0x80040109
+
+
+def is_message_changed_error(exc: Any) -> bool:
+    """Whether a COM failure is MAPI_E_OBJECT_CHANGED (0x80040109).
+
+    ``pywintypes.com_error`` carries the interesting code in its ``excepinfo``
+    tuple (``args[2][5]``) rather than in the HRESULT, which for a scripted
+    Outlook call is the generic ``DISP_E_EXCEPTION``. So every integer in
+    ``args``, one level of nesting deep, is compared — masked to 32 bits, since
+    the same code is spelled both signed (``-2147221239``) and unsigned
+    depending on where it came from.
+
+    Deliberately keyed on the code and never on the message text: the message
+    is localised, and matching "has been changed" would silently stop matching
+    on a non-English Outlook.
+    """
+    codes: list[int] = []
+    for arg in getattr(exc, "args", ()) or ():
+        if isinstance(arg, int):
+            codes.append(arg)
+        elif isinstance(arg, tuple):
+            codes.extend(inner for inner in arg if isinstance(inner, int))
+    return any(code & 0xFFFFFFFF == MAPI_E_OBJECT_CHANGED for code in codes)
 
 
 def split_categories(raw: str | None) -> list[str]:
@@ -646,6 +677,44 @@ class OutlookClient:
             except Exception as exc:
                 logger.warning("Skipping unreadable item %d during lookup: %s", i, exc)
         return None
+
+    def refetch(self, item: Any) -> Any | None:
+        """Re-acquire a mail from the store by its ``EntryID``, or ``None``.
+
+        ``MailItem.SaveAs`` can leave the in-memory item flagged as modified,
+        and a later ``Move`` on *that* reference is then refused with
+        MAPI_E_OBJECT_CHANGED — the mail stays in the Inbox with its files
+        already on disk (issue #59). A reference read back through
+        ``Session.GetItemFromID`` is a fresh object carrying none of that
+        state, so it is what batch mode moves.
+
+        ``None`` (never an exception) when the item has no readable EntryID or
+        the store cannot hand it back: failing to re-acquire is a reason to
+        move the original reference, not a reason to strand the mail.
+        """
+        entry_id = _safe_com(lambda: str(item.EntryID), "")
+        if not entry_id:
+            logger.warning("Cannot re-acquire a mail with no readable EntryID.")
+            return None
+        try:
+            import win32com.client  # noqa: PLC0415
+
+            fresh = self._namespace().GetItemFromID(entry_id)
+        except Exception as exc:
+            logger.warning("GetItemFromID failed for %s: %s", entry_id, exc)
+            return None
+        if fresh is None:
+            return None
+        return win32com.client.Dispatch(fresh)
+
+    def save_item(self, item: Any) -> None:
+        """Commit a mail's pending changes.
+
+        Its own method rather than an inline ``item.Save()`` in batch mode:
+        ``batch.py`` touches no COM object, and this is the call that clears
+        the modified flag behind a MAPI_E_OBJECT_CHANGED before the one retry.
+        """
+        item.Save()
 
     def move_to(self, item: Any, folder_name: str | None) -> Any:
         """Move a mail to a folder and return the moved item.
