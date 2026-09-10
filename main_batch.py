@@ -220,12 +220,26 @@ def main(argv: list[str] | None = None) -> int:
         except OutlookUnavailableError as exc:
             return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
 
-        if verb == "plan":
-            document = batch.plan(client, cfg, candidates=args.candidates)
-        elif verb == "apply":
-            document = batch.apply(client, cfg, payload, renumber=args.renumber)
-        else:
-            document = batch.revert(client, cfg, payload, renumber=args.renumber)
+        try:
+            if verb == "plan":
+                document = batch.plan(client, cfg, candidates=args.candidates)
+            elif verb == "apply":
+                document = batch.apply(client, cfg, payload, renumber=args.renumber)
+            else:
+                document = batch.revert(client, cfg, payload, renumber=args.renumber)
+        except OutlookUnavailableError as exc:
+            # Outlook was up when ensure_running() checked but quit or went
+            # unreachable partway through the walk (client._namespace()).
+            return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
+        except Exception as exc:
+            # Deliberately broad, mirroring the config-load guard above: once
+            # Outlook has been reached, any other failure during the walk (a
+            # locked or corrupt database, a COM call raising something other
+            # than OutlookUnavailableError) still has to come out as this
+            # process's one JSON document, not as a traceback on stderr with
+            # nothing on stdout, which is what a spawning caller would see as
+            # a crash it cannot classify.
+            return _fail(verb, ERROR_COM_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
     finally:
         pythoncom.CoUninitialize()
 
