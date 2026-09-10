@@ -1144,7 +1144,15 @@ def test_apply_with_renumber_puts_an_older_mail_in_its_date_position(
     }
 
 
-def test_apply_with_renumber_lists_each_destination_folder_once(cfg, archive_root):
+def test_apply_with_renumber_lists_each_destination_folder_once(
+    cfg, archive_root, monkeypatch
+):
+    """Two mails filed into the same folder must renumber it once for the
+    whole run, not once per mail — a second pass would reorder what the
+    first pass just fixed. ``doc["renumbered"]`` is keyed by folder path, so
+    it can never show a folder twice however broken the dedupe in
+    ``_unique_folders`` is; only counting the actual ``renumber_folder``
+    calls pins the dedupe itself."""
     dest = archive_root / "Project Alpha"
     other = archive_root / "Project Beta"
     client = FakeOutlookClient([
@@ -1153,12 +1161,22 @@ def test_apply_with_renumber_lists_each_destination_folder_once(cfg, archive_roo
         _mail("c@example.invalid", "Three", sent=datetime(2026, 3, 16, 9, 0)),
     ])
 
+    real_renumber_folder = batch.renumber_folder
+    calls: list[str] = []
+
+    def _counting_renumber_folder(folder_path, *args, **kwargs):
+        calls.append(str(folder_path))
+        return real_renumber_folder(folder_path, *args, **kwargs)
+
+    monkeypatch.setattr(batch, "renumber_folder", _counting_renumber_folder)
+
     doc = batch.apply(client, cfg, [
         {"message_id": "a@example.invalid", "folder_path": str(dest)},
         {"message_id": "b@example.invalid", "folder_path": str(dest)},
         {"message_id": "c@example.invalid", "folder_path": str(other)},
     ], renumber=True)
 
+    assert calls == [str(dest), str(other)]
     assert sorted(doc["renumbered"]) == sorted([str(dest), str(other)])
 
 

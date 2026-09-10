@@ -318,7 +318,7 @@ def test_a_number_with_no_mail_holds_its_slot(repo, folder, roots):
         "001 - one.msg": "2026-01-01T09:00:00+01:00",
         "004 - four.msg": "2026-01-04T09:00:00+01:00",
     })
-    _write(folder, "002 - stranded.docx")
+    _write(folder, "003 - stranded.docx")
 
     result = renumber_folder(str(folder), repo, roots)
 
@@ -326,9 +326,11 @@ def test_a_number_with_no_mail_holds_its_slot(repo, folder, roots):
         "001 - one.msg", "002 - stranded.docx", "003 - four.msg",
     ]
     assert result.bundles == 3
-    # The stranded file has no mail, so its map entry carries no .msg path —
-    # a consumer healing stored .msg paths has nothing to heal for it.
-    assert [e for e in result.renamed if e["from"] is None] == []
+    # The stranded bundle's number does move here (003 -> 002), so its entry
+    # in the map is reached — and being mail-less, it carries no .msg path, a
+    # consumer healing stored .msg paths has nothing to heal for it.
+    stranded_entries = [e for e in result.renamed if e["from"] is None]
+    assert len(stranded_entries) == 1
 
 
 def test_an_undated_bundle_keeps_its_position_rather_than_moving_to_one_end(
