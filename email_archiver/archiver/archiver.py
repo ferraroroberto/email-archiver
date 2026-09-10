@@ -51,6 +51,7 @@ from email_archiver.config import (
     get_date_prefix_mode,
     get_max_path_length,
 )
+from email_archiver.outlook.client import _sent_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -285,33 +286,23 @@ def _get_sent_date_prefix(mail_item: Any) -> str | None:
     """
     Resolve the email's sent date as a ``YYYY-MM-DD`` string in local time.
 
-    Only called when ``naming.date_prefix`` is on. Tries ``SentOn`` (the
-    actual send time) first, falling back to ``ReceivedTime``. Returns
-    ``None`` — and logs why — when neither resolves, signalling the caller to
-    fall back to the undated filename form rather than invent a placeholder
-    date.
+    Only called when ``naming.date_prefix`` is on. Formats whatever
+    ``outlook.client._sent_datetime`` resolves (``SentOn`` falling back to
+    ``ReceivedTime``) — the single implementation of that rule, so the date a
+    batch ``plan`` reports and the date a ``YYYY-MM-DD -`` prefix carries can
+    never disagree. Returns ``None`` — and logs why — when neither resolves,
+    signalling the caller to fall back to the undated filename form rather
+    than invent a placeholder date.
     """
-    last_exc: Exception | None = None
-    for attr in ("SentOn", "ReceivedTime"):
-        try:
-            value = getattr(mail_item, attr)
-        except Exception as exc:
-            last_exc = exc
-            continue
-        if value is None:
-            continue
-        try:
-            return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
-        except AttributeError as exc:
-            last_exc = exc
-            continue
-
-    logger.warning(
-        "Could not resolve a sent date for this email (%s); "
-        "falling back to the undated filename form",
-        last_exc if last_exc is not None else "SentOn and ReceivedTime both empty",
-    )
-    return None
+    value = _sent_datetime(mail_item)
+    if value is None:
+        logger.warning(
+            "Could not resolve a sent date for this email "
+            "(SentOn and ReceivedTime both empty or unreadable); "
+            "falling back to the undated filename form"
+        )
+        return None
+    return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
 
 
 # ------------------------------------------------------------- archiver -----

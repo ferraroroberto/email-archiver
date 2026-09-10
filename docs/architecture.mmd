@@ -73,6 +73,7 @@ flowchart TB
   ARCHIVEDIALOG -->|user confirms folder + date-prefix checkbox| ARCHIVER
   ARCHIVER -->|SaveAs / SaveAsFile via| OUTLOOKCOM
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE
+  ARCHIVER -->|_get_sent_date_prefix formats\n_sent_datetime — one implementation\nof SentOn-then-ReceivedTime| OUTLOOK
 
   subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
     BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]

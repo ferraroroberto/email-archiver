@@ -92,11 +92,12 @@ def _safe_com(read: Any, default: Any) -> Any:
 def _sent_datetime(mail_item: Any) -> datetime | None:
     """The mail's sent time as a stdlib datetime, or ``None``.
 
-    Tries ``SentOn`` (when it was actually sent) before ``ReceivedTime``, the
-    same order ``archiver._get_sent_date_prefix`` uses, so the date a plan
-    reports and the date a ``YYYY-MM-DD -`` prefix carries cannot disagree.
-    pywintypes datetimes are rebuilt field by field rather than passed through,
-    which is what the caller sees as a plain ``datetime``.
+    Tries ``SentOn`` (when it was actually sent) before ``ReceivedTime``.
+    ``archiver._get_sent_date_prefix`` formats this same value for its
+    ``YYYY-MM-DD -`` filename prefix, so the date a plan reports and the date
+    a prefix carries cannot disagree. pywintypes datetimes are rebuilt field
+    by field rather than passed through, which is what the caller sees as a
+    plain ``datetime``.
     """
     for attr in ("SentOn", "ReceivedTime"):
         value = _safe_com(lambda a=attr: getattr(mail_item, a), None)
