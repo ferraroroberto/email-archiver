@@ -5,6 +5,8 @@ config/config.yaml
 data/*.db
 data/*.db-shm
 data/*.db-wal
+# Manual database backups (e.g. emails.db.bak-20260909-0513)
+data/*.bak*
 logs/*.log
 __pycache__/
 *.pyc
