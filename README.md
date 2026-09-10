@@ -343,7 +343,9 @@ The `NNN` prefix is meant to be browsable: opening a project folder and reading 
 }
 ```
 
-Only bundles that actually changed appear. `from`/`to` are `null` for a bundle that has no `.msg` (its files are all in `attachments`), so a consumer healing `.msg` paths simply has nothing to do for it. A folder that could **not** be renumbered is never an empty map in there — an empty map means "already in order" — it is listed under `renumber_refused` with its reason. The key is additive: `schema_version` is unchanged, and a consumer that does not know about it reads the rest of the document exactly as before.
+Only bundles that actually changed appear. `from`/`to` are `null` for a bundle that has no `.msg` (its files are all in `attachments`), so a consumer healing `.msg` paths simply has nothing to do for it.
+
+**This includes the same document's own `files` lists.** An `apply --renumber` result reports each mail's `files` under the names it was *written* with, and the renumber that ran afterwards may have moved some of them — so hand-an-`apply`-result-straight-to-`revert` needs the map applied to those paths first when the flag was used. Without `--renumber` the `files` are final, as they always were. A folder that could **not** be renumbered is never an empty map in there — an empty map means "already in order" — it is listed under `renumber_refused` with its reason. The key is additive: `schema_version` is unchanged, and a consumer that does not know about it reads the rest of the document exactly as before.
 
 ### Safety
 

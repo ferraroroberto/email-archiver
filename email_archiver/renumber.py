@@ -448,12 +448,16 @@ def _rename(folder: str, moves: list[_Move]) -> None:
                 "folder; nothing was renamed"
             )
 
-    for move in moves:
-        os.rename(os.path.join(folder, move.old), os.path.join(folder, move.temp))
     try:
+        for move in moves:
+            os.rename(os.path.join(folder, move.old), os.path.join(folder, move.temp))
         for move in moves:
             os.rename(os.path.join(folder, move.temp), os.path.join(folder, move.new))
     except OSError:
+        # Either phase. Whichever one stopped, the recovery is the same and it
+        # needs the list: a file under a placeholder is invisible to every
+        # other part of this app, so the next occurrence has to be
+        # diagnosable from the log alone.
         left = [m.temp for m in moves if os.path.exists(os.path.join(folder, m.temp))]
         logger.error(
             "Renumber stopped part-way; %d file(s) are still under a placeholder "
@@ -518,6 +522,29 @@ def _reindex(
     return updated, dropped
 
 
+def _warn_if_unindexed(
+    folder: str, groups: dict[str, dict[str, list[str]]], indexed: dict[str, Any]
+) -> None:
+    """Say so out loud when the index has nothing for a folder full of mail.
+
+    ``find_in_folder`` matches ``COLLATE NOCASE``, which covers the ways Windows
+    respells the same path, but not every way a folder can be named (a mapped
+    drive letter, a UNC spelling, a junction). A lookup that comes back empty
+    then looks exactly like "this folder was never scanned", and the renumber
+    would go on to read every date off disk and update no rows at all — a
+    quietly incomplete result. Reported as its own fact rather than folded into
+    a successful run.
+    """
+    msgs = sum(len(group["msgs"]) for group in groups.values())
+    if msgs and not indexed:
+        logger.warning(
+            "The index holds no row for any of the %d mail(s) in %r. Dates will "
+            "be read from the files and no index row will be updated — if this "
+            "folder *has* been scanned, the path is spelled differently there.",
+            msgs, folder,
+        )
+
+
 # ------------------------------------------------------------------ entry ---
 
 def renumber_folder(
@@ -561,6 +588,7 @@ def renumber_folder(
         return result
 
     indexed = {r.filename.lower(): r for r in repo.find_in_folder(normalised)}
+    _warn_if_unindexed(normalised, groups, indexed)
     ordered = _order(_build_bundles(normalised, groups, prefixes, indexed))
 
     base = min(int(number) for number in groups)
