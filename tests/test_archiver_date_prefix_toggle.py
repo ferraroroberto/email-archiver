@@ -2,49 +2,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
 
 from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import get_date_prefix_enabled, get_date_prefix_mode
 
-
-class _FakeAttachment:
-    """A real (non-inline) attachment: no MAPI properties, so the archiver's
-    inline detection falls through both branches and saves it."""
-
-    def __init__(self, filename):
-        self.FileName = filename
-
-    @property
-    def PropertyAccessor(self):
-        raise AttributeError("no PropertyAccessor on this fake")
-
-    def SaveAsFile(self, path):  # noqa: N802 - COM-shaped API
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("att")
-
-
-class _FakeAttachments:
-    def __init__(self, items=()):
-        self._items = list(items)
-
-    def __iter__(self):
-        return iter(self._items)
-
-
-class _FakeMailItem:
-    """Enough of a MailItem for the archiver: dates, SaveAs, attachments."""
-
-    def __init__(self, sent_on=datetime(2026, 3, 14, 9, 30), attachments=()):
-        self.SentOn = sent_on
-        self.ReceivedTime = None
-        self.Attachments = _FakeAttachments(
-            _FakeAttachment(n) for n in attachments
-        )
-
-    def SaveAs(self, path, fmt):  # noqa: N802 - COM-shaped API
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("msg")
+from .conftest import _FakeAttachments, _FakeMailItem
 
 
 def _cfg(**naming):

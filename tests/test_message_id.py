@@ -17,49 +17,18 @@ from __future__ import annotations
 
 import sqlite3
 
-from email_archiver.database.models import _COLUMNS, init_db
+from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.scanner.scanner import _message_id
 from email_archiver.text import normalize_message_id
 
-# The `emails` table as it shipped before this change.
-_OLD_DDL = """
-CREATE TABLE emails (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path    TEXT    UNIQUE NOT NULL,
-    folder_path  TEXT    NOT NULL,
-    filename     TEXT    NOT NULL,
-    subject      TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    date_sent    TEXT,
-    body_preview TEXT,
-    file_mtime   REAL    NOT NULL,
-    indexed_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-    flag_status  INTEGER
-);
-"""
+from .conftest import _FakeMsg
+from .test_column_migrations import DDL_BEFORE_MESSAGE_ID as _OLD_DDL
 
-
-class _FakeMsg:
-    """Stands in for ``extract_msg.Message``.
-
-    ``messageId`` is a property on the real class and raises AttributeError when
-    the message type does not carry one, which is why the scanner has a proptag
-    fallback at all.
-    """
-
-    def __init__(self, message_id=..., props: dict | None = None) -> None:
-        self._props = props or {}
-        if message_id is not ...:
-            self.messageId = message_id  # noqa: N815 - extract_msg's spelling
-
-    def getPropertyVal(self, key: str):  # noqa: N802 - extract_msg's spelling
-        return self._props.get(key)
-
-
-def _columns(conn: sqlite3.Connection) -> set[str]:
-    return {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}
+# The column migration itself (fresh db has it / an existing db gains it
+# without losing rows / the migration is idempotent / every migrated column
+# is also in the create table) is covered once, parametrized over every
+# entry in `models._COLUMNS`, in test_column_migrations.py.
 
 
 # ------------------------------------------------------------ normalisation --
@@ -110,33 +79,9 @@ def test_a_message_with_no_id_anywhere_reads_as_empty_not_an_error():
 
 
 # ------------------------------------------------------------ the migration --
-
-def test_a_fresh_database_has_the_column():
-    conn = init_db(":memory:")
-    assert "message_id" in _columns(conn)
-
-
-def test_an_existing_database_gains_the_column_without_losing_rows(tmp_path):
-    path = str(tmp_path / "emails.db")
-    old = sqlite3.connect(path)
-    old.executescript(_OLD_DDL)
-    old.execute(
-        "INSERT INTO emails (file_path, folder_path, filename, file_mtime)"
-        " VALUES ('a.msg', 'C:/archive', 'a.msg', 1.0)"
-    )
-    old.commit()
-    old.close()
-
-    conn = init_db(path)
-
-    assert "message_id" in _columns(conn)
-    row = conn.execute("SELECT * FROM emails WHERE file_path = 'a.msg'").fetchone()
-    assert row is not None, "the migration must not lose the existing row"
-    assert row["message_id"] is None, (
-        "a row indexed before the header was read must stay NULL -- an empty "
-        "string would claim the mail was read and found to have no Message-ID"
-    )
-
+# The generic column-migration behaviour is covered once, parametrized over
+# `models._COLUMNS`, in test_column_migrations.py. What's left here is
+# message_id-specific: the index-creation ordering.
 
 def test_the_index_is_created_after_the_column_exists(tmp_path):
     """The order that a naive DDL edit gets wrong.
@@ -154,18 +99,6 @@ def test_the_index_is_created_after_the_column_exists(tmp_path):
     conn = init_db(path)
     indexes = {r[1] for r in conn.execute("PRAGMA index_list(emails)")}
     assert "idx_emails_message_id" in indexes
-
-
-def test_the_migration_is_idempotent(tmp_path):
-    path = str(tmp_path / "emails.db")
-    init_db(path).close()
-    conn = init_db(path)
-    assert "message_id" in _columns(conn)
-
-
-def test_every_migrated_column_is_also_in_the_create_table():
-    fresh = _columns(init_db(":memory:"))
-    assert set(_COLUMNS) <= fresh
 
 
 # ------------------------------------------------------------- the lookup ----
