@@ -31,6 +31,7 @@ from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.outlook.client import (
     InboxMail,
+    is_message_changed_error,
     with_category,
     without_category,
 )
@@ -48,6 +49,38 @@ class _FakePropertyAccessor:
         if key in self._props:
             return self._props[key]
         raise RuntimeError(f"property not found: {key}")
+
+
+class _FakeComError(Exception):
+    """A ``pywintypes.com_error`` look-alike.
+
+    Same ``args`` shape as the real thing — ``(hresult, description, excepinfo,
+    argerror)`` with the MAPI scode buried in ``excepinfo[5]`` — so the
+    detection helper is exercised exactly as it will be against Outlook, with
+    no pywin32 import in the test suite.
+    """
+
+
+def _message_changed_error() -> _FakeComError:
+    """The failure this issue is about: MAPI_E_OBJECT_CHANGED (0x80040109).
+
+    Raised by ``MailItem.Move`` on an item Outlook considers modified — which
+    ``SaveAs`` can leave it as, on the very same reference the archiver just
+    wrote to disk.
+    """
+    return _FakeComError(
+        -2147352567,
+        "Exception occurred.",
+        (
+            4096,
+            "Microsoft Outlook",
+            "The operation cannot be performed because the message has been changed.",
+            None,
+            0,
+            -2147221239,
+        ),
+        None,
+    )
 
 
 class _FakeAttachment:
@@ -105,6 +138,14 @@ class FakeOutlookClient:
     def __init__(self, inbox: list[_FakeMailItem]) -> None:
         self.folders: dict[str | None, list[_FakeMailItem]] = {None: list(inbox)}
         self.move_should_fail = False
+        # One Move refused with 0x80040109 before the store accepts it — the
+        # shape issue #59 hit on a real mailbox.
+        self.move_message_changed_once = False
+        # Every Move refused with 0x80040109 — the state the real mailbox was
+        # in until Outlook itself was restarted (issue #59).
+        self.move_message_changed_always = False
+        self.refetch_should_fail = False
+        self.refetched: list[str] = []
         self.category_should_fail = False
         self.moves: list[tuple[str, str | None]] = []
 
@@ -136,9 +177,26 @@ class FakeOutlookClient:
                 return item
         return None
 
+    def refetch(self, item: _FakeMailItem) -> _FakeMailItem | None:
+        """Stand-in for ``Session.GetItemFromID`` — a reference straight from
+        the store, which on a real mailbox is a *different* COM object carrying
+        none of the modified state ``SaveAs`` left on the original."""
+        if self.refetch_should_fail:
+            raise _FakeComError(-2147221233, "The item could not be found.", None, None)
+        self.refetched.append(item.EntryID)
+        return item
+
+    def save_item(self, item: _FakeMailItem) -> None:
+        item.Save()
+
     def move_to(self, item: _FakeMailItem, folder_name: str | None):
         if self.move_should_fail:
             raise RuntimeError("the store refused the move")
+        if self.move_message_changed_always:
+            raise _message_changed_error()
+        if self.move_message_changed_once:
+            self.move_message_changed_once = False
+            raise _message_changed_error()
         for name, items in self.folders.items():
             if item in items:
                 items.remove(item)
@@ -244,7 +302,7 @@ def test_plan_lists_every_inbox_mail_with_ranked_candidates(cfg, archive_root):
     assert set(first) == {
         "message_id", "entry_id", "subject", "sender", "recipients", "date_sent",
         "body_preview", "attachment_count", "flag_status", "already_archived",
-        "candidates",
+        "in_inbox", "candidates",
     }
     assert first["already_archived"] is None
     assert first["candidates"], "a seeded index must produce candidates"
@@ -367,6 +425,9 @@ def test_plan_marks_an_already_archived_mail_and_offers_no_candidates(
         archive_root / "Project Alpha" / "007 - already.msg"
     )
     assert archived["candidates"] == []
+    # Its files are on disk but it is still sitting in the Inbox: the shape a
+    # consumer offers a retry for (issue #59).
+    assert archived["in_inbox"] is True
     assert fresh["already_archived"] is None
     assert doc["counts"]["already_archived"] == 1
     assert doc["counts"]["planned"] == 1
@@ -419,8 +480,9 @@ def test_apply_writes_the_bundle_moves_the_mail_and_tags_it(cfg, archive_root):
     result = doc["results"][0]
     assert set(result) == {
         "message_id", "folder_path", "ok", "sequence_number", "files",
-        "entry_id", "moved", "categorized", "error",
+        "entry_id", "moved", "categorized", "reused", "move_via", "error",
     }
+    assert result["reused"] is False
     assert result["ok"] is True
     assert result["error"] is None
     assert result["sequence_number"] == "001"
@@ -538,6 +600,200 @@ def test_apply_tells_a_failed_tag_apart_from_a_failed_move(cfg, archive_root):
     assert result["categorized"] is False
     assert client.folders["Archive"] == [item], "the mail really is filed"
     assert result["files"] and Path(result["files"][0]).exists()
+
+
+def test_apply_moves_a_reference_re_acquired_from_the_store(cfg, archive_root):
+    """The mail archived is not the reference moved (issue #59).
+
+    ``SaveAs`` can leave the in-memory MailItem flagged as modified; moving a
+    reference read back out of the store by EntryID is what avoids the
+    0x80040109 that flag causes.
+    """
+    dest = archive_root / "Project Alpha"
+    item = _mail("a@example.invalid", "Fresh reference")
+    client = FakeOutlookClient([item])
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is True
+    assert result["move_via"] == batch.MOVE_VIA_REFETCHED
+    assert client.refetched == ["entry-a@example.invalid"]
+
+
+def test_apply_saves_and_retries_once_when_the_message_has_been_changed(
+    cfg, archive_root
+):
+    """The reported failure: the first Move is refused with 0x80040109.
+
+    A store that refuses the fresh reference too gets one ``Save()``-then-Move
+    before ``apply`` gives up, and the result says which path finished it.
+    """
+    dest = archive_root / "Project Alpha"
+    item = _mail("a@example.invalid", "Changed underfoot")
+    client = FakeOutlookClient([item])
+    client.move_message_changed_once = True
+    saves_before = item.save_calls
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is True, "a changed message must not strand the mail"
+    assert result["moved"] is True
+    assert result["error"] is None
+    assert result["move_via"] == batch.MOVE_VIA_SAVED_RETRY
+    assert item.save_calls > saves_before, "the retry must Save() first"
+    assert client.folders[None] == [], "the Inbox must lose the mail"
+    assert client.folders["Archive"] == [item]
+    assert result["entry_id"] == "entry-a@example.invalid-in-Archive"
+
+
+def test_apply_still_moves_when_the_item_cannot_be_re_acquired(cfg, archive_root):
+    """A failed re-acquire is a fallback, not a failure: the original
+    reference is moved and the result says so."""
+    dest = archive_root / "Project Alpha"
+    item = _mail("a@example.invalid", "No fresh copy")
+    client = FakeOutlookClient([item])
+    client.refetch_should_fail = True
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is True
+    assert result["move_via"] == batch.MOVE_VIA_ORIGINAL
+    assert client.folders["Archive"] == [item]
+
+
+def test_apply_reports_a_move_that_fails_for_another_reason_unchanged(
+    cfg, archive_root
+):
+    """Only 0x80040109 earns the retry — any other refusal is still a
+    ``move_failed`` with the files reported for a revert."""
+    dest = archive_root / "Project Alpha"
+    client = FakeOutlookClient([_mail("a@example.invalid", "Refused outright")])
+    client.move_should_fail = True
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is False
+    assert result["error"]["code"] == batch.ERROR_MOVE_FAILED
+    assert result["move_via"] == ""
+    assert result["files"] and Path(result["files"][0]).exists()
+
+
+def test_a_move_refused_twice_as_changed_says_how_to_recover(cfg, archive_root):
+    """The state the real mailbox was in: refused on the re-acquired reference
+    and after saving it too, because the running Outlook process itself was
+    holding the item. The message has to say that, or the next occurrence is a
+    bare HRESULT again."""
+    dest = archive_root / "Project Alpha"
+    client = FakeOutlookClient([_mail("a@example.invalid", "Stuck fast")])
+    client.move_message_changed_always = True
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is False
+    assert result["error"]["code"] == batch.ERROR_MOVE_FAILED
+    assert "restarting Outlook" in result["error"]["message"]
+    assert "without writing anything" in result["error"]["message"]
+    assert result["files"], "the files are on disk and must be reported"
+    assert client.folders[None], "the mail is still in the Inbox"
+
+
+def test_apply_finishes_an_already_archived_mail_without_writing_files(
+    cfg, archive_root
+):
+    """The second half of issue #59: a mail whose files are already on disk but
+    which never left the Inbox can be finished by applying a decision for it.
+
+    Nothing new is written, the existing ``.msg`` is reported back, and the
+    mail is moved and tagged like any other.
+    """
+    dest = archive_root / "Project Alpha"
+    dest.mkdir(parents=True)
+    existing = dest / "007 - Already written.msg"
+    existing.write_text("synthetic .msg", encoding="utf-8")
+
+    conn = init_db(cfg["database"]["path"])
+    EmailRepository(conn).upsert_email(EmailRecord(
+        file_path=str(existing),
+        folder_path=str(dest),
+        filename=existing.name,
+        subject="Already written",
+        file_mtime=99.0,
+        message_id="a@example.invalid",
+    ))
+    conn.commit()
+    conn.close()
+
+    item = _mail("a@example.invalid", "Already written")
+    client = FakeOutlookClient([item])
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is True
+    assert result["reused"] is True
+    assert result["files"] == [str(existing)]
+    assert result["sequence_number"] == ""
+    assert item.saved_as == [], "nothing may be written for a reused mail"
+    assert list(dest.iterdir()) == [existing], "no new file in the folder"
+    assert client.folders[None] == []
+    assert client.folders["Archive"] == [item]
+    assert item.Categories == "Filed by batch"
+    assert result["moved"] is True and result["categorized"] is True
+
+
+def test_apply_archives_again_when_the_indexed_file_is_gone(cfg, archive_root):
+    """A stale index row is not proof the files are there: the mail is filed
+    for real rather than reported as reused over a path that no longer exists.
+    """
+    dest = archive_root / "Project Alpha"
+    conn = init_db(cfg["database"]["path"])
+    EmailRepository(conn).upsert_email(EmailRecord(
+        file_path=str(dest / "007 - Deleted since.msg"),
+        folder_path=str(dest),
+        filename="007 - Deleted since.msg",
+        subject="Deleted since",
+        file_mtime=99.0,
+        message_id="a@example.invalid",
+    ))
+    conn.commit()
+    conn.close()
+
+    client = FakeOutlookClient([_mail("a@example.invalid", "Deleted since")])
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    result = doc["results"][0]
+    assert result["ok"] is True
+    assert result["reused"] is False
+    assert Path(result["files"][0]).name == "001 - Deleted since.msg"
+    assert Path(result["files"][0]).exists()
+
+
+def test_a_changed_message_is_told_apart_from_any_other_com_failure():
+    """The retry is keyed on the MAPI scode, not on the message text."""
+    assert is_message_changed_error(_message_changed_error()) is True
+    assert is_message_changed_error(
+        _FakeComError(-2147221233, "The item could not be found.", None, None)
+    ) is False
+    assert is_message_changed_error(RuntimeError("the store refused the move")) is False
 
 
 def test_apply_accepts_a_bracketed_message_id_from_the_caller(cfg, archive_root):
