@@ -98,6 +98,81 @@ def _message_id(msg: object) -> str:
     return normalize_message_id(raw)
 
 
+def _date_sent(msg: object) -> str:
+    """The mail's sent date as an ISO-8601 string, or ``""`` when there is none.
+
+    The one spelling of this conversion: the index stores what this returns, and
+    a renumber that has to fall back to the file (a ``.msg`` archived since the
+    last scan) reads it back through the same function, so an ordering never
+    depends on which of the two paths supplied the date.
+    """
+    raw = getattr(msg, "date", None)
+    if not raw:
+        return ""
+    try:
+        return raw.isoformat() if isinstance(raw, datetime) else str(raw)
+    except Exception:  # pragma: no cover - defensive, a date that will not render
+        return ""
+
+
+def _attachment_names(msg: object) -> tuple[str, ...]:
+    """The original filenames of the attachments the ``.msg`` carries.
+
+    Used to tell whose attachment a file on disk is when one sequence number
+    ended up carrying two mails; see ``renumber``. Long filename first, short
+    as the fallback — the same order Outlook itself prefers. An attachment that
+    raises (an embedded message, a signed blob) is skipped rather than taking
+    the read down: a partial list only weakens the match, it never corrupts it.
+    """
+    names: list[str] = []
+    try:
+        attachments = msg.attachments
+    except Exception:
+        return ()
+    for attachment in attachments:
+        try:
+            name = getattr(attachment, "longFilename", None) or getattr(
+                attachment, "shortFilename", None
+            )
+        except Exception:
+            continue
+        if name:
+            names.append(str(name))
+    return tuple(names)
+
+
+@dataclass(frozen=True)
+class MsgFacts:
+    """What a ``.msg`` says about itself when the index has not been told yet."""
+
+    date_sent: str
+    message_id: str
+    attachment_names: tuple[str, ...]
+
+
+def read_msg_facts(file_path: str) -> MsgFacts | None:
+    """Read a ``.msg``'s sent date, Message-ID and attachment names in one open.
+
+    The fallback path for :mod:`email_archiver.renumber`: a file archived since
+    the last scan has no index row, and ordering it by "unknown" would put it
+    somewhere arbitrary. Returns ``None`` — logged — when the file cannot be
+    read at all, which the caller treats as an unknown date rather than as a
+    reason to abandon the folder.
+    """
+    try:
+        with extract_msg.Message(file_path) as msg:
+            return MsgFacts(
+                date_sent=_date_sent(msg),
+                message_id=_message_id(msg),
+                attachment_names=_attachment_names(msg),
+            )
+    except (InvalidFileFormatError, UnrecognizedMSGTypeError) as exc:
+        logger.debug("Skipping unreadable .msg %s: %s", file_path, exc)
+    except Exception as exc:
+        logger.warning("Unexpected error reading %s: %s", file_path, exc)
+    return None
+
+
 def _extract_msg_metadata(
     file_path: str, body_preview_len: int
 ) -> dict[str, object] | None:
@@ -112,22 +187,12 @@ def _extract_msg_metadata(
             recipients = _safe_str(msg.to)
             body = _safe_str(msg.body)[:body_preview_len]
 
-            date_sent = ""
-            if msg.date:
-                try:
-                    if isinstance(msg.date, datetime):
-                        date_sent = msg.date.isoformat()
-                    else:
-                        date_sent = str(msg.date)
-                except Exception:
-                    pass
-
             return {
                 "subject": subject,
                 "sender": sender,
                 "recipients": recipients,
                 "body_preview": body,
-                "date_sent": date_sent,
+                "date_sent": _date_sent(msg),
                 "flag_status": _flag_status(msg),
                 "message_id": _message_id(msg),
             }

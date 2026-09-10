@@ -109,7 +109,9 @@ archiver/
 ├── email_archiver/              ← Main package
 │   ├── config.py                ← YAML loader, path resolution, logging setup
 │   ├── text.py                  ← Shared subject + Message-ID normalisation
-│   ├── batch.py                 ← Headless plan/apply/revert orchestration (no COM, no tkinter)
+│   ├── paths.py                 ← Archive-root guard shared by revert and renumber
+│   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
+│   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
 │   ├── database/
@@ -139,7 +141,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert the whole Inbox (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 └── requirements.txt
@@ -243,7 +245,7 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
@@ -255,12 +257,13 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: three verbs that file the **whole Inbox** in one run instead of one selected mail at a time, each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: four verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, plus one that repairs a folder's numbering — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
 & .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json
 & .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
+& .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
 ```
 
 | Verb | Reads | Does |
@@ -268,6 +271,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. Read-only. |
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
+| `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](#renumbering-a-folder). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -280,7 +284,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`. |
+| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`. A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
 
@@ -301,8 +305,53 @@ One case is beyond both defences and is called out by name in the result: when t
 
 `plan` also states `in_inbox` on every mail it reports. It is always `true` — `plan` enumerates the Inbox — but it is the fact that separates an `already_archived` mail *still sitting in the Inbox* from one that is properly filed and gone, so a consumer can key a retry offer off the document rather than off an assumption.
 
+### Renumbering a folder
+
+The `NNN` prefix is meant to be browsable: opening a project folder and reading down the list should be reading the thread in the order it happened. Two ordinary batch operations break that, and neither is a bug in how a single mail is archived — `revert` deletes a bundle and leaves a hole, and `apply` always allocates `max + 1`, so a mail filed into a folder after a correction takes the highest number even when it is older than everything already there.
+
+`renumber` is the repair:
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
+& .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>"
+```
+
+`--dry-run` computes and prints exactly the same map without renaming anything, so a run is always previewable. The same repair can be chained onto the two verbs that cause the problem — `apply --renumber` renumbers every destination folder the run wrote into, `revert --renumber` closes the gap in every folder the run deleted from — once per folder, after the verb's own work. Without the flag both verbs behave exactly as before and neither reports anything new.
+
+**The ordering rule**, in one place:
+
+- **Sent date decides.** Bundles are ordered by the mail's sent date, taken from the index and read out of the `.msg` itself when the index has no row for it (a file archived since the last scan). A bundle whose date cannot be established at all keeps its current position rather than being swept to one end.
+- **The unit is a bundle** — a sequence number and every file carrying it. An email never parts company with its attachments. A number that carries no `.msg` at all (an attachment whose mail was deleted by hand, a document filed into the sequence) still holds a slot, because leaving it behind would park it on a number that now belongs to a different mail.
+- **Numbers are contiguous from the folder's lowest existing one**, not from `001`. A folder that starts at `079` because it continues another folder's sequence keeps starting at `079`.
+- **Each file keeps its own name form** — `NNN - ` stays undated, `YYYY-MM-DD - NNN - ` keeps its date. A folder holding a mix keeps the mix.
+- **Two mails that ended up on one number are split by date**, and their attachments are matched to the right one by asking each `.msg` what it carries. An attachment that still cannot be placed follows the earlier mail and the map says so, as `attachments_placed`.
+- **Files with no sequence prefix are left alone** and reported under `skipped`.
+- **A folder outside `archive.root_paths` is refused**, untouched.
+
+**The consumer must heal its stored paths from the map.** A renumber renames files another app may be holding paths to; the archiver updates its own index and nothing else. The map is reported under `renumbered`, keyed by folder, in all three verbs that produce one:
+
+```json
+"renumbered": {
+  "<folder>": [
+    {
+      "from": "<folder>\\003 - subject.msg",
+      "to":   "<folder>\\002 - subject.msg",
+      "message_id": "abc123@mail.example",
+      "attachments": [["<folder>\\003 - report.pdf", "<folder>\\002 - report.pdf"]]
+    }
+  ]
+}
+```
+
+Only bundles that actually changed appear. `from`/`to` are `null` for a bundle that has no `.msg` (its files are all in `attachments`), so a consumer healing `.msg` paths simply has nothing to do for it.
+
+**This includes the same document's own `files` lists.** An `apply --renumber` result reports each mail's `files` under the names it was *written* with, and the renumber that ran afterwards may have moved some of them — so hand-an-`apply`-result-straight-to-`revert` needs the map applied to those paths first when the flag was used. Without `--renumber` the `files` are final, as they always were. A folder that could **not** be renumbered is never an empty map in there — an empty map means "already in order" — it is listed under `renumber_refused` with its reason. The key is additive: `schema_version` is unchanged, and a consumer that does not know about it reads the rest of the document exactly as before.
+
 ### Safety
 
+- `renumber` renames **only** inside the folder it is given, and only when that folder resolves inside `archive.root_paths`. It never reads or writes file contents, lists the folder once, and renames only the files whose number actually changes.
+- Renames run in two phases through a same-length `~XX` placeholder, because closing a gap gives a file the name of the file next to it. The placeholder is the same length as the number it replaces, so a path that fits Windows' `MAX_PATH` today still fits mid-rename. A run that stops part-way logs exactly which files are still under a placeholder.
+- The index follows the same two phases: `emails.file_path` is UNIQUE, and two mails on one thread share a subject, so a reorder routinely hands one of them the exact path the other still holds. A row left on a name a rename is about to take, whose own file is gone, is dropped and counted separately as `index_rows_dropped` — "the index followed the renames" and "the index was also wrong" are two different facts.
 - `revert` deletes **only** the files it is given, and only those that resolve inside `archive.root_paths`. Anything else is refused per file with a reason (`outside_archive_roots`, `unresolvable_path`) and left on disk.
 - A file already gone is reported as `missing`, not as an error — running a revert twice is not a failure to explain.
 - Deleting a `.msg` also removes its row from the index in the same step (`index_rows_removed` in the result), so `plan` offers the mail again right away instead of waiting for the next full scan to notice the file is gone. A file whose delete failed keeps its row — the file is still there, so the row is still correct.

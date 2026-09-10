@@ -7,6 +7,7 @@ upper layers never import sqlite3 directly.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -155,6 +156,32 @@ class EmailRepository:
         self._conn.execute("DROP TABLE tmp_known_paths")
         return cur.rowcount
 
+    def update_path(self, old_path: str, new_path: str) -> int:
+        """Point one index row at a renamed file. Returns rows updated.
+
+        Called by :func:`email_archiver.renumber.renumber_folder` after it
+        renames a ``.msg``: the row still describes the right mail, only its
+        ``file_path``/``filename`` moved, so re-indexing it would be both
+        wasteful and lossy (a fresh row would drop ``indexed_at``). ``file_mtime``
+        is deliberately left alone — a rename does not change it, so the next
+        incremental scan still skips the file. Caller commits (or uses
+        :meth:`commit`).
+        """
+        cur = self._conn.execute(
+            "UPDATE emails SET file_path = ?, filename = ? WHERE file_path = ?",
+            (new_path, os.path.basename(new_path), old_path),
+        )
+        return cur.rowcount
+
+    def commit(self) -> None:
+        """Commit the pending writes on the wrapped connection.
+
+        Exists so a caller holding only a repository — ``renumber_folder``,
+        which must land a folder's renames and its index rows together — does
+        not have to be handed the raw connection as well.
+        """
+        self._conn.commit()
+
     def delete_by_path(self, file_path: str) -> int:
         """Remove the index row for one file, if any. Returns rows deleted.
 
@@ -195,6 +222,41 @@ class EmailRepository:
             (message_id,),
         ).fetchone()
         return row["file_path"] if row else None
+
+    def find_in_folder(self, folder_path: str) -> list[EmailRecord]:
+        """Every indexed row filed directly in ``folder_path``.
+
+        Matched ``COLLATE NOCASE`` on purpose: Windows spells the same folder
+        several ways (the config's casing, ``Path.resolve()``'s canonical
+        casing, whatever a caller typed) and the index holds whichever spelling
+        the scan walked in with. A case-sensitive match would come back empty
+        and be indistinguishable from "this folder has never been indexed" —
+        which for a renumber means silently not updating any row.
+
+        The rows come back carrying the ``file_path`` **as stored**, so a caller
+        updating one writes against the spelling the index actually holds.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM emails WHERE folder_path = ? COLLATE NOCASE",
+            (folder_path,),
+        ).fetchall()
+        return [
+            EmailRecord(
+                id=row["id"],
+                file_path=row["file_path"],
+                folder_path=row["folder_path"],
+                filename=row["filename"],
+                subject=row["subject"] or "",
+                sender=row["sender"] or "",
+                recipients=row["recipients"] or "",
+                date_sent=row["date_sent"] or "",
+                body_preview=row["body_preview"] or "",
+                file_mtime=row["file_mtime"],
+                flag_status=row["flag_status"],
+                message_id=row["message_id"] or "",
+            )
+            for row in rows
+        ]
 
     def count_emails(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM emails").fetchone()
