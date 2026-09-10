@@ -65,10 +65,8 @@ _OL_MSG_FORMAT = 3
 _RE_DATED_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2}) - (\d{3}) - ")
 _RE_UNDATED_PREFIX = re.compile(r"^(\d{3}) - ")
 
-# Maximum path length (in chars) the fitted filename must stay within. This is
-# the SAME budget the scanner uses — sourced from config via
-# ``get_max_path_length`` and threaded in through ``EmailArchiver``; see
-# ``config.DEFAULT_MAX_PATH_LENGTH`` for the rationale behind the value.
+# Appended to a filename's stem when it has to be cut to fit the path budget
+# (see ``_fit_filename_to_path``).
 _ELLIPSIS = "..."
 
 # Bound on the attachment de-duplication loop in ``_save_attachments`` — a
@@ -352,7 +350,8 @@ class EmailArchiver:
         Save the email and its attachments to folder_path.
 
         Args:
-            mail_item: Outlook COM MailItem (from OutlookClient.raw_item).
+            mail_item: Outlook COM MailItem, freshly acquired by the caller
+                (COM objects are STA — never cache one across threads).
             folder_path: Absolute path to the destination folder.
             subject: Clean subject string (used for filename).
 

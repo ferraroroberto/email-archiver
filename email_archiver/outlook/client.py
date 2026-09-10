@@ -38,7 +38,6 @@ class EmailData:
     sender: str = ""
     recipients: str = ""           # semicolon-separated SMTP addresses
     date_sent: datetime | None = None
-    raw_item: Any = None           # the COM MailItem – only used by archiver
 
 
 @dataclass
@@ -441,7 +440,6 @@ class OutlookClient:
                 sender=_get_sender_smtp(item),
                 recipients=_get_recipients_smtp(item),
                 date_sent=_sent_datetime(item),
-                raw_item=item,
             )
 
         except Exception as exc:
