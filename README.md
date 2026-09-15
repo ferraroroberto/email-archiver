@@ -111,6 +111,7 @@ archiver/
 │   ├── text.py                  ← Shared subject + Message-ID normalisation
 │   ├── paths.py                 ← Archive-root guard shared by revert and renumber
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
+│   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
@@ -141,7 +142,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
@@ -261,7 +262,7 @@ The Stream Deck `launch_scan.bat` is unchanged and still opens the progress wind
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`) end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
@@ -273,13 +274,14 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: four verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, plus one that repairs a folder's numbering — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: five verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, and one that opens an unsent draft — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
 & .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json
 & .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
 & .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
+& .\.venv\Scripts\python.exe main_batch.py draft --spec spec.json
 ```
 
 | Verb | Reads | Does |
@@ -288,6 +290,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 | `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](#renumbering-a-folder). |
+| `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -300,7 +303,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`. A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
+| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
 
@@ -363,6 +366,40 @@ Only bundles that actually changed appear. `from`/`to` are `null` for a bundle t
 
 **This includes the same document's own `files` lists.** An `apply --renumber` result reports each mail's `files` under the names it was *written* with, and the renumber that ran afterwards may have moved some of them — so hand-an-`apply`-result-straight-to-`revert` needs the map applied to those paths first when the flag was used. Without `--renumber` the `files` are final, as they always were. A folder that could **not** be renumbered is never an empty map in there — an empty map means "already in order" — it is listed under `renumber_refused` with its reason. The key is additive: `schema_version` is unchanged, and a consumer that does not know about it reads the rest of the document exactly as before.
 
+### Drafting a mail
+
+`draft` turns a written email into an Outlook draft the user reads and sends by hand:
+
+```json
+{
+  "to": ["someone@example.org"], "cc": [], "bcc": [],
+  "subject": "…",
+  "body_text": "…",
+  "attachments": ["C:/…/file.pdf"],
+  "ref": "opaque-caller-token",
+  "display": true
+}
+```
+
+- **The spec is checked before Outlook starts.** At least one `to`, a non-empty `subject`, exactly one of `body_text` / `body_html`, every attachment an existing file, and no unknown keys (a misspelt `atachments` would otherwise drop the file silently). Anything else is `bad_input` in milliseconds.
+- **Your own address is always on the BCC line**, exactly once. The copy that lands back in the Inbox is what gets filed afterwards, so it is taken from `outlook.self_address` when set, else from the default sending account's SMTP address (the account owning the default store, read from `Account.SmtpAddress` — never through `GetExchangeUser`, which can raise the security prompt). When neither resolves the run exits 2 with `self_address_unresolved` and **no draft is created**.
+- **Body and signature.** `body_text` is escaped into minimal HTML with its paragraphs and line breaks kept; `body_html` is used as written. With `display: true` (the default) the compose window is opened first — that is when Outlook inserts the account's default signature — and the body is then put at the top, above it. With `display: false` nothing is shown and no signature is added.
+- **Saved, never sent.** The finished draft is saved, so it sits in Drafts even if the window is closed. No code path calls `Send()`.
+- **`ref`** is stamped as an `X-Archive-Ref` Internet header on the draft, so a caller can recognise its own copy when it arrives. `ref_header` reports `stamped` or `not_stamped`, with `ref_header_reason` saying why (`no ref given`, or the store's refusal). Whether the header survives sending depends on the account, so a caller keeps a fallback match (subject, recipients, sent time).
+
+The document:
+
+```json
+{
+  "verb": "draft", "schema_version": 1, "generated_at": "…",
+  "entry_id": "…", "subject": "…",
+  "to": ["…"], "cc": [], "bcc": ["…", "<your address>"],
+  "attachments": ["C:/…/file.pdf"],
+  "ref": "opaque-caller-token", "ref_header": "stamped", "ref_header_reason": "",
+  "displayed": true, "created_at": "2026-09-15T10:00:00+02:00"
+}
+```
+
 ### Safety
 
 - `renumber` renames **only** inside the folder it is given, and only when that folder resolves inside `archive.root_paths`. It never reads or writes file contents, lists the folder once, and renames only the files whose number actually changes.
@@ -381,9 +418,10 @@ Only bundles that actually changed appear. `from`/`to` are `null` for a bundle t
 outlook:
   archive_folder: "Archive"           # created under the mailbox root if missing
   category: "Archived by task-os"     # stamped by apply, removed by revert
+  self_address: "you@example.com"     # draft: blind-copied on every draft
 ```
 
-Both keys are optional and fall back to the values above. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated.
+All three keys are optional. `archive_folder` and `category` fall back to the values above; `self_address` falls back to the default sending account's SMTP address. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated.
 
 ---
 
