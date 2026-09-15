@@ -10,8 +10,9 @@ Design decisions:
 - is_running() checks the process list without starting Outlook, which is
   important for the fast-launch requirement. ensure_running() is its deliberate
   opposite, used only by batch mode, which has no user to open Outlook for it.
-- The batch surface (ensure_running / iter_inbox / find_by_message_id /
-  refetch / save_item / move_to / set_category / clear_category) lives here
+- The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
+  find_by_message_id / archive_ref / refetch / save_item / move_to /
+  set_category / clear_category) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
 - The draft surface (default_account_smtp / create_draft) follows the same
@@ -24,7 +25,7 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from email_archiver.text import clean_subject as _clean_subject
@@ -59,6 +60,9 @@ class InboxMail:
     sender: str = ""
     recipients: str = ""
     date_sent: datetime | None = None
+    # ReceivedTime, naive local like date_sent. Not reported in a plan; it is
+    # what `plan --since` compares against.
+    date_received: datetime | None = None
     body_preview: str = ""
     attachment_count: int = 0
     flag_status: int = 0
@@ -102,17 +106,24 @@ def _sent_datetime(mail_item: Any) -> datetime | None:
     plain ``datetime``.
     """
     for attr in ("SentOn", "ReceivedTime"):
-        value = _safe_com(lambda a=attr: getattr(mail_item, a), None)
-        if value is None:
-            continue
-        try:
-            return datetime(
-                value.year, value.month, value.day,
-                value.hour, value.minute, value.second,
-            )
-        except (AttributeError, TypeError, ValueError):
-            continue
+        value = _com_datetime(mail_item, attr)
+        if value is not None:
+            return value
     return None
+
+
+def _com_datetime(mail_item: Any, attr: str) -> datetime | None:
+    """One COM date property as a naive stdlib datetime, or ``None``."""
+    value = _safe_com(lambda: getattr(mail_item, attr), None)
+    if value is None:
+        return None
+    try:
+        return datetime(
+            value.year, value.month, value.day,
+            value.hour, value.minute, value.second,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _resolve_smtp(address_entry: Any) -> str:
@@ -248,6 +259,13 @@ DASL_X_ARCHIVE_REF = (
     "http://schemas.microsoft.com/mapi/string/"
     "{00020386-0000-0000-C000-000000000046}/X-Archive-Ref"
 )
+ARCHIVE_REF_HEADER = "X-Archive-Ref"
+# DASL name for MAPI PR_TRANSPORT_MESSAGE_HEADERS (0x007D001F): the raw header
+# block of a mail that arrived through a server. It is where the Step 3 probe
+# read X-Archive-Ref back on an IMAP mailbox (email-archiver#70).
+DASL_TRANSPORT_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+# DASL name for the received time, used by the `plan --since` Restrict filter.
+DASL_DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
 
 # How long ensure_running() waits for a freshly launched Outlook to publish its
 # COM object. Outlook's first start on a cold profile is genuinely slow.
@@ -315,6 +333,38 @@ def without_category(raw: str | None, name: str) -> str:
     return join_categories(
         [n for n in split_categories(raw) if n.casefold() != name.casefold()]
     )
+
+
+def header_value(headers: str | None, name: str) -> str:
+    """The value of the first ``name:`` header in a raw header block, or ``""``.
+
+    Matched case-insensitively, with folded continuation lines (RFC 5322: a
+    line starting with whitespace continues the previous header) joined back.
+    Pure so the parsing tests without Outlook.
+    """
+    prefix = f"{name.casefold()}:"
+    value: str | None = None
+    for line in (headers or "").splitlines():
+        if value is not None:
+            if line[:1] in (" ", "\t"):
+                value += " " + line.strip()
+                continue
+            break
+        if line.casefold().startswith(prefix):
+            value = line[len(prefix):].strip()
+    return value or ""
+
+
+def received_since_filter(since: datetime) -> str:
+    """The ``Items.Restrict`` DASL filter for mail received at/after ``since``.
+
+    ``since`` is naive local time (or aware). DASL compares date literals in
+    **UTC**: a probe against a real Inbox with boundaries placed a minute
+    either side of real mails matched the client-side count exactly with the
+    UTC literal and was off by the whole UTC offset with the local one.
+    """
+    utc = since.astimezone(timezone.utc)
+    return f"@SQL=\"{DASL_DATE_RECEIVED}\" >= '{utc:%Y-%m-%d %H:%M}'"
 
 
 _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
@@ -599,12 +649,38 @@ class OutlookClient:
         string. Non-mail items (meeting requests, delivery reports) are skipped:
         they have no ``SaveAs``-able shape this app archives.
         """
-        yield from self._iter_folder(self._inbox(), preview_len)
+        yield from self._iter_items(self._inbox().Items, preview_len)
 
-    def _iter_folder(self, folder: Any, preview_len: int) -> Iterator[InboxMail]:
+    def iter_inbox_received_since(
+        self, since: datetime, preview_len: int = 500
+    ) -> Iterator[InboxMail]:
+        """Yield the Inbox mails received at or after ``since``.
+
+        Narrowed server-side with ``Items.Restrict`` so a large Inbox is not
+        walked. The literal is minute-precise, so the result can be a little
+        wider than ``since`` — never narrower — and ``batch.plan`` applies the
+        exact check to every mail either way. A store that rejects the filter
+        falls back to the whole Inbox for that same check; which path ran is
+        logged.
+        """
+        items = self._inbox().Items
+        flt = received_since_filter(since)
+        try:
+            restricted = items.Restrict(flt)
+        except Exception as exc:
+            logger.warning(
+                "The store rejected the received-date filter (%s: %s); walking "
+                "the whole Inbox and checking each mail's date instead.",
+                type(exc).__name__, exc,
+            )
+            yield from self._iter_items(items, preview_len)
+            return
+        logger.info("Received-date filter applied server-side: %s", flt)
+        yield from self._iter_items(restricted, preview_len)
+
+    def _iter_items(self, items: Any, preview_len: int) -> Iterator[InboxMail]:
         import win32com.client  # noqa: PLC0415
 
-        items = folder.Items
         # Index rather than `for item in items`: the collection is live, and a
         # positional walk keeps the enumeration stable while the mails sit
         # still (batch mode never moves anything during a plan).
@@ -637,6 +713,7 @@ class OutlookClient:
             sender=_get_sender_smtp(item),
             recipients=_get_recipients_smtp(item),
             date_sent=_sent_datetime(item),
+            date_received=_com_datetime(item, "ReceivedTime"),
             body_preview=_safe_com(lambda: (item.Body or "")[:preview_len], ""),
             attachment_count=_safe_com(lambda: int(item.Attachments.Count), 0),
             flag_status=self._flag_status(item),
@@ -718,6 +795,25 @@ class OutlookClient:
             except Exception as exc:
                 logger.warning("Skipping unreadable item %d during lookup: %s", i, exc)
         return None
+
+    def archive_ref(self, item: Any) -> str:
+        """The mail's ``X-Archive-Ref`` header value, or ``""`` when absent.
+
+        Read from the transport headers first — where the header survives on a
+        mail that came back through a server — then from the named Internet
+        header property ``create_draft`` stamps, which some stores promote the
+        header into. Only ``PropertyAccessor`` reads: no address is resolved,
+        so no ``GetExchangeUser`` security modal. Whether the header survives
+        sending depends on the account; a caller keeps a fallback match.
+        """
+        accessor = _safe_com(lambda: item.PropertyAccessor, None)
+        if accessor is None:
+            return ""
+        headers = _safe_com(lambda: accessor.GetProperty(DASL_TRANSPORT_HEADERS), "")
+        value = header_value(headers, ARCHIVE_REF_HEADER)
+        if value:
+            return value
+        return str(_safe_com(lambda: accessor.GetProperty(DASL_X_ARCHIVE_REF), "") or "").strip()
 
     def refetch(self, item: Any) -> Any | None:
         """Re-acquire a mail from the store by its ``EntryID``, or ``None``.

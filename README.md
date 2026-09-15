@@ -278,6 +278,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
+& .\.venv\Scripts\python.exe main_batch.py plan --search "<subject words>" --since 2026-09-15 --candidates 0
 & .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json
 & .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
 & .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
@@ -286,13 +287,39 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 | Verb | Reads | Does |
 |---|---|---|
-| `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. Read-only. |
-| `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path`, then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
+| `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. `--message-id` / `--since` / `--search` / `--ref` narrow it to specific mail — see [Filing specific mail](#filing-specific-mail). Read-only. |
+| `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path` (which must be inside `archive.root_paths`), then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 | `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](#renumbering-a-folder). |
 | `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
+
+### Filing specific mail
+
+A caller that already knows which mail it wants to file, and where, doesn't need a ranked plan of the whole Inbox. `plan` takes filters, all optional and combined with AND. With none of them the document is exactly the full-Inbox plan, with no `filters` key.
+
+| Flag | Selects |
+|---|---|
+| `--message-id <id>` | That mail, looked up by Internet Message-ID (angle brackets optional) instead of enumerating the Inbox. Repeatable. An id found nowhere in the Inbox is listed under `skipped` with `reason: "not_in_inbox"` and its `message_id`. |
+| `--since <YYYY-MM-DD[THH:MM]>` | Mail received at or after that local time. Narrowed server-side with `Items.Restrict` (the DASL literal is written in UTC, which is how Outlook compares it), then checked exactly per mail. A store that rejects the filter falls back to walking the Inbox, and the log says which path ran. |
+| `--search <text>` | Mail whose subject, sender, recipients or body preview contains the text, case-insensitively. Repeatable: every term must match. |
+| `--ref <token>` | Mail whose `X-Archive-Ref` header equals the token, the one `draft` stamps. Headers are read only for mail that passed the cheaper filters. The header survives sending on an IMAP mailbox (verified), but that depends on the account, so a caller keeps a fallback match (`--search` on the subject, `--since` the send time). |
+| `--candidates 0` | No folder ranking: each mail comes back with `candidates: []`, for a caller that already knows the destination. |
+
+A filtered document adds `filters: {message_ids, since, search, ref}` (what was applied), and `counts.inbox` counts the Inbox mails that matched. Each mail has the same shape as in a full plan.
+
+Two `apply` / `revert` additions serve the same caller:
+
+- **`"date_prefix": "auto"`** on a decision resolves the naming form for its `folder_path` exactly as `plan` resolves a candidate's. Under `naming.date_prefix: auto` that is inferred from what the folder already holds, so an empty or new folder gets the undated form and a folder of dated files gets the dated one. Under a fixed `true` / `false` it is that value. `true` / `false` on a decision behave as they always have.
+- **`--category <name>`** tags filed mail with that category instead of `outlook.category` (e.g. `"Archived by life-os"`). The document's `category` reports the one used. Pass the same flag to `revert` so it removes the right one.
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py plan --ref <token> --candidates 0 > one.json
+# decisions.json: [{"message_id": "<from one.json>", "folder_path": "<a folder under an archive root>", "date_prefix": "auto"}]
+& .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json --category "Archived by life-os" > applied.json
+& .\.venv\Scripts\python.exe main_batch.py revert --items applied.json --category "Archived by life-os"
+```
 
 ### Identity: the Message-ID, not the EntryID
 
@@ -305,7 +332,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
 | `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
-Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
+Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
 
 `apply` fills in a result's `files` **before** it moves the mail, so a mail that was written to disk but failed to move is still fully revertible — that is why a result can carry `ok: false` and a non-empty `files` at the same time.
 
@@ -405,6 +432,7 @@ The document:
 - `renumber` renames **only** inside the folder it is given, and only when that folder resolves inside `archive.root_paths`. It never reads or writes file contents, lists the folder once, and renames only the files whose number actually changes.
 - Renames run in two phases through a same-length `~XX` placeholder, because closing a gap gives a file the name of the file next to it. The placeholder is the same length as the number it replaces, so a path that fits Windows' `MAX_PATH` today still fits mid-rename. A run that stops part-way logs exactly which files are still under a placeholder.
 - The index follows the same two phases: `emails.file_path` is UNIQUE, and two mails on one thread share a subject, so a reorder routinely hands one of them the exact path the other still holds. A row left on a name a rename is about to take, whose own file is gone, is dropped and counted separately as `index_rows_dropped` — "the index followed the renames" and "the index was also wrong" are two different facts.
+- `apply` writes **only** inside `archive.root_paths`. A decision whose `folder_path` resolves anywhere else (a sibling folder, a `..` traversal, another drive, a folder whose name merely starts with a root's) is refused as a per-mail `bad_decision` before Outlook is asked anything. Nothing is written, the mail stays in the Inbox, and the next decision is still attempted. A new folder *inside* a root is created as before.
 - `revert` deletes **only** the files it is given, and only those that resolve inside `archive.root_paths`. Anything else is refused per file with a reason (`outside_archive_roots`, `unresolvable_path`) and left on disk.
 - A file already gone is reported as `missing`, not as an error — running a revert twice is not a failure to explain.
 - Deleting a `.msg` also removes its row from the index in the same step (`index_rows_removed` in the result), so `plan` offers the mail again right away instead of waiting for the next full scan to notice the file is gone. A file whose delete failed keeps its row — the file is still there, so the row is still correct.
@@ -417,7 +445,7 @@ The document:
 ```yaml
 outlook:
   archive_folder: "Archive"           # created under the mailbox root if missing
-  category: "Archived by task-os"     # stamped by apply, removed by revert
+  category: "Archived by task-os"     # stamped by apply, removed by revert (--category overrides)
   self_address: "you@example.com"     # draft: blind-copied on every draft
 ```
 
