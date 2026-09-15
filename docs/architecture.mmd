@@ -81,13 +81,13 @@ flowchart TB
     BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]
     RENUMBER["renumber.py: renumber_folder\nbundles a number with its files, orders them by\nsent date, hands out contiguous numbers from the\nfolder's lowest, two-phase renames, returns the\nold-to-new map the consumer heals its paths from"]
   end
-  CALLER["another local app (task-os)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
+  CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
-  BATCH -->|ensure_running · iter_inbox · find_by_message_id ·\nrefetch · save_item · move_to · set_category| OUTLOOK
+  BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category| OUTLOOK
   OUTLOOK -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER
   BATCH -->|plan + apply: already archived?| REPO
-  BATCH -->|apply: per-mail date_prefix,\nskipped entirely for a reused mail| ARCHIVER
+  BATCH -->|apply: per-mail date_prefix or auto,\nonly inside archive.root_paths,\nskipped entirely for a reused mail| ARCHIVER
   BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
   BATCH -->|revert: delete_by_path per deleted .msg| REPO
   BATCH -->|renumber verb, or --renumber on apply / revert:\nonce per touched folder| RENUMBER

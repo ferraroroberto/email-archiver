@@ -1180,11 +1180,11 @@ def test_apply_with_renumber_lists_each_destination_folder_once(
     assert sorted(doc["renumbered"]) == sorted([str(dest), str(other)])
 
 
-def test_apply_with_renumber_refuses_a_folder_outside_the_archive_roots(
+def test_apply_with_renumber_never_reaches_a_folder_outside_the_archive_roots(
     cfg, tmp_path
 ):
-    """`apply` can file anywhere the caller points it — the renumber that
-    follows may not."""
+    """`apply` refuses a folder outside the roots before writing (issue #71),
+    so the renumber that follows has nothing there to touch either."""
     outside = tmp_path / "not-the-archive"
     client = FakeOutlookClient([_mail("a@example.invalid", "Elsewhere")])
 
@@ -1192,11 +1192,10 @@ def test_apply_with_renumber_refuses_a_folder_outside_the_archive_roots(
         {"message_id": "a@example.invalid", "folder_path": str(outside)},
     ], renumber=True)
 
-    assert doc["results"][0]["ok"] is True
+    assert doc["results"][0]["error"]["code"] == batch.ERROR_BAD_DECISION
+    assert not outside.exists()
     assert doc["renumbered"] == {}
-    assert doc["renumber_refused"] == [
-        {"folder_path": str(outside), "reason": batch.REFUSED_OUTSIDE_ROOTS}
-    ]
+    assert doc["renumber_refused"] == []
 
 
 def test_revert_with_renumber_closes_the_gap_it_just_made(cfg, archive_root):

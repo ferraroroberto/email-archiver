@@ -7,8 +7,11 @@ stdout and logs to the usual log file and to stderr. Only `draft` opens a
 window — the compose window of the draft it creates, which it never sends.
 
     python main_batch.py plan --candidates 5 > plan.json
-    python main_batch.py apply --decisions decisions.json [--renumber]
-    python main_batch.py revert --items revert.json [--renumber]
+    python main_batch.py plan --since 2026-09-15 --search invoice --candidates 0
+    python main_batch.py plan --message-id <id> [--message-id <id> ...]
+    python main_batch.py plan --ref <token> --candidates 0
+    python main_batch.py apply --decisions decisions.json [--renumber] [--category <name>]
+    python main_batch.py revert --items revert.json [--renumber] [--category <name>]
     python main_batch.py renumber --folder "<a folder>" [--dry-run]
     python main_batch.py draft --spec spec.json
 
@@ -32,6 +35,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +49,7 @@ from email_archiver.outlook.client import (
     OutlookClient,
     OutlookUnavailableError,
 )
+from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,44 @@ def _load_input(path: str) -> list[dict[str, Any]]:
     return data
 
 
+def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
+    """``plan``'s filter flags, validated before Outlook is touched.
+
+    Raises:
+        ValueError: a flag's value is unusable; the message names the flag.
+    """
+    message_ids: list[str] = []
+    for raw in args.message_ids:
+        message_id = normalize_message_id(raw)
+        if not message_id:
+            raise ValueError("--message-id must not be blank")
+        if message_id not in message_ids:
+            message_ids.append(message_id)
+
+    since = None
+    if args.since is not None:
+        try:
+            since = datetime.fromisoformat(args.since.strip())
+        except ValueError:
+            raise ValueError(
+                f"--since {args.since!r} is not YYYY-MM-DD or YYYY-MM-DDTHH:MM"
+            ) from None
+        if since.tzinfo is not None:
+            raise ValueError("--since is local time; leave the UTC offset off")
+
+    search = [term.strip() for term in args.search]
+    if not all(search):
+        raise ValueError("--search must not be blank")
+
+    ref = args.ref.strip() if args.ref is not None else None
+    if ref == "":
+        raise ValueError("--ref must not be blank")
+
+    return batch.PlanFilters(
+        message_ids=tuple(message_ids), since=since, search=tuple(search), ref=ref
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main_batch.py",
@@ -120,21 +163,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="verb", required=True)
 
-    p_plan = sub.add_parser("plan", help="List every Inbox mail with ranked folders.")
+    p_plan = sub.add_parser(
+        "plan", help="List Inbox mails (all, or the filtered ones) with ranked folders."
+    )
     p_plan.add_argument(
         "--candidates", type=int, default=batch.DEFAULT_CANDIDATES,
-        help="Ranked folder candidates per mail (default: %(default)s).",
+        help="Ranked folder candidates per mail; 0 lists the mails with no "
+             "ranking (default: %(default)s).",
+    )
+    p_plan.add_argument(
+        "--message-id", action="append", default=[], dest="message_ids",
+        help="Plan only this mail, looked up by Internet Message-ID instead of "
+             "enumerating the Inbox. Repeatable.",
+    )
+    p_plan.add_argument(
+        "--since",
+        help="Only mail received at or after this local time: YYYY-MM-DD or "
+             "YYYY-MM-DDTHH:MM.",
+    )
+    p_plan.add_argument(
+        "--search", action="append", default=[],
+        help="Only mail whose subject, sender, recipients or body preview "
+             "contains this text (case-insensitive). Repeatable; all must match.",
+    )
+    p_plan.add_argument(
+        "--ref",
+        help="Only mail whose X-Archive-Ref header (stamped by `draft`) equals "
+             "this token.",
     )
 
     p_apply = sub.add_parser("apply", help="Archive, move and tag decided mails.")
     p_apply.add_argument(
         "--decisions", required=True,
-        help="JSON file: [{message_id, folder_path, date_prefix}, ...]",
+        help='JSON file: [{message_id, folder_path, date_prefix: true|false|"auto"}, ...]',
     )
     p_apply.add_argument(
         "--renumber", action="store_true",
         help="Afterwards, renumber every destination folder this run wrote "
              "into and report the old-to-new map under `renumbered`.",
+    )
+    p_apply.add_argument(
+        "--category",
+        help="Tag filed mail with this Outlook category instead of outlook.category.",
     )
 
     p_revert = sub.add_parser("revert", help="Undo an apply: delete files, move back.")
@@ -146,6 +216,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--renumber", action="store_true",
         help="Afterwards, close the gaps in every folder this run deleted from "
              "and report the old-to-new map under `renumbered`.",
+    )
+    p_revert.add_argument(
+        "--category",
+        help="Remove this Outlook category instead of outlook.category — the "
+             "one the apply used.",
     )
 
     p_renumber = sub.add_parser(
@@ -208,8 +283,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.start_timeout <= 0:
         return _fail(verb, ERROR_BAD_INPUT, "--start-timeout must be positive")
-    if verb == "plan" and args.candidates < 1:
-        return _fail(verb, ERROR_BAD_INPUT, "--candidates must be at least 1")
+    filters = batch.PlanFilters()
+    if verb == "plan":
+        if args.candidates < 0:
+            return _fail(verb, ERROR_BAD_INPUT, "--candidates must be 0 or more")
+        try:
+            filters = _plan_filters(args)
+        except ValueError as exc:
+            return _fail(verb, ERROR_BAD_INPUT, str(exc))
+    category: str | None = None
+    if verb in ("apply", "revert") and args.category is not None:
+        category = args.category.strip()
+        if not category:
+            return _fail(verb, ERROR_BAD_INPUT, "--category must not be blank")
 
     if verb == "renumber":
         # No Outlook, no COM: this verb only reads a folder and the index.
@@ -243,9 +329,13 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             if verb == "plan":
-                document = batch.plan(client, cfg, candidates=args.candidates)
+                document = batch.plan(
+                    client, cfg, candidates=args.candidates, filters=filters
+                )
             elif verb == "apply":
-                document = batch.apply(client, cfg, payload, renumber=args.renumber)
+                document = batch.apply(
+                    client, cfg, payload, renumber=args.renumber, category=category
+                )
             elif verb == "draft":
                 self_address = draft.resolve_self_address(cfg, client)
                 if self_address is None:
@@ -258,7 +348,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 document = draft.create(client, spec, self_address)
             else:
-                document = batch.revert(client, cfg, payload, renumber=args.renumber)
+                document = batch.revert(
+                    client, cfg, payload, renumber=args.renumber, category=category
+                )
         except OutlookUnavailableError as exc:
             # Outlook was up when ensure_running() checked but quit or went
             # unreachable partway through the walk (client._namespace()).

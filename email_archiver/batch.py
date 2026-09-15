@@ -35,10 +35,15 @@ Design decisions:
   files written and its place in the Inbox kept. ``apply`` moves a reference
   re-acquired by EntryID, and on that refusal saves and retries once; which
   path finished it is logged and reported as ``move_via``.
-- **``revert`` deletes only what it is given, and only inside the archive
-  roots.** Anything resolving outside ``archive.root_paths`` is refused per
-  file with a reason rather than deleted, so a malformed or hostile items file
-  cannot reach the rest of the disk.
+- **Nothing is written outside the archive roots.** ``revert`` refuses per
+  file, and ``apply`` refuses per decision, any path that does not resolve
+  inside ``archive.root_paths`` — so a malformed, hostile or LLM-invented
+  decisions file cannot reach the rest of the disk. A new folder *inside* a
+  root is still created on demand.
+- **``plan`` is targetable, and untargeted by default.** ``--message-id``,
+  ``--since``, ``--search`` and ``--ref`` narrow it for a caller that already
+  knows which mail it wants to file; with none of them the document is exactly
+  what a full-Inbox plan always was, with no ``filters`` key at all.
 - **Renumbering is opt-in and reported, never implied.** ``apply`` and
   ``revert`` leave the sequence exactly as they always have unless
   ``--renumber`` is passed; with it, each touched folder is renumbered once and
@@ -51,6 +56,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -85,8 +92,12 @@ SCHEMA_VERSION = 1
 # needs more than the engine's own top pick to choose from.
 DEFAULT_CANDIDATES = 10
 
-# Why a mail in the Inbox got no plan entry.
+# Why a mail got no plan entry.
 SKIP_NO_MESSAGE_ID = "no_message_id"
+SKIP_NOT_IN_INBOX = "not_in_inbox"  # a --message-id that matched nothing
+
+# The `date_prefix` a decision passes to have `apply` infer the form itself.
+DATE_PREFIX_AUTO = "auto"
 
 # `error.code` values, and the reason each one is worth telling apart.
 ERROR_NOT_IN_INBOX = "not_in_inbox"            # already moved, or never there
@@ -187,13 +198,17 @@ def _mail_dict(mail: Any) -> dict[str, Any]:
     }
 
 
-def _envelope(verb: str, cfg: dict[str, Any]) -> dict[str, Any]:
+def _envelope(
+    verb: str, cfg: dict[str, Any], category: str | None = None
+) -> dict[str, Any]:
+    """The fields every verb's document opens with. ``category`` is the one
+    this run actually used, when the caller overrode the config's."""
     return {
         "verb": verb,
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now_iso(),
         "archive_folder": get_outlook_archive_folder(cfg),
-        "category": get_outlook_category(cfg),
+        "category": category or get_outlook_category(cfg),
     }
 
 
@@ -265,33 +280,115 @@ def error_document(verb: str, code: str, message: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------------- plan ---
 
+@dataclass(frozen=True)
+class PlanFilters:
+    """What narrows a ``plan``. All optional and combinable (AND); the default,
+    nothing set, is the full-Inbox plan.
+
+    - ``message_ids``: look each one up instead of enumerating the Inbox.
+    - ``since``: only mail received at/after it (naive local time).
+    - ``search``: every term must appear, case-insensitively, in the subject,
+      sender, recipients or body preview.
+    - ``ref``: the mail's ``X-Archive-Ref`` header equals it exactly.
+    """
+
+    message_ids: tuple[str, ...] = ()
+    since: datetime | None = None
+    search: tuple[str, ...] = ()
+    ref: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return bool(self.message_ids or self.since or self.search or self.ref)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "message_ids": list(self.message_ids),
+            "since": self.since.isoformat(timespec="minutes") if self.since else None,
+            "search": list(self.search),
+            "ref": self.ref,
+        }
+
+
+def _plan_source(
+    client: Any, preview_len: int, filters: PlanFilters, not_found: list[str]
+) -> Iterator[Any]:
+    """The mails a plan looks at: looked up by id, restricted by date, or the
+    whole Inbox — cheapest first. A ``--message-id`` matching nothing is
+    appended to ``not_found``."""
+    if filters.message_ids:
+        for message_id in filters.message_ids:
+            item = client.find_by_message_id(message_id, None)
+            if item is None:
+                not_found.append(message_id)
+                continue
+            yield client.read_mail(item, preview_len)
+    elif filters.since is not None:
+        yield from client.iter_inbox_received_since(filters.since, preview_len)
+    else:
+        yield from client.iter_inbox(preview_len)
+
+
+def _matches(client: Any, mail: Any, filters: PlanFilters) -> bool:
+    """Whether one mail passes every filter, the cheap checks before the
+    header read. ``since`` is checked here even after a server-side Restrict:
+    this is the exact comparison, the Restrict only narrows the walk."""
+    if filters.since is not None:
+        when = mail.date_received or mail.date_sent
+        if when is None or when < filters.since:
+            return False
+    if filters.search:
+        haystack = "\n".join(
+            (mail.subject, mail.sender, mail.recipients, mail.body_preview)
+        ).casefold()
+        if not all(term.casefold() in haystack for term in filters.search):
+            return False
+    if filters.ref is not None and client.archive_ref(mail.item) != filters.ref:
+        return False
+    return True
+
+
 def plan(
     client: Any,
     cfg: dict[str, Any],
     *,
     candidates: int = DEFAULT_CANDIDATES,
+    filters: PlanFilters | None = None,
 ) -> dict[str, Any]:
-    """Enumerate the Inbox and rank archive folders for every mail in it.
+    """Rank archive folders for every Inbox mail, or for the ones ``filters``
+    select.
 
-    Every Inbox mail is offered: nothing is filtered on age, sender or size.
-    A mail whose Message-ID is already in the index is reported with
-    ``already_archived`` set to the file it was archived as, and no candidates —
-    ranking a mail that is already filed would only invite filing it twice.
+    Unfiltered, every Inbox mail is offered: nothing is filtered on age,
+    sender or size. A mail whose Message-ID is already in the index is reported
+    with ``already_archived`` set to the file it was archived as, and no
+    candidates — ranking a mail that is already filed would only invite filing
+    it twice.
+
+    ``candidates=0`` reports the matching mails with no ranking at all, for a
+    caller that already knows the destination. With any filter set the
+    document gains ``filters`` (what was applied), ``counts.inbox`` counts the
+    Inbox mails that matched, and a ``--message-id`` found nowhere in the Inbox
+    is listed under ``skipped`` with ``reason: "not_in_inbox"`` and its
+    ``message_id``.
     """
+    filters = filters or PlanFilters()
     preview_len = int((cfg.get("scanning") or {}).get("body_preview_length", 500))
-    engine = _engine_for(cfg, candidates)
+    engine = _engine_for(cfg, candidates) if candidates > 0 else None
 
     conn = init_db(cfg["database"]["path"])
     repo = EmailRepository(conn)
 
     mails: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    not_found: list[str] = []
     already = 0
     # Shared across every mail in this run — see _candidate_dict.
     date_prefix_cache: dict[str, bool] = {}
 
     try:
-        for mail in client.iter_inbox(preview_len):
+        for mail in _plan_source(client, preview_len, filters, not_found):
+            if filters.active and not _matches(client, mail, filters):
+                continue
             if not mail.message_id:
                 skipped.append({
                     "entry_id": mail.entry_id,
@@ -305,6 +402,8 @@ def plan(
             entry["already_archived"] = archived_as
             if archived_as:
                 already += 1
+                entry["candidates"] = []
+            elif engine is None:
                 entry["candidates"] = []
             else:
                 entry["candidates"] = [
@@ -320,9 +419,17 @@ def plan(
     finally:
         conn.close()
 
+    in_inbox = len(mails) + len(skipped)
+    skipped.extend(
+        {"entry_id": "", "subject": "", "reason": SKIP_NOT_IN_INBOX, "message_id": mid}
+        for mid in not_found
+    )
+
     doc = _envelope("plan", cfg)
+    if filters.active:
+        doc["filters"] = filters.as_dict()
     doc["counts"] = {
-        "inbox": len(mails) + len(skipped),
+        "inbox": in_inbox,
         "planned": len(mails) - already,
         "already_archived": already,
         "skipped": len(skipped),
@@ -330,8 +437,9 @@ def plan(
     doc["mails"] = mails
     doc["skipped"] = skipped
     logger.info(
-        "Plan: %d mail(s) in the Inbox, %d already archived, %d skipped.",
-        doc["counts"]["inbox"], already, len(skipped),
+        "Plan: %d mail(s) in the Inbox%s, %d already archived, %d skipped.",
+        in_inbox, f" matching {filters.as_dict()}" if filters.active else "",
+        already, len(skipped),
     )
     return doc
 
@@ -364,13 +472,24 @@ def apply(
     decisions: list[dict[str, Any]],
     *,
     renumber: bool = False,
+    category: str | None = None,
 ) -> dict[str, Any]:
     """Archive each decided mail, move it out of the Inbox and tag it.
 
     ``decisions`` is a list of ``{message_id, folder_path, date_prefix}``. The
     ``date_prefix`` flag is per mail and comes from the caller — batch mode
-    never reads the global ``naming.date_prefix`` toggle, because the caller
-    infers the form the destination folder actually uses.
+    never reads the global ``naming.date_prefix`` toggle for a boolean, because
+    the caller infers the form the destination folder actually uses. A caller
+    that picked a folder ``plan`` never suggested passes ``"auto"`` instead,
+    and gets exactly the form ``plan`` would have reported for that folder
+    (``resolve_date_prefix_for_folder``).
+
+    A ``folder_path`` that does not resolve inside ``archive.root_paths`` is a
+    ``bad_decision`` for that mail: nothing is looked up, written or moved, and
+    the next decision is still attempted.
+
+    ``category`` overrides ``outlook.category`` for this run; the document's
+    ``category`` reports the one used.
 
     A decision for a mail the index already holds — the one ``plan`` reported
     ``already_archived``, still sitting in the Inbox because an earlier run
@@ -391,7 +510,8 @@ def apply(
     neither key appears.
     """
     archive_folder = get_outlook_archive_folder(cfg)
-    category = get_outlook_category(cfg)
+    category = category or get_outlook_category(cfg)
+    roots = _archive_roots(cfg)
     results: list[dict[str, Any]] = []
 
     conn = init_db(cfg["database"]["path"])
@@ -399,9 +519,9 @@ def apply(
     try:
         for raw in decisions:
             results.append(
-                _apply_one(client, cfg, repo, raw, archive_folder, category)
+                _apply_one(client, cfg, repo, raw, archive_folder, category, roots)
             )
-        doc = _envelope("apply", cfg)
+        doc = _envelope("apply", cfg, category)
         if renumber:
             # Only a folder this run actually wrote into, and only once each.
             doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
@@ -450,6 +570,7 @@ def _apply_one(
     raw: dict[str, Any],
     archive_folder: str,
     category: str,
+    roots: list[Path],
 ) -> dict[str, Any]:
     """One decision, start to finish. Never raises: every failure is a result."""
     message_id = normalize_message_id(raw.get("message_id"))
@@ -460,6 +581,20 @@ def _apply_one(
         result["error"] = {
             "code": ERROR_BAD_DECISION,
             "message": "a decision needs both a message_id and a folder_path",
+        }
+        return result
+
+    # Before Outlook is asked anything: the archiver creates a missing folder,
+    # so an unchecked path is a write anywhere on the disk.
+    _, refusal = _resolve_under_roots(folder_path, roots)
+    if refusal is not None:
+        logger.warning(
+            "Refusing the decision for %s: folder_path %r is %s.",
+            message_id, folder_path, refusal,
+        )
+        result["error"] = {
+            "code": ERROR_BAD_DECISION,
+            "message": f"{refusal}: folder_path must resolve inside archive.root_paths",
         }
         return result
 
@@ -494,7 +629,7 @@ def _apply_one(
         try:
             mail = client.read_mail(item)
             archiver = EmailArchiver(
-                cfg, date_prefix=bool(raw.get("date_prefix", False))
+                cfg, date_prefix=_decision_date_prefix(cfg, raw, folder_path, message_id)
             )
             archived = archiver.archive(item, folder_path, mail.subject)
         except Exception as exc:
@@ -540,6 +675,26 @@ def _apply_one(
 
     result["ok"] = True
     return result
+
+
+def _decision_date_prefix(
+    cfg: dict[str, Any], raw: dict[str, Any], folder_path: str, message_id: str
+) -> bool:
+    """A decision's ``date_prefix`` as the boolean the archiver takes.
+
+    ``"auto"`` resolves against the destination folder exactly as ``plan``
+    resolves a candidate's; anything else keeps its long-standing boolean
+    reading, so an existing caller's decisions file means what it always did.
+    """
+    value = raw.get("date_prefix", False)
+    if isinstance(value, str) and value.strip().casefold() == DATE_PREFIX_AUTO:
+        resolved = resolve_date_prefix_for_folder(cfg, folder_path)
+        logger.info(
+            "date_prefix auto for %s resolved to %s for its folder.",
+            message_id, resolved,
+        )
+        return resolved
+    return bool(value)
 
 
 def _move_remedy(exc: Exception) -> str:
@@ -643,8 +798,12 @@ def revert(
     items: list[dict[str, Any]],
     *,
     renumber: bool = False,
+    category: str | None = None,
 ) -> dict[str, Any]:
     """Delete the listed archive files and put each mail back in the Inbox.
+
+    ``category`` is the one to remove, overriding ``outlook.category`` — pass
+    the same one the ``apply`` used.
 
     ``items`` is a list of ``{message_id, files}`` — normally straight from an
     ``apply`` result. Only the listed files are touched, and only those that
@@ -670,7 +829,7 @@ def revert(
     (the default), the verb behaves exactly as before and neither key appears.
     """
     archive_folder = get_outlook_archive_folder(cfg)
-    category = get_outlook_category(cfg)
+    category = category or get_outlook_category(cfg)
     roots = _archive_roots(cfg)
     results: list[dict[str, Any]] = []
 
@@ -701,7 +860,7 @@ def revert(
             conn.commit()
 
             results.append(_finish_revert_item(client, archive_folder, category, result, message_id))
-        doc = _envelope("revert", cfg)
+        doc = _envelope("revert", cfg, category)
         if renumber:
             # The source folders: a gap only exists where a file really went.
             doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
