@@ -13,11 +13,11 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber,\none JSON document on stdout"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft,\none JSON document on stdout"]
     NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
   end
 
-  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nsetup_logging"]
+  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nget_outlook_self_address · setup_logging"]
   TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping ·\nnormalize_message_id — one spelling of the\nMessage-ID for the scanner and the Outlook client"]
   PATHS["email_archiver/paths.py\nis_within · resolve_under_roots · archive_roots —\nthe one archive.root_paths guard, shared by\nrevert's deletes and renumber's renames"]
 
@@ -97,3 +97,11 @@ flowchart TB
   RENUMBER -->|read_msg_facts: date, Message-ID, attachment names\nfor a .msg the index has not seen yet| SCANNER
   RENUMBER -->|one listing pass, then os.rename per changed file| ONEDRIVE
   RENUMBER -->|find_in_folder · update_path · delete_by_path| REPO
+
+  subgraph draftflow["Draft data flow (headless, spawned by another app)"]
+    DRAFT["draft.py\nload_spec — validated before Outlook starts ·\nresolve_self_address · with_self_bcc ·\ncreate — the draft document. No COM, never sends"]
+  end
+  DRAFTCALLER["another local app (life-os)\nwrites a spec, spawns the process,\nthe user reviews and sends"] -->|subprocess: draft --spec| MAINBATCH
+  MAINBATCH -->|draft verb| DRAFT
+  DRAFT -->|outlook.self_address| CONFIG
+  DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save| OUTLOOK

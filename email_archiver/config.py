@@ -163,6 +163,19 @@ def get_outlook_category(cfg: dict[str, Any]) -> str:
     )
 
 
+def get_outlook_self_address(cfg: dict[str, Any]) -> str | None:
+    """Return the configured ``outlook.self_address``, or ``None`` when unset.
+
+    The address batch ``draft`` blind-copies on every draft. Optional: when it
+    is absent the draft verb falls back to the default sending account's SMTP
+    address, read from Outlook (see ``email_archiver.draft.resolve_self_address``).
+    A blank value counts as unset rather than as an address.
+    """
+    outlook_cfg = cfg.get("outlook") or {}
+    value = outlook_cfg.get("self_address")
+    return str(value).strip() if value and str(value).strip() else None
+
+
 def _resolve_paths(cfg: dict[str, Any]) -> None:
     """Convert relative paths in the config to absolute paths."""
     db_path = Path(cfg["database"]["path"])

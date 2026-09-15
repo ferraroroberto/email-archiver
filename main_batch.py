@@ -1,21 +1,23 @@
 """
-Headless batch entry point – plan / apply / revert / renumber, over JSON.
+Headless batch entry point – plan / apply / revert / renumber / draft, over JSON.
 
-Meant to be spawned as a subprocess by another local app (task-os), never used
-interactively: every verb prints exactly one JSON document on stdout, logs to
-the usual log file and to stderr, and never opens a window.
+Meant to be spawned as a subprocess by another local app (task-os, life-os),
+never used interactively: every verb prints exactly one JSON document on
+stdout and logs to the usual log file and to stderr. Only `draft` opens a
+window — the compose window of the draft it creates, which it never sends.
 
     python main_batch.py plan --candidates 5 > plan.json
     python main_batch.py apply --decisions decisions.json [--renumber]
     python main_batch.py revert --items revert.json [--renumber]
     python main_batch.py renumber --folder "<a folder>" [--dry-run]
+    python main_batch.py draft --spec spec.json
 
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
        still have failed, each with its own `error` inside the document
     2  the run could not start: no config, unreadable input, a folder outside
-       the archive roots, or Outlook unreachable. stdout carries
-       `{"error": {"code", "message"}}` instead
+       the archive roots, Outlook unreachable, or (draft) no self address to
+       blind-copy. stdout carries `{"error": {"code", "message"}}` instead
 
 Why a separate process rather than a library call: the Inbox verbs drive
 Outlook over COM, and a COM modal (the address-book security prompt, a profile
@@ -36,7 +38,7 @@ from typing import Any
 # Ensure project root is on the path regardless of cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from email_archiver import batch
+from email_archiver import batch, draft
 from email_archiver.config import load_config, setup_logging
 from email_archiver.outlook.client import (
     DEFAULT_START_TIMEOUT_SECONDS,
@@ -53,6 +55,7 @@ ERROR_CONFIG_MISSING = "config_missing"
 ERROR_BAD_INPUT = "bad_input"
 ERROR_OUTLOOK_UNAVAILABLE = "outlook_unavailable"
 ERROR_COM_UNAVAILABLE = "com_unavailable"
+ERROR_SELF_ADDRESS_UNRESOLVED = "self_address_unresolved"
 
 
 def _emit(document: dict[str, Any]) -> None:
@@ -107,7 +110,8 @@ def _load_input(path: str) -> list[dict[str, Any]]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main_batch.py",
-        description="Plan, apply or revert archiving of the whole Outlook Inbox.",
+        description="Plan, apply or revert archiving of the whole Outlook Inbox, "
+                    "or open an unsent draft.",
     )
     parser.add_argument(
         "--start-timeout", type=float, default=DEFAULT_START_TIMEOUT_SECONDS,
@@ -156,6 +160,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true",
         help="Report the same map without renaming anything.",
     )
+
+    p_draft = sub.add_parser(
+        "draft",
+        help="Open a filled, unsent Outlook draft that blind-copies your own address.",
+    )
+    p_draft.add_argument(
+        "--spec", required=True,
+        help="JSON file: {to, cc, bcc, subject, body_text | body_html, "
+             "attachments, ref, display}",
+    )
     return parser
 
 
@@ -184,6 +198,13 @@ def main(argv: list[str] | None = None) -> int:
             payload = _load_input(source)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return _fail(verb, ERROR_BAD_INPUT, f"{source}: {exc}")
+
+    spec: draft.DraftSpec | None = None
+    if verb == "draft":
+        try:
+            spec = draft.load_spec(args.spec)
+        except draft.SpecError as exc:
+            return _fail(verb, ERROR_BAD_INPUT, str(exc))
 
     if args.start_timeout <= 0:
         return _fail(verb, ERROR_BAD_INPUT, "--start-timeout must be positive")
@@ -225,6 +246,17 @@ def main(argv: list[str] | None = None) -> int:
                 document = batch.plan(client, cfg, candidates=args.candidates)
             elif verb == "apply":
                 document = batch.apply(client, cfg, payload, renumber=args.renumber)
+            elif verb == "draft":
+                self_address = draft.resolve_self_address(cfg, client)
+                if self_address is None:
+                    # Before any draft exists: one without the BCC copy would
+                    # never reach the Inbox, so it could never be filed.
+                    return _fail(
+                        verb, ERROR_SELF_ADDRESS_UNRESOLVED,
+                        "No address to blind-copy: set outlook.self_address, or "
+                        "make sure Outlook's default account reports an SMTP address.",
+                    )
+                document = draft.create(client, spec, self_address)
             else:
                 document = batch.revert(client, cfg, payload, renumber=args.renumber)
         except OutlookUnavailableError as exc:

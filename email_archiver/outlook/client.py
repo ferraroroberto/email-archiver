@@ -14,10 +14,13 @@ Design decisions:
   refetch / save_item / move_to / set_category / clear_category) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
+- The draft surface (default_account_smtp / create_draft) follows the same
+  split for email_archiver/draft.py. No code path in this module sends mail.
 """
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -236,6 +239,16 @@ DASL_INTERNET_MESSAGE_ID = (
 # reads back out of the archived .msg — so a plan and a later scan agree.
 DASL_FLAG_STATUS = "http://schemas.microsoft.com/mapi/proptag/0x10900003"
 
+# olMailItem, for Application.CreateItem. The draft verb creates nothing else.
+OL_MAIL_ITEM = 0
+# DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
+# draft stamped with it carries ``X-Archive-Ref: <token>`` into the sent mail, so
+# a caller can recognise its own copy when it lands back in the Inbox.
+DASL_X_ARCHIVE_REF = (
+    "http://schemas.microsoft.com/mapi/string/"
+    "{00020386-0000-0000-C000-000000000046}/X-Archive-Ref"
+)
+
 # How long ensure_running() waits for a freshly launched Outlook to publish its
 # COM object. Outlook's first start on a cold profile is genuinely slow.
 DEFAULT_START_TIMEOUT_SECONDS = 60.0
@@ -302,6 +315,35 @@ def without_category(raw: str | None, name: str) -> str:
     return join_categories(
         [n for n in split_categories(raw) if n.casefold() != name.casefold()]
     )
+
+
+_BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+
+
+def insert_body_html(existing_html: str | None, body_html: str) -> str:
+    """Return ``existing_html`` with ``body_html`` inserted at the top of its body.
+
+    ``existing_html`` is what Outlook put in a new draft's ``HTMLBody`` when it
+    displayed it, which is where the account's default signature lives. Putting
+    the caller's text straight after the ``<body>`` tag keeps that signature
+    below the message, where the user expects it. With no ``<body>`` tag to
+    anchor on (the draft was never displayed, or the store returned nothing) the
+    body is wrapped in a document of its own. Pure so it tests without Outlook.
+    """
+    match = _BODY_OPEN_TAG.search(existing_html or "")
+    if match is None:
+        return f"<html><body>{body_html}</body></html>"
+    return f"{existing_html[:match.end()]}{body_html}{existing_html[match.end():]}"
+
+
+@dataclass
+class CreatedDraft:
+    """What Outlook reports back about a draft ``create_draft`` saved."""
+
+    entry_id: str = ""
+    ref_stamped: bool = False
+    ref_reason: str = ""           # why the ref header is absent; "" when stamped
+    displayed: bool = False
 
 
 def _outlook_executable() -> str | None:
@@ -745,3 +787,97 @@ class OutlookClient:
     def entry_id(self, item: Any) -> str:
         """The mail's current EntryID (valid only for its current folder)."""
         return _safe_com(lambda: str(item.EntryID), "")
+
+    # ------------------------------------------------------ draft surface ---
+    #
+    # Used only by email_archiver/draft.py. Nothing here sends: a draft is
+    # saved and shown, and the user presses Send.
+
+    def default_account_smtp(self) -> str:
+        """The default sending account's SMTP address, or ``""`` when unknown.
+
+        The account whose delivery store is the profile's default store is the
+        one a new mail sends from; a profile with a single account needs no
+        match. Read from ``Account.SmtpAddress`` and never through
+        ``GetExchangeUser``, which can raise the address-book security modal.
+        ``""`` (never a guess) when several accounts exist and none owns the
+        default store, or the address read back is not an SMTP address.
+        """
+        namespace = self._namespace()
+        accounts = namespace.Accounts
+        count = _safe_com(lambda: int(accounts.Count), 0)
+        default_store_id = _safe_com(lambda: str(namespace.DefaultStore.StoreID), "")
+        candidates: list[str] = []
+        for i in range(1, count + 1):
+            account = _safe_com(lambda i=i: accounts.Item(i), None)
+            if account is None:
+                continue
+            smtp = _safe_com(lambda a=account: str(a.SmtpAddress or "").strip(), "")
+            candidates.append(smtp)
+            store_id = _safe_com(lambda a=account: str(a.DeliveryStore.StoreID), "")
+            if default_store_id and store_id == default_store_id:
+                return smtp if "@" in smtp else ""
+        if len(candidates) == 1 and "@" in candidates[0]:
+            return candidates[0]
+        logger.warning(
+            "Could not tell the default sending account apart among %d account(s).",
+            count,
+        )
+        return ""
+
+    def create_draft(
+        self,
+        *,
+        to: list[str],
+        cc: list[str],
+        bcc: list[str],
+        subject: str,
+        body_html: str,
+        attachments: list[str],
+        ref: str | None,
+        display: bool,
+    ) -> CreatedDraft:
+        """Create, save and (optionally) show a new mail. Never sends it.
+
+        Every step that can fail on caller data (attachments, the ref header)
+        runs before ``Display``, so a failure leaves no half-filled window on
+        the user's screen. ``Display`` comes before the body is written because
+        opening the compose window is what makes Outlook insert the account's
+        default signature; the body is then put above it. ``Save`` runs last,
+        so the finished draft sits in Drafts even if the window is closed.
+        """
+        app = _get_active_application()
+        if app is None:
+            raise OutlookUnavailableError("Outlook is no longer reachable over COM.")
+
+        mail = app.CreateItem(OL_MAIL_ITEM)
+        mail.To = "; ".join(to)
+        mail.CC = "; ".join(cc)
+        mail.BCC = "; ".join(bcc)
+        mail.Subject = subject
+        for path in attachments:
+            mail.Attachments.Add(path)
+
+        created = CreatedDraft()
+        if ref:
+            try:
+                mail.PropertyAccessor.SetProperty(DASL_X_ARCHIVE_REF, ref)
+                created.ref_stamped = True
+            except Exception as exc:
+                created.ref_reason = f"SetProperty refused: {type(exc).__name__}: {exc}"
+                logger.warning("Could not stamp X-Archive-Ref: %s", exc)
+
+        existing_html = ""
+        if display:
+            mail.Display(False)  # non-modal: this process does not wait on it
+            created.displayed = True
+            existing_html = _safe_com(lambda: mail.HTMLBody or "", "")
+            logger.info(
+                "Draft displayed; Outlook's own body is %d chars, signature "
+                "marker %s.", len(existing_html),
+                "present" if "_MailAutoSig" in existing_html else "absent",
+            )
+        mail.HTMLBody = insert_body_html(existing_html, body_html)
+        mail.Save()
+        created.entry_id = _safe_com(lambda: str(mail.EntryID), "")
+        return created

@@ -32,6 +32,11 @@ outlook:
   # stamps it with the category below. `revert` reverses both.
   archive_folder: "Archive"
   category: "Archived by task-os"
+  # Batch `draft` only. Blind-copied on every draft, so the sent copy lands back
+  # in the Inbox to be filed. Optional: when unset, the default sending
+  # account's SMTP address is read from Outlook; if neither resolves, `draft`
+  # exits 2 (`self_address_unresolved`) without creating anything.
+  # self_address: "you@example.com"
 
 database:
   # Path relative to the project root or absolute
