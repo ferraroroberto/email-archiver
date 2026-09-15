@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -217,6 +217,9 @@ class ScanStats:
     errors: int = 0
     deleted: int = 0
     duration_seconds: float = 0.0
+    # Configured roots that did not exist at scan time. Non-empty means the
+    # scan could not see the whole archive, so the purge was skipped.
+    missing_roots: list[str] = field(default_factory=list)
 
 
 class FolderScanner:
@@ -249,14 +252,15 @@ class FolderScanner:
             stop_flag: set it to signal the scan should abort after the
                        current file.
         """
-        for root in self._roots:
-            if not root.exists():
-                logger.warning("Archive root not found: %s", root)
         if not self._roots:
             raise ValueError("No archive roots configured.")
 
         stats = ScanStats()
         start = datetime.now()
+        for root in self._roots:
+            if not root.exists():
+                logger.warning("Archive root not found: %s", root)
+                stats.missing_roots.append(str(root))
 
         conn = init_db(self._db_path)
         repo = EmailRepository(conn)
@@ -339,10 +343,16 @@ class FolderScanner:
         conn.commit()
 
         # Remove DB entries for files that no longer exist on disk.
-        # Only run the purge when the scan was not aborted mid-way, to avoid
-        # deleting entries for files we simply haven't visited yet.
+        # Only run the purge when the scan was not aborted mid-way and every
+        # root was visible, to avoid deleting entries for files we simply
+        # haven't visited yet -- an unmounted or unsynced root reads as empty.
         aborted = stop_flag is not None and stop_flag.is_set()
-        if not aborted:
+        if stats.missing_roots:
+            logger.warning(
+                "Skipping index purge: %d archive root(s) missing.",
+                len(stats.missing_roots),
+            )
+        elif not aborted:
             stats.deleted = repo.delete_missing_emails(all_msg_paths)
             if stats.deleted:
                 logger.info("Purged %d deleted email(s) from index.", stats.deleted)

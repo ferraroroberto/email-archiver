@@ -144,6 +144,7 @@ archiver/
 ├── main_batch.py                ← Headless entry: plan / apply / revert / renumber (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
+├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
 └── requirements.txt
 ```
 
@@ -241,11 +242,26 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 & .\.venv\Scripts\python.exe main_ui.py
 ```
 
+### Nightly scan
+
+`run-scan-nightly.bat` is the scheduled-job launcher. It `cd`s to the repo, sets `PYTHONUTF8=1` and `PYTHONUNBUFFERED=1`, runs `main_scan.py --no-ui` **in the foreground** with the repo `.venv` Python, and exits with the scan's exit code — no `start`, no `pythonw`, no `pause`. When stdout is not a terminal (a captured job log), progress is printed one line per tick instead of being rewritten in place with `\r`.
+
+It runs in app-launcher as the job `email-archiver-scan-nightly` (schedule `none`, alert on failure), chained from both `on_success` and `on_failure` of the nightly fleet backup job, so the index is refreshed right after the backup whatever the backup's outcome. Chain hops run one at a time, which is what keeps the nightly scan from overlapping anything — there is no scan lock.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Scan complete. Per-file read errors (for example cloud-only placeholders) are counted in the `Done — …` summary line, not a failure |
+| `1` | Unexpected crash (uncaught exception), or the launcher could not find the repo or its `.venv` |
+| `2` | Config missing or unloadable, or no archive roots configured |
+| `3` | A configured archive root does not exist. The roots that are present are still indexed, but the purge is skipped, so index rows under the missing root are left untouched; each missing root is logged by path |
+
+The Stream Deck `launch_scan.bat` is unchanged and still opens the progress window.
+
 ---
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
@@ -464,6 +480,7 @@ The column is added to an existing database automatically on the next run — `i
 | File modified | `mtime` differs → re-parsed and updated |
 | File deleted | After a complete scan, `DELETE WHERE file_path NOT IN (all found paths)` purges stale entries |
 | Scan cancelled | Purge step is skipped — safe, no phantom deletions |
+| Archive root missing | Present roots are indexed, purge step is skipped — rows under an unmounted or unsynced root are never deleted; the headless scan exits `3` |
 
 ---
 

@@ -14,6 +14,7 @@ flowchart TB
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
     MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber,\none JSON document on stdout"]
+    NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
   end
 
   CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nsetup_logging"]
@@ -42,10 +43,11 @@ flowchart TB
   EXPLORER -->|Shell.Application / EnumWindows| SHELLCOM["Windows shell\n(open File Explorer windows)"]
 
   subgraph scan["Scan Archive data flow"]
-    SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits,\nreads the Outlook follow-up flag"]
+    SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits,\nreads the Outlook follow-up flag;\nskips the purge when a root is missing"]
   end
   SCANWINDOW --> SCANNER
   MAINSCAN -->|--no-ui| SCANNER
+  NIGHTLY -->|main_scan.py --no-ui| MAINSCAN
   SCANNER --> TEXT
   SCANNER -->|os.walk + open .msg| ONEDRIVE["OneDrive-synced archive root(s)\n(.msg files on disk)"]
   SCANNER -->|Message parsing| EXTRACTMSG["extract-msg (pip package)"]
