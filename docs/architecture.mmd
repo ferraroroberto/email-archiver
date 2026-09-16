@@ -83,7 +83,7 @@ flowchart TB
   end
   CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
-  BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category| OUTLOOK
+  BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category ·\nis_open_in_inspector| OUTLOOK
   OUTLOOK -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER
   BATCH -->|plan + apply: already archived?| REPO

@@ -34,7 +34,9 @@ Design decisions:
   refuses it with MAPI_E_OBJECT_CHANGED, which is how a mail ends up with its
   files written and its place in the Inbox kept. ``apply`` moves a reference
   re-acquired by EntryID, and on that refusal saves and retries once; which
-  path finished it is logged and reported as ``move_via``.
+  path finished it is logged and reported as ``move_via``. A refusal that
+  survives both is reported as ``message_changed`` rather than ``move_failed``
+  — usually a mail left open in an Outlook window, and the message says so.
 - **Nothing is written outside the archive roots.** ``revert`` refuses per
   file, and ``apply`` refuses per decision, any path that does not resolve
   inside ``archive.root_paths`` — so a malformed, hostile or LLM-invented
@@ -105,6 +107,12 @@ ERROR_NOT_IN_ARCHIVE = "not_in_archive_folder"  # revert cannot find it back
 ERROR_BAD_DECISION = "bad_decision"             # caller sent an unusable entry
 ERROR_ARCHIVE_FAILED = "archive_failed"         # disk write / Outlook SaveAs
 ERROR_MOVE_FAILED = "move_failed"               # files are on disk, mail is not
+# A move refused as MAPI_E_OBJECT_CHANGED after both retries — almost always a
+# mail left open in an Outlook window. Its own code because it is the one move
+# failure an operator clears in seconds without anything being wrong: close the
+# window, apply the same decision again. A caller that cannot tell it from a
+# plain `move_failed` has to treat both as needing a human (issue #76).
+ERROR_MESSAGE_CHANGED = "message_changed"
 # The move landed and only the tag did not. Its own code because the two are
 # genuinely different states to recover from: after a move_failed the mail is
 # still in the Inbox, after a category_failed it is already filed and only
@@ -652,10 +660,7 @@ def _apply_one(
         result["entry_id"] = client.entry_id(moved)
     except Exception as exc:
         logger.exception("Moving %s to %r failed", message_id, archive_folder)
-        result["error"] = {
-            "code": ERROR_MOVE_FAILED,
-            "message": f"{type(exc).__name__}: {exc}{_move_remedy(exc)}",
-        }
+        result["error"] = _move_failure_error(client, item, exc, message_id)
         return result
 
     # Tagged in its own step: a category that would not stick is a different
@@ -697,27 +702,80 @@ def _decision_date_prefix(
     return bool(value)
 
 
-def _move_remedy(exc: Exception) -> str:
-    """The sentence appended to a ``move_failed`` message, when there is one.
+def _move_failure_error(
+    client: Any, item: Any, exc: Exception, message_id: str
+) -> dict[str, str]:
+    """The ``error`` a failed ``apply`` move reports: its code and its message.
 
-    A move refused as *the message has been changed* even after the re-acquire
-    and the save-and-retry is its own condition, and a recoverable one: the
-    files are on disk, the mail is still in the Inbox, and the state that
-    refuses the write is held by the running Outlook process itself — a
-    restart clears it and re-applying the same decision then finishes the mail
-    without writing anything (observed on the mail in issue #59: refused on a
-    freshly re-acquired reference *and* on ``Save()``, moved on the first
-    attempt after Outlook was restarted). Saying so here is what makes the
-    next occurrence diagnosable from the run's own output.
+    Anything other than MAPI_E_OBJECT_CHANGED after both defences is a plain
+    ``move_failed`` — a store that refused the write for its own reasons is a
+    different problem, and dressing it up as this one would hide it.
+
+    A move refused as *the message has been changed* on a re-acquired
+    reference *and* after saving it is its own condition, and a recoverable
+    one: the files are on disk, the mail is still in the Inbox, and something
+    in the running Outlook is holding the item. Almost always that something
+    is an open mail window — an inspector holds its item for the life of the
+    window, so both defences fail by construction (issue #76: a live filing
+    run refused this way finished on the first attempt the moment the window
+    was closed, with no restart). Issue #59 saw the same refusal clear on an
+    Outlook restart, which is why that stays as the fallback rather than the
+    headline.
+
+    So the message leads with the cheap remedy, and says which of the two it
+    is on the evidence rather than on the guess: Outlook is asked whether this
+    mail is actually open. A check that could not be completed is reported as
+    *not determined* and never as "no window", because pointing an operator at
+    a restart they do not need is exactly the failure this replaces.
     """
     if not is_message_changed_error(exc):
-        return ""
-    return (
-        " — Outlook refused the move as a changed message twice, on a "
-        "re-acquired reference and after saving it. The files are on disk and "
-        "the mail is still in the Inbox: restarting Outlook and applying this "
-        "same decision again finishes it without writing anything."
+        return {
+            "code": ERROR_MOVE_FAILED,
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        open_in_window = client.is_open_in_inspector(item)
+    except Exception as probe_exc:  # the probe is a courtesy, never the run
+        logger.warning(
+            "Could not check whether %s is open in a window: %s: %s",
+            message_id, type(probe_exc).__name__, probe_exc,
+        )
+        open_in_window = None
+    logger.info(
+        "Move of %s was refused as a changed message; open in a window: %s.",
+        message_id, {True: "yes", False: "no", None: "not determined"}[open_in_window],
     )
+
+    if open_in_window is True:
+        cause = (
+            "This mail is open in an Outlook window, which holds it and "
+            "refuses every write to it. Close that window and apply this same "
+            "decision again."
+        )
+    elif open_in_window is False:
+        cause = (
+            "This mail is not open in any Outlook window, so something else "
+            "in the running Outlook is holding it. Restart Outlook and apply "
+            "this same decision again."
+        )
+    else:
+        cause = (
+            "Whether this mail is open in an Outlook window could not be "
+            "determined. A mail left open is the usual cause, so close any "
+            "window showing it and apply this same decision again; restart "
+            "Outlook if that does not clear it."
+        )
+
+    return {
+        "code": ERROR_MESSAGE_CHANGED,
+        "message": (
+            f"{type(exc).__name__}: {exc} — Outlook refused the move as a "
+            f"changed message twice, on a re-acquired reference and after "
+            f"saving it. {cause} The files are on disk and the mail is still "
+            f"in the Inbox, so re-applying writes nothing."
+        ),
+    }
 
 
 def _move_out_of_inbox(
