@@ -271,18 +271,19 @@ def _renumber_folders(
     return renumbered, refused
 
 
-def error_document(verb: str, code: str, message: str) -> dict[str, Any]:
+def error_document(verb: str, code: str, message: str, **details: Any) -> dict[str, Any]:
     """The document printed when the run could not start at all.
 
     Deliberately the same envelope shape minus the results, so a consumer
     parses one JSON document either way and branches on ``"error" in doc``
-    rather than on the exit code alone.
+    rather than on the exit code alone. ``details`` add keys to ``error``
+    (``send``'s refusal names the parts that differ under ``differs``).
     """
     return {
         "verb": verb,
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now_iso(),
-        "error": {"code": code, "message": message},
+        "error": {"code": code, "message": message, **details},
     }
 
 

@@ -18,13 +18,19 @@ Design decisions:
   set_category / clear_category / is_open_in_inspector) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
-- The draft surface (default_account_smtp / create_draft / update_draft) follows the same
-  split for email_archiver/draft.py. No code path in this module sends mail.
+- The draft surface (default_account_smtp / create_draft / update_draft /
+  open_draft / read_draft / snapshot_draft / close_inspectors_of) follows the
+  same split for email_archiver/draft.py and email_archiver/send.py. No code
+  path in this module sends mail: the one ``Send`` call lives in
+  email_archiver/outlook/sending.py, reached only by the ``send`` verb.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -255,8 +261,12 @@ DASL_FLAG_STATUS = "http://schemas.microsoft.com/mapi/proptag/0x10900003"
 
 # olMailItem, for Application.CreateItem. The draft verb creates nothing else.
 OL_MAIL_ITEM = 0
-# olFolderDrafts: the only folder `update_draft` edits an item in.
+# olFolderDrafts: the only folder a draft is updated, read or sent from.
 OL_FOLDER_DRAFTS = 16
+# OlMailRecipientType, for reading a draft's recipients back by line.
+OL_TO = 1
+OL_CC = 2
+OL_BCC = 3
 # olSave, for Inspector.Close: keep what the open window holds.
 OL_SAVE = 0
 # DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
@@ -395,6 +405,43 @@ def mark_body_html(body_html: str) -> str:
     return f"{DRAFT_BODY_OPEN}{body_html}{DRAFT_BODY_CLOSE}"
 
 
+def _marked_region_span(existing: str) -> tuple[re.Match, re.Match] | None:
+    """The opening and (last) closing marker of the body region, or ``None``."""
+    opened = _DRAFT_BODY_OPEN_TAG.search(existing)
+    if opened is None:
+        return None
+    closes = list(_DRAFT_BODY_CLOSE_TAG.finditer(existing, opened.end()))
+    return (opened, closes[-1]) if closes else None
+
+
+def marked_body_region(existing_html: str | None) -> str | None:
+    """The HTML inside the marked body region, or ``None`` without one —
+    bounded exactly as ``replace_marked_body_html`` bounds what it replaces."""
+    existing = existing_html or ""
+    span = _marked_region_span(existing)
+    return None if span is None else existing[span[0].end():span[1].start()]
+
+
+def recipient_address(recipient: Any) -> str:
+    """The SMTP address of one draft recipient, or ``""`` when it has none.
+
+    A recipient Outlook has not resolved yet carries the typed address in
+    ``Name`` with an empty ``Address`` (observed live on a fresh draft), so
+    ``Address``, then ``AddressEntry.Address``, then ``Name`` are tried, and
+    the first that holds an ``@`` wins. ``GetExchangeUser`` is never called:
+    it can raise the address-book security modal.
+    """
+    for read in (
+        lambda: recipient.Address,
+        lambda: recipient.AddressEntry.Address,
+        lambda: recipient.Name,
+    ):
+        value = str(_safe_com(read, "") or "").strip()
+        if "@" in value:
+            return value
+    return ""
+
+
 def replace_marked_body_html(existing_html: str | None, body_html: str) -> str | None:
     """``existing_html`` with its marked body region replaced by ``body_html``.
 
@@ -406,13 +453,10 @@ def replace_marked_body_html(existing_html: str | None, body_html: str) -> str |
     ``insert_body_html``.
     """
     existing = existing_html or ""
-    opened = _DRAFT_BODY_OPEN_TAG.search(existing)
-    if opened is None:
+    span = _marked_region_span(existing)
+    if span is None:
         return None
-    closes = list(_DRAFT_BODY_CLOSE_TAG.finditer(existing, opened.end()))
-    if not closes:
-        return None
-    return f"{existing[:opened.start()]}{mark_body_html(body_html)}{existing[closes[-1].end():]}"
+    return f"{existing[:span[0].start()]}{mark_body_html(body_html)}{existing[span[1].end():]}"
 
 
 def insert_body_html(existing_html: str | None, body_html: str) -> str:
@@ -441,7 +485,39 @@ class CreatedDraft:
     displayed: bool = False
 
 
-# Why `update_draft` refused. Each is its own `error.code` in `main_batch.py`,
+@dataclass
+class DraftAttachment:
+    """One attachment of a draft as stored: its bytes, not Outlook's
+    ``Attachment.Size``, which counts MAPI overhead and never equals the file."""
+
+    name: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass
+class DraftSnapshot:
+    """An unsent draft read back from the store, as plain data.
+
+    ``to`` / ``cc`` / ``bcc`` are the addresses on each line, in the order
+    Outlook lists them; ``unreadable_recipients`` counts recipients with no
+    readable address or line, which a caller must treat as a fact of its own,
+    never as a shorter list. ``body_region_html`` is the marked region
+    ``create_draft`` wrote, or ``None`` when the markers are gone.
+    """
+
+    entry_id: str
+    subject: str
+    to: list[str]
+    cc: list[str]
+    bcc: list[str]
+    html_body: str
+    body_region_html: str | None
+    attachments: list[DraftAttachment]
+    unreadable_recipients: int = 0
+
+
+# Why `open_draft` refused. Each is its own `error.code` in `main_batch.py`,
 # and each is raised before the item is changed.
 DRAFT_NOT_FOUND = "draft_not_found"          # the EntryID no longer resolves
 DRAFT_NOT_EDITABLE = "draft_not_editable"    # sent, or not in Drafts
@@ -1170,29 +1246,15 @@ class OutlookClient:
         attachments are all removed and the spec's re-added, so the draft ends
         up carrying exactly what the caller asked for.
         """
-        namespace = self._namespace()
-        try:
-            mail = namespace.GetItemFromID(entry_id)
-        except Exception as exc:
-            raise DraftUpdateError(
-                DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}: {type(exc).__name__}: {exc}"
-            ) from exc
-        if mail is None:
-            raise DraftUpdateError(DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}")
-        if _safe_com(lambda: bool(mail.Sent), True):
-            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item has been sent; only an unsent draft is updated")
-        drafts_id = _safe_com(lambda: str(namespace.GetDefaultFolder(OL_FOLDER_DRAFTS).EntryID), "")
-        parent_id = _safe_com(lambda: str(mail.Parent.EntryID), "")
-        if not drafts_id or parent_id != drafts_id:
-            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item is not in the Drafts folder")
+        mail = self.open_draft(entry_id)
         if replace_marked_body_html(_safe_com(lambda: mail.HTMLBody or "", ""), body_html) is None:
             # Checked on the stored item first too, so an unmarked draft is
             # refused without closing the user's open window on it.
             raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
-        if self._close_inspectors_of(entry_id):
+        if self.close_inspectors_of(entry_id):
             # The window held its own copy of the item: re-read what it saved,
             # or the region check below would run on stale HTML.
-            mail = namespace.GetItemFromID(entry_id)
+            mail = self.open_draft(entry_id)
         new_html = replace_marked_body_html(_safe_com(lambda: mail.HTMLBody or "", ""), body_html)
         if new_html is None:
             raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
@@ -1224,7 +1286,80 @@ class OutlookClient:
         logger.info("Draft updated in place.")
         return updated
 
-    def _close_inspectors_of(self, entry_id: str) -> int:
+    def open_draft(self, entry_id: str) -> Any:
+        """The unsent mail ``entry_id`` in Drafts, or :class:`DraftUpdateError`.
+
+        The one lookup behind ``update_draft``, ``read_draft`` and the ``send``
+        verb: by EntryID only, never by subject or search.
+        """
+        namespace = self._namespace()
+        try:
+            mail = namespace.GetItemFromID(entry_id)
+        except Exception as exc:
+            raise DraftUpdateError(
+                DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if mail is None:
+            raise DraftUpdateError(DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}")
+        if _safe_com(lambda: bool(mail.Sent), True):
+            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item has been sent; only an unsent draft is used")
+        drafts_id = _safe_com(lambda: str(namespace.GetDefaultFolder(OL_FOLDER_DRAFTS).EntryID), "")
+        parent_id = _safe_com(lambda: str(mail.Parent.EntryID), "")
+        if not drafts_id or parent_id != drafts_id:
+            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item is not in the Drafts folder")
+        return mail
+
+    def read_draft(self, entry_id: str) -> DraftSnapshot:
+        """The unsent draft ``entry_id`` as stored. Writes nothing, shows nothing.
+
+        A window open on the draft keeps its own unsaved copy, which this does
+        not see; the ``send`` verb closes such windows (saving) before it reads.
+        """
+        return self.snapshot_draft(self.open_draft(entry_id), entry_id)
+
+    def snapshot_draft(self, mail: Any, entry_id: str) -> DraftSnapshot:
+        """Read one draft item into a :class:`DraftSnapshot`.
+
+        Attachment bytes are saved to a temporary directory, hashed and
+        removed, so the snapshot binds their content and not only their name.
+        An attachment that cannot be saved raises: a snapshot that silently
+        skipped one would bind less than it claims.
+        """
+        lines: dict[int, list[str]] = {OL_TO: [], OL_CC: [], OL_BCC: []}
+        unreadable = 0
+        recipients = mail.Recipients
+        for index in range(1, int(recipients.Count) + 1):
+            recipient = recipients.Item(index)
+            address = recipient_address(recipient)
+            kind = _safe_com(lambda r=recipient: int(r.Type), 0)
+            if not address or kind not in lines:
+                unreadable += 1
+                continue
+            lines[kind].append(address)
+
+        attachments: list[DraftAttachment] = []
+        with tempfile.TemporaryDirectory(prefix="email-archiver-read-") as scratch:
+            items = mail.Attachments
+            for index in range(1, int(items.Count) + 1):
+                item = items.Item(index)
+                path = os.path.join(scratch, str(index))
+                item.SaveAsFile(path)
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                attachments.append(DraftAttachment(
+                    name=str(_safe_com(lambda i=item: i.FileName, "") or ""),
+                    size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                ))
+
+        html_body = str(mail.HTMLBody or "")
+        return DraftSnapshot(
+            entry_id=entry_id, subject=str(mail.Subject or ""),
+            to=lines[OL_TO], cc=lines[OL_CC], bcc=lines[OL_BCC],
+            html_body=html_body, body_region_html=marked_body_region(html_body),
+            attachments=attachments, unreadable_recipients=unreadable,
+        )
+
+    def close_inspectors_of(self, entry_id: str) -> int:
         """Close every open compose window showing ``entry_id``, saving it.
 
         An open window keeps its own copy of the draft: left open over an

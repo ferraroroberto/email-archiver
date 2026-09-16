@@ -4,5 +4,5 @@
 # description, exposed services). Schema: fleet-config/architecture/README.md.
 layer       = "working-pipe"
 icon        = "📧"
-description = "Outlook → OneDrive archive. Its SQLite index records the follow-up flag, which task-os polls read-only to raise a task per flagged mail; main_batch.py exposes headless plan/apply/revert over the whole Inbox or targeted mail (by Message-ID, date, text or X-Archive-Ref) plus a renumber verb that re-sequences a folder into sent-date order, and a draft verb that opens an unsent BCC-self Outlook draft for life-os, all with JSON I/O."
+description = "Outlook → OneDrive archive. Its SQLite index records the follow-up flag, which task-os polls read-only to raise a task per flagged mail; main_batch.py exposes headless plan/apply/revert over the whole Inbox or targeted mail (by Message-ID, date, text or X-Archive-Ref) plus a renumber verb that re-sequences a folder into sent-date order, a draft verb that opens an unsent BCC-self Outlook draft for life-os, and read/send verbs that send one such draft only while its live fingerprint still matches the approved one, all with JSON I/O."
 tag         = ["→", "OneDrive"]

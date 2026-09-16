@@ -1,10 +1,12 @@
 """
-Headless batch entry point – plan / apply / revert / renumber / draft, over JSON.
+Headless batch entry point – plan / apply / revert / renumber / draft / read / send, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os, life-os),
 never used interactively: every verb prints exactly one JSON document on
 stdout and logs to the usual log file and to stderr. Only `draft` opens a
 window — the compose window of the draft it creates, which it never sends.
+Only `send` sends, and only a draft whose live fingerprint still matches the
+one the caller approved (`read` reports it).
 
     python main_batch.py plan --candidates 5 > plan.json
     python main_batch.py plan --since 2026-09-15 --search invoice --candidates 0
@@ -15,15 +17,20 @@ window — the compose window of the draft it creates, which it never sends.
     python main_batch.py renumber --folder "<a folder>" [--dry-run]
     python main_batch.py draft --spec spec.json
     python main_batch.py draft --update <entry_id> --spec spec.json
+    python main_batch.py read --entry-id <entry_id>
+    python main_batch.py send --entry-id <entry_id> --expect-hash <sha256> \
+        [--expect-part body=<sha256> ...] [--expect-to <address> ...]
 
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
        still have failed, each with its own `error` inside the document
     2  the run could not start: no config, unreadable input, a folder outside
        the archive roots, Outlook unreachable, (draft) no self address to
-       blind-copy, or (draft --update) a draft that is gone, sent, outside
-       Drafts or has no marked body region. stdout carries
-       `{"error": {"code", "message"}}` instead
+       blind-copy, (draft --update / read / send) a draft that is gone, sent,
+       outside Drafts or (update) has no marked body region, or (send) a draft
+       that is not what was approved — `approval_mismatch`, naming the parts
+       under `error.differs` — or has a recipient with no readable address.
+       stdout carries `{"error": {"code", "message"}}` instead
 
 Why a separate process rather than a library call: the Inbox verbs drive
 Outlook over COM, and a COM modal (the address-book security prompt, a profile
@@ -37,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +53,7 @@ from typing import Any
 # Ensure project root is on the path regardless of cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from email_archiver import batch, draft
+from email_archiver import batch, draft, send
 from email_archiver.config import load_config, setup_logging
 from email_archiver.outlook.client import (
     DEFAULT_START_TIMEOUT_SECONDS,
@@ -83,9 +91,9 @@ def _emit(document: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _fail(verb: str, code: str, message: str) -> int:
+def _fail(verb: str, code: str, message: str, **details: Any) -> int:
     logger.error("%s: %s", code, message)
-    _emit(batch.error_document(verb, code, message))
+    _emit(batch.error_document(verb, code, message, **details))
     return EXIT_CANNOT_START
 
 
@@ -152,6 +160,35 @@ def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
     return batch.PlanFilters(
         message_ids=tuple(message_ids), since=since, search=tuple(search), ref=ref
     )
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _send_expectations(args: argparse.Namespace) -> tuple[str, dict[str, str], list[str] | None]:
+    """``send``'s ``--expect-*`` flags, validated before Outlook is touched.
+
+    Raises:
+        ValueError: a flag's value is unusable; the message names the flag.
+    """
+    expect_hash = args.expect_hash.strip().lower()
+    if not _SHA256.fullmatch(expect_hash):
+        raise ValueError("--expect-hash must be a sha256 hex digest")
+    parts: dict[str, str] = {}
+    for raw in args.expect_parts:
+        name, _, digest = raw.partition("=")
+        name, digest = name.strip(), digest.strip().lower()
+        if name not in send.PARTS or not _SHA256.fullmatch(digest):
+            raise ValueError(
+                f"--expect-part {raw!r} is not NAME=SHA256 with NAME one of {', '.join(send.PARTS)}"
+            )
+        parts[name] = digest
+    expect_to = None
+    if args.expect_to:
+        expect_to = [address.strip() for address in args.expect_to]
+        if not all(expect_to):
+            raise ValueError("--expect-to must not be blank")
+    return expect_hash, parts, expect_to
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -255,6 +292,32 @@ def _build_parser() -> argparse.ArgumentParser:
              "Refused, untouched, when it is gone, sent, outside Drafts, or has no "
              "marked body region.",
     )
+
+    p_read = sub.add_parser(
+        "read",
+        help="Read an unsent draft back as stored, with its fingerprint. Writes nothing.",
+    )
+    p_read.add_argument("--entry-id", required=True, help="The draft's EntryID.")
+
+    p_send = sub.add_parser(
+        "send",
+        help="Send one unsent draft, only if its live fingerprint matches the approved one.",
+    )
+    p_send.add_argument("--entry-id", required=True, help="The draft's EntryID.")
+    p_send.add_argument(
+        "--expect-hash", required=True,
+        help="The approved fingerprint hash, as `read` reported it.",
+    )
+    p_send.add_argument(
+        "--expect-part", action="append", default=[], dest="expect_parts",
+        metavar="NAME=SHA256",
+        help="An approved per-part hash, so a refusal can name what differs. Repeatable.",
+    )
+    p_send.add_argument(
+        "--expect-to", action="append", default=[],
+        help="An address the To line must hold; given at all, the To line must be "
+             "exactly these. Repeatable.",
+    )
     return parser
 
 
@@ -292,6 +355,16 @@ def main(argv: list[str] | None = None) -> int:
             return _fail(verb, ERROR_BAD_INPUT, str(exc))
         if args.update is not None and not args.update.strip():
             return _fail(verb, ERROR_BAD_INPUT, "--update must not be blank")
+
+    expectations: tuple[str, dict[str, str], list[str] | None] = ("", {}, None)
+    if verb in ("read", "send"):
+        if not args.entry_id.strip():
+            return _fail(verb, ERROR_BAD_INPUT, "--entry-id must not be blank")
+    if verb == "send":
+        try:
+            expectations = _send_expectations(args)
+        except ValueError as exc:
+            return _fail(verb, ERROR_BAD_INPUT, str(exc))
 
     if args.start_timeout <= 0:
         return _fail(verb, ERROR_BAD_INPUT, "--start-timeout must be positive")
@@ -362,6 +435,10 @@ def main(argv: list[str] | None = None) -> int:
                     document = draft.create(client, spec, self_address)
                 else:
                     document = draft.update(client, args.update.strip(), spec, self_address)
+            elif verb == "read":
+                document = send.read_document(client.read_draft(args.entry_id.strip()))
+            elif verb == "send":
+                document = send.send(client, args.entry_id.strip(), *expectations)
             else:
                 document = batch.revert(
                     client, cfg, payload, renumber=args.renumber, category=category
@@ -370,6 +447,10 @@ def main(argv: list[str] | None = None) -> int:
             # Raised before the item was changed: the caller learns which of
             # gone / not editable / unmarked it is, never a generic failure.
             return _fail(verb, exc.code, str(exc))
+        except send.SendRefused as exc:
+            # Raised before Send(): nothing went out, and the caller learns
+            # which parts no longer match what was approved.
+            return _fail(verb, exc.code, str(exc), differs=exc.differs)
         except OutlookUnavailableError as exc:
             # Outlook was up when ensure_running() checked but quit or went
             # unreachable partway through the walk (client._namespace()).

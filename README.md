@@ -112,6 +112,7 @@ archiver/
 │   ├── paths.py                 ← Archive-root guard shared by revert and renumber
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
+│   ├── send.py                  ← Headless read-back + guarded send: fingerprint, approval check (no COM)
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
@@ -142,7 +143,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
@@ -262,7 +263,7 @@ The Stream Deck `launch_scan.bat` is unchanged and still opens the progress wind
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`) end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read` and `send`) end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
@@ -274,7 +275,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: five verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, and one that opens an unsent draft — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: seven verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, and two that read a draft back and send it only while it is still what was approved — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
@@ -283,6 +284,8 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 & .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
 & .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
 & .\.venv\Scripts\python.exe main_batch.py draft --spec spec.json
+& .\.venv\Scripts\python.exe main_batch.py read --entry-id <entry_id>
+& .\.venv\Scripts\python.exe main_batch.py send --entry-id <entry_id> --expect-hash <sha256>
 ```
 
 | Verb | Reads | Does |
@@ -292,6 +295,8 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 | `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](#renumbering-a-folder). |
 | `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
+| `read` | nothing | Reads one unsent draft back as it is stored, with its fingerprint. Writes nothing, shows nothing. See [Sending an approved draft](#sending-an-approved-draft). |
+| `send` | `--expect-hash` (and optionally `--expect-part`, `--expect-to`) | Sends that one draft, only if its live fingerprint still matches. Refused with `approval_mismatch` naming what differs otherwise. |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -330,7 +335,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` / `draft_body_unmarked` (`draft --update` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
+| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` (`draft --update`, `read`, `send`), `draft_body_unmarked` (`draft --update` only), `approval_mismatch` / `recipient_unreadable` (`send` only; `approval_mismatch` names the parts under `error.differs`). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `message_changed`, `category_failed`. The last three are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook, and a [`message_changed`](#retrying-a-mail-that-was-written-but-never-moved) is a `move_failed` that an operator clears in seconds — usually by closing an open mail window.
 
@@ -455,6 +460,29 @@ A caller iterating on one mail ("make it shorter") edits the draft it already ma
   - `draft_not_editable` — the item was sent, or is not in the Drafts folder;
   - `draft_body_unmarked` — no marked body region: a draft created before `--update` existed, or one whose HTML was rewritten. Guessing where the body ends could eat the signature or the user's own text.
 - The document is the one above with `updated: true` and `updated_at` in place of `created_at`.
+
+#### Sending an approved draft
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py read --entry-id <entry_id>
+& .\.venv\Scripts\python.exe main_batch.py send --entry-id <entry_id> --expect-hash <sha256> `
+    --expect-part body=<sha256> [--expect-part to=<sha256> ...] [--expect-to <address> ...]
+```
+
+A caller shows the user a draft, the user approves it, and only then does the caller send. The approval is bound to the item actually in Drafts, not to what the caller wrote, so an edit made by hand in Outlook after the approval stops the send.
+
+- **`read`** reports the draft as stored: `to` / `cc` / `bcc` read from its recipients, `subject`, `body.html` (the whole `HTMLBody`, signature included), `body.region_html` (the marked region `draft` wrote, `null` when the markers are gone) and `body.region_text` (the plain text that region was made from, `null` when it is not exactly what `draft` writes for a `body_text`), and `attachments` with their byte size and sha256. The attachments are saved to a temp folder to be hashed, which is removed afterwards. It also reports `fingerprint`: a sha256 per part (`to`, `cc`, `bcc`, `subject`, `body`, `attachments`) and one `hash` over them. Recipients are compared as a sorted, case-folded set.
+- **`send`** closes any window open on the draft, saving it, so nothing typed there is lost and anything typed counts as a change. It then re-reads the item and recomputes the fingerprint **immediately before `Send()`, on the same item it sends**. If the hash differs, or the To line is not exactly the `--expect-to` addresses, the run exits 2 with `approval_mismatch`. `error.differs` names the parts that no longer match the `--expect-part` hashes. Nothing is sent.
+- **One item, by EntryID.** No lookup by subject or search, and no recipient is resolved or added. A recipient with no readable address refuses the send as `recipient_unreadable`. A draft that is gone, already sent or outside Drafts is `draft_not_found` / `draft_not_editable`.
+- **`draft` has no send path.** The one COM `Send` call lives in `email_archiver/outlook/sending.py`, reached only by this verb, and a test pins that nowhere else calls it.
+
+```json
+{
+  "verb": "send", "schema_version": 1, "generated_at": "…",
+  "entry_id": "…", "subject": "…", "to": ["…"], "cc": [], "bcc": ["you@example.com"],
+  "attachments": ["letter.pdf"], "fingerprint": "<sha256>", "sent": true, "sent_at": "…"
+}
+```
 
 ### Safety
 
