@@ -10,6 +10,9 @@ Design decisions:
 - is_running() checks the process list without starting Outlook, which is
   important for the fast-launch requirement. ensure_running() is its deliberate
   opposite, used only by batch mode, which has no user to open Outlook for it.
+  It also owns the lifetime of what it starts: an outlook.exe that never
+  publishes its COM object is terminated by the handle ensure_running() holds,
+  never by image name, so an Outlook it merely attached to is out of reach.
 - The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
   find_by_message_id / archive_ref / refetch / save_item / move_to /
   set_category / clear_category / is_open_in_inspector) lives here
@@ -271,6 +274,9 @@ DASL_DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
 # COM object. Outlook's first start on a cold profile is genuinely slow.
 DEFAULT_START_TIMEOUT_SECONDS = 60.0
 _POLL_INTERVAL_SECONDS = 1.0
+# How long the teardown waits for a terminated Outlook to actually go away
+# before giving up and saying so in the error it raises.
+_TERMINATE_WAIT_SECONDS = 10.0
 
 # MAPI_E_OBJECT_CHANGED. Outlook raises it from MailItem.Move (and Delete, and
 # Save) when it considers the in-memory item to have been modified since it was
@@ -445,6 +451,61 @@ def _get_active_application() -> Any | None:
         return None
 
 
+def _spawn_outlook(exe: str) -> Any:
+    """Start ``exe`` and return the handle that owns the started process.
+
+    A seam on purpose: the teardown in ``ensure_running()`` is unit-tested
+    against a fake spawner, because the only Outlook on this machine is the
+    user's own and no test may be able to reach it.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    # Deliberately WITHOUT CREATE_NO_WINDOW: this is the one spawn in the
+    # project whose window is meant to be visible — a hidden Outlook is
+    # exactly what ensure_running() exists to avoid.
+    return subprocess.Popen(  # noqa: S603
+        [exe],
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            if sys.platform == "win32"
+            else 0
+        ),
+    )
+
+
+def _terminate_spawned_outlook(proc: Any) -> str:
+    """End the Outlook *this run started*, and report what happened to it.
+
+    Takes the handle returned by ``_spawn_outlook`` and nothing else. Ending it
+    through that handle rather than by image name or a PID lookup is the whole
+    point: an Outlook that was already running — the user's own, on their
+    own desktop — is not reachable from here, and a live handle keeps its
+    PID reserved, so the call cannot land on a reused PID either.
+
+    Returns one sentence for the ``OutlookUnavailableError`` message, so the
+    ``outlook_unavailable`` error document records whether the process was
+    cleaned up or is still out there.
+    """
+    pid = getattr(proc, "pid", None)
+    try:
+        if proc.poll() is not None:
+            logger.info("The outlook.exe started (PID %s) had already exited.", pid)
+            return f"The outlook.exe it started (PID {pid}) had already exited."
+        proc.terminate()
+        proc.wait(timeout=_TERMINATE_WAIT_SECONDS)
+    except Exception as exc:
+        logger.warning(
+            "Could not terminate the outlook.exe started (PID %s): %s", pid, exc
+        )
+        return (
+            f"The outlook.exe it started (PID {pid}) could NOT be terminated "
+            f"({type(exc).__name__}: {exc}) and may still be running."
+        )
+    logger.warning("Terminated the outlook.exe this run started (PID %s).", pid)
+    return f"The outlook.exe it started (PID {pid}) was terminated."
+
+
 # ------------------------------------------------------------- client ------
 
 
@@ -555,11 +616,17 @@ class OutlookClient:
         the user's own shortcut would) and then polls ``GetActiveObject`` until
         the COM object appears or ``timeout`` elapses.
 
+        When the wait times out, the process this call started is terminated
+        before the error is raised — see ``_terminate_spawned_outlook``. An
+        Outlook that was already running is only ever attached to, never
+        started and never terminated.
+
         Raises:
             OutlookUnavailableError: Outlook could not be started or never
                 published its COM object inside the timeout. A loud failure on
                 purpose — every batch verb needs Outlook, so continuing would
-                report an empty Inbox nobody ever read.
+                report an empty Inbox nobody ever read. The message says what
+                became of the process this call started.
         """
         app = _get_active_application()
         if app is not None:
@@ -573,21 +640,8 @@ class OutlookClient:
             )
 
         logger.info("Outlook is not running; starting %s", exe)
-        import subprocess  # noqa: PLC0415
-        import sys  # noqa: PLC0415
-
         try:
-            # Deliberately WITHOUT CREATE_NO_WINDOW: this is the one spawn in
-            # the project whose window is meant to be visible — a hidden
-            # Outlook is exactly what this method exists to avoid.
-            subprocess.Popen(  # noqa: S603
-                [exe],
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                    if sys.platform == "win32"
-                    else 0
-                ),
-            )
+            proc = _spawn_outlook(exe)
         except OSError as exc:
             raise OutlookUnavailableError(
                 f"Could not start Outlook ({exe}): {exc}"
@@ -601,9 +655,15 @@ class OutlookClient:
                 logger.info("Outlook is up.")
                 return app
 
+        # Nothing else owns this process's lifetime. Left running it outlives
+        # the run — on a scheduled unattended run, an invisible orphan
+        # holding the profile and OST against the user's own Outlook, one more
+        # every time the wait times out (#78).
+        teardown = _terminate_spawned_outlook(proc)
         raise OutlookUnavailableError(
             f"Outlook was started but did not publish its COM object within "
-            f"{timeout:.0f}s. It may be showing a profile or password prompt."
+            f"{timeout:.0f}s. It may be showing a profile or password prompt, "
+            f"or have no desktop to show one on. {teardown}"
         )
 
     def _namespace(self) -> Any:
