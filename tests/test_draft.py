@@ -29,8 +29,11 @@ from email_archiver.outlook import client as client_mod
 from email_archiver.outlook.client import (
     DASL_X_ARCHIVE_REF,
     CreatedDraft,
+    DraftUpdateError,
     OutlookClient,
     insert_body_html,
+    mark_body_html,
+    replace_marked_body_html,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -66,9 +69,19 @@ class _FakePropertyAccessor:
 class _FakeComAttachments:
     def __init__(self, calls: list) -> None:
         self._calls = calls
+        self.paths: list[str] = []
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - COM's spelling
+        return len(self.paths)
 
     def Add(self, path: str) -> None:  # noqa: N802 - COM's spelling
         self._calls.append(("Attachments.Add", path))
+        self.paths.append(path)
+
+    def Remove(self, index: int) -> None:  # noqa: N802 - COM's spelling
+        self._calls.append(("Attachments.Remove", index))
+        del self.paths[index - 1]
 
 
 class _FakeComMail:
@@ -126,6 +139,7 @@ class FakeDraftClient:
         self.ref_stamped = ref_stamped
         self.account_lookups = 0
         self.drafts: list[dict] = []
+        self.updates: list[dict] = []
 
     def ensure_running(self, timeout: float = 60.0) -> None:
         return None
@@ -142,6 +156,15 @@ class FakeDraftClient:
             ref_reason="" if self.ref_stamped else "SetProperty refused: synthetic",
             displayed=kwargs["display"],
         )
+
+    refuse_update: DraftUpdateError | None = None
+
+    def update_draft(self, **kwargs) -> CreatedDraft:
+        if self.refuse_update is not None:
+            raise self.refuse_update
+        self.updates.append(kwargs)
+        return CreatedDraft(entry_id=kwargs["entry_id"], ref_stamped=bool(kwargs["ref"]),
+                            displayed=kwargs["display"])
 
 
 # ------------------------------------------------------------------- spec ---
@@ -248,7 +271,8 @@ def test_the_document_carries_the_draft_with_self_in_bcc(attachment):
     assert doc["ref_header"] == "stamped"
     assert doc["ref_header_reason"] == ""
     assert doc["displayed"] is True
-    assert doc["created_at"]
+    assert doc["updated"] is False
+    assert doc["created_at"] and "updated_at" not in doc
     assert client.drafts[0]["bcc"] == ["hidden@example.invalid", SELF]
     assert client.drafts[0]["body_html"] == "<p>Hello</p>"
 
@@ -316,7 +340,8 @@ def test_the_body_goes_above_the_signature_outlook_inserted(monkeypatch):
     _create(client)
 
     assert mail.HTMLBody == (
-        '<html><body lang=EN><p>Body</p><div id="_MailAutoSig">-- sig</div></body></html>'
+        '<html><body lang=EN><div id="archive-draft-body"><p>Body</p></div><!--/archive-draft-body-->'
+        '<div id="_MailAutoSig">-- sig</div></body></html>'
     )
 
 
@@ -327,7 +352,7 @@ def test_an_undisplayed_draft_is_still_saved_with_its_body(monkeypatch):
     created = _create(client, display=False, ref=None)
 
     assert mail.calls == [("Attachments.Add", "C:/synthetic/file.pdf"), ("HTMLBody=",), ("Save",)]
-    assert mail.HTMLBody == "<html><body><p>Body</p></body></html>"
+    assert mail.HTMLBody == f"<html><body>{mark_body_html('<p>Body</p>')}</body></html>"
     assert (created.displayed, created.ref_stamped, created.ref_reason) == (False, False, "")
 
 
@@ -420,16 +445,20 @@ def batch_process(tmp_path, monkeypatch, capsys):
     ))
     clients: list[FakeDraftClient] = []
 
-    def run(spec: dict, account_smtp: str = SELF) -> tuple[int, dict, list[FakeDraftClient]]:
+    def run(
+        spec: dict, account_smtp: str = SELF, extra: tuple[str, ...] = (),
+        refuse_update: DraftUpdateError | None = None,
+    ) -> tuple[int, dict, list[FakeDraftClient]]:
         def _factory() -> FakeDraftClient:
             fake = FakeDraftClient(account_smtp=account_smtp)
+            fake.refuse_update = refuse_update
             clients.append(fake)
             return fake
 
         monkeypatch.setattr(main_batch, "OutlookClient", _factory)
         spec_path = tmp_path / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
-        code = main_batch.main(["draft", "--spec", str(spec_path)])
+        code = main_batch.main(["draft", "--spec", str(spec_path), *extra])
         return code, json.loads(capsys.readouterr().out), clients
 
     return run
@@ -466,3 +495,231 @@ def test_a_good_spec_prints_the_draft_document(batch_process):
     assert doc["verb"] == "draft" and doc["bcc"] == [SELF]
     assert doc["ref_header"] == "stamped"
     assert len(clients[0].drafts) == 1
+
+
+# ------------------------------------------------------------ update (#80) ---
+
+SIG = '<div id="_MailAutoSig">-- sig</div>'
+
+
+def _marked(body: str) -> str:
+    return f"<html><body lang=EN>{mark_body_html(body)}{SIG}</body></html>"
+
+
+def test_the_marked_body_is_replaced_and_the_signature_kept():
+    assert replace_marked_body_html(_marked("<p>old</p>"), "<p>new</p>") == _marked("<p>new</p>")
+
+
+def test_a_body_with_its_own_nested_divs_is_replaced_whole():
+    existing = _marked("<div><div>deep</div></div><p>tail of old</p>")
+
+    assert replace_marked_body_html(existing, "<p>new</p>") == _marked("<p>new</p>")
+
+
+def test_the_marker_is_found_after_outlook_requotes_it():
+    existing = "<body><DIV ID=archive-draft-body><p>old</p></DIV>\n<!-- /archive-draft-body -->sig</body>"
+
+    assert replace_marked_body_html(existing, "<p>new</p>") == f"<body>{mark_body_html('<p>new</p>')}sig</body>"
+
+
+@pytest.mark.parametrize("existing", [
+    "", None, f"<html><body><p>no marker</p>{SIG}</body></html>",
+    '<html><body><div id="archive-draft-body"><p>opened, never closed</p></body></html>',
+])
+def test_an_unmarked_body_has_no_replacement(existing):
+    assert replace_marked_body_html(existing, "<p>new</p>") is None
+
+
+class _FakeFolder:
+    def __init__(self, entry_id: str) -> None:
+        self.EntryID = entry_id
+
+
+class _FakeExistingMail(_FakeComMail):
+    def __init__(self, html: str, sent: bool = False, parent: str = "drafts") -> None:
+        super().__init__()
+        self._html = html
+        self.Sent = sent
+        self.Parent = _FakeFolder(parent)
+        self.Attachments.paths = ["C:/synthetic/old-1.pdf", "C:/synthetic/old-2.pdf"]
+        self.To, self.Subject = "old@example.invalid", "Old subject"
+
+    def Display(self, modal: bool) -> None:  # noqa: N802 - COM's spelling
+        # Reopening a saved draft shows it as it is; the signature is inserted
+        # only when a new item is first displayed.
+        self.calls.append(("Display", modal))
+
+
+class _FakeNamespace:
+    def __init__(self, mail: _FakeExistingMail | None) -> None:
+        self.mail = mail
+
+    def GetItemFromID(self, entry_id: str):  # noqa: N802 - COM's spelling
+        if self.mail is None or entry_id != self.mail.EntryID:
+            raise RuntimeError("The operation failed. An object could not be found.")
+        return self.mail
+
+    def GetDefaultFolder(self, kind: int) -> _FakeFolder:  # noqa: N802 - COM's spelling
+        assert kind == client_mod.OL_FOLDER_DRAFTS
+        return _FakeFolder("drafts")
+
+
+class _FakeInspector:
+    def __init__(self, item, on_close=None) -> None:
+        self.CurrentItem = item
+        self.closed_with: list[int] = []
+        self._on_close = on_close
+
+    def Close(self, mode: int) -> None:  # noqa: N802 - COM's spelling
+        self.closed_with.append(mode)
+        if self._on_close:
+            self._on_close()
+
+
+class _FakeInspectors:
+    def __init__(self, inspectors: list[_FakeInspector]) -> None:
+        self._inspectors = inspectors
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - COM's spelling
+        return len(self._inspectors)
+
+    def Item(self, i: int) -> _FakeInspector:  # noqa: N802 - COM's spelling
+        return self._inspectors[i - 1]
+
+
+def _update(
+    monkeypatch, mail: _FakeExistingMail | None, inspectors: list[_FakeInspector] | None = None, **overrides,
+) -> CreatedDraft:
+    client = OutlookClient()
+    monkeypatch.setattr(client, "_namespace", lambda: _FakeNamespace(mail))
+    # Never the real Outlook: the only one on this machine is the user's own.
+    app = types.SimpleNamespace(Inspectors=_FakeInspectors(inspectors or []))
+    monkeypatch.setattr(client_mod, "_get_active_application", lambda: app)
+    kwargs = dict(
+        entry_id="draft-entry-1", to=["a@example.invalid"], cc=[], bcc=[SELF],
+        subject="New subject", body_html="<p>New</p>", attachments=["C:/synthetic/new.pdf"],
+        ref="tok", display=False,
+    )
+    kwargs.update(overrides)
+    return client.update_draft(**kwargs)
+
+
+def test_update_refills_the_same_item_keeps_the_signature_and_never_sends(monkeypatch):
+    mail = _FakeExistingMail(_marked("<p>Old</p>"))
+
+    updated = _update(monkeypatch, mail)
+
+    assert (mail.To, mail.BCC, mail.Subject) == ("a@example.invalid", SELF, "New subject")
+    assert mail.HTMLBody == _marked("<p>New</p>")
+    assert mail.Attachments.paths == ["C:/synthetic/new.pdf"]
+    assert mail.calls == [
+        ("Attachments.Remove", 1), ("Attachments.Remove", 1),
+        ("Attachments.Add", "C:/synthetic/new.pdf"),
+        ("SetProperty", DASL_X_ARCHIVE_REF, "tok"),
+        ("HTMLBody=",), ("Save",),
+    ]
+    assert ("Send",) not in mail.calls
+    assert updated == CreatedDraft(entry_id="draft-entry-1", ref_stamped=True, displayed=False)
+
+
+def test_an_updated_draft_can_be_shown_again(monkeypatch):
+    mail = _FakeExistingMail(_marked("<p>Old</p>"))
+
+    updated = _update(monkeypatch, mail, display=True)
+
+    assert mail.calls[-2:] == [("Save",), ("Display", False)]
+    assert mail.HTMLBody == _marked("<p>New</p>"), "Display after Save must not re-insert anything"
+    assert updated.displayed is True
+
+
+@pytest.mark.parametrize(("state", "entry_id", "code"), [
+    ("missing", "draft-entry-1", "draft_not_found"),
+    ("marked", "some-other-id", "draft_not_found"),
+    ("sent", "draft-entry-1", "draft_not_editable"),
+    ("inbox", "draft-entry-1", "draft_not_editable"),
+    ("unmarked", "draft-entry-1", "draft_body_unmarked"),
+])
+def test_a_refused_update_names_why_and_leaves_the_item_untouched(monkeypatch, state, entry_id, code):
+    mail = {
+        "missing": None,
+        "marked": _FakeExistingMail(_marked("<p>Old</p>")),
+        "sent": _FakeExistingMail(_marked("<p>Old</p>"), sent=True),
+        "inbox": _FakeExistingMail(_marked("<p>Old</p>"), parent="inbox"),
+        "unmarked": _FakeExistingMail(f"<html><body><p>Old</p>{SIG}</body></html>"),
+    }[state]
+    before = None if mail is None else (mail.To, mail.Subject, mail.HTMLBody, list(mail.Attachments.paths))
+
+    with pytest.raises(DraftUpdateError) as caught:
+        _update(monkeypatch, mail, entry_id=entry_id)
+
+    assert caught.value.code == code
+    if mail is not None:
+        assert mail.calls == []
+        assert (mail.To, mail.Subject, mail.HTMLBody, list(mail.Attachments.paths)) == before
+
+
+def test_the_update_document_says_it_updated():
+    client = FakeDraftClient()
+    spec = draft.parse_spec(_spec(ref="tok", bcc=["x@example.invalid"]))
+
+    doc = draft.update(client, "draft-entry-1", spec, SELF)
+
+    assert doc["verb"] == "draft" and doc["updated"] is True
+    assert doc["entry_id"] == "draft-entry-1"
+    assert doc["updated_at"] and "created_at" not in doc
+    assert doc["bcc"] == ["x@example.invalid", SELF]
+    assert client.drafts == [] and client.updates[0]["entry_id"] == "draft-entry-1"
+
+
+def test_update_on_the_command_line_edits_rather_than_creates(batch_process):
+    code, doc, clients = batch_process(_spec(ref="tok"), extra=("--update", " draft-entry-1 "))
+
+    assert code == main_batch.EXIT_OK
+    assert doc["updated"] is True
+    assert clients[0].drafts == [] and clients[0].updates[0]["entry_id"] == "draft-entry-1"
+
+
+def test_a_blank_update_id_is_bad_input_before_outlook(batch_process):
+    code, doc, clients = batch_process(_spec(), extra=("--update", "  "))
+
+    assert code == main_batch.EXIT_CANNOT_START
+    assert doc["error"]["code"] == "bad_input"
+    assert clients == []
+
+
+def test_a_refused_update_exits_2_with_its_own_code(batch_process):
+    refusal = DraftUpdateError("draft_body_unmarked", "no marked body region")
+
+    code, doc, _ = batch_process(_spec(), extra=("--update", "draft-entry-1"), refuse_update=refusal)
+
+    assert code == main_batch.EXIT_CANNOT_START
+    assert doc["error"] == {"code": "draft_body_unmarked", "message": "no marked body region"}
+
+
+def test_an_open_window_on_the_draft_is_saved_and_closed_before_the_update(monkeypatch):
+    # The window's copy is saved first (here: the user typed a line), and the
+    # update replaces the body of what it saved, not of the stale reference.
+    mail = _FakeExistingMail(_marked("<p>Old</p>"))
+    other = _FakeInspector(types.SimpleNamespace(EntryID="another-draft"))
+
+    def _user_edit_saved() -> None:
+        mail._html = _marked("<p>Old</p><p>typed by hand</p>")
+
+    own = _FakeInspector(mail, on_close=_user_edit_saved)
+
+    _update(monkeypatch, mail, inspectors=[other, own])
+
+    assert own.closed_with == [client_mod.OL_SAVE]
+    assert other.closed_with == []
+    assert mail.HTMLBody == _marked("<p>New</p>")
+
+
+def test_an_unmarked_draft_is_refused_without_closing_its_open_window(monkeypatch):
+    mail = _FakeExistingMail(f"<html><body><p>Old</p>{SIG}</body></html>")
+    window = _FakeInspector(mail)
+
+    with pytest.raises(DraftUpdateError, match="no marked body region"):
+        _update(monkeypatch, mail, inspectors=[window])
+
+    assert window.closed_with == []
