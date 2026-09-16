@@ -340,7 +340,7 @@ Every document carries `schema_version`, so a consumer can refuse a shape it doe
 
 ### Retrying a mail that was written but never moved
 
-A mail can end up with its files on disk and its place in the Inbox kept: `SaveAs` leaves the in-memory Outlook item flagged as modified often enough that the `Move` right after it is refused with *"the operation cannot be performed because the message has been changed"* (MAPI `0x80040109`). That mail is reported `move_failed`, and every later `plan` reports it `already_archived` — its `.msg` is in the index — so without a retry path it could never leave the Inbox.
+A mail can end up with its files on disk and its place in the Inbox kept: `SaveAs` leaves the in-memory Outlook item flagged as modified often enough that the `Move` right after it is refused with *"the operation cannot be performed because the message has been changed"* (MAPI `0x80040109`). That mail fails its move with its files already written, and every later `plan` reports it `already_archived` — its `.msg` is in the index — so without a retry path it could never leave the Inbox.
 
 Two things make it retryable:
 
