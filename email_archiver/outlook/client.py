@@ -12,7 +12,7 @@ Design decisions:
   opposite, used only by batch mode, which has no user to open Outlook for it.
 - The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
   find_by_message_id / archive_ref / refetch / save_item / move_to /
-  set_category / clear_category) lives here
+  set_category / clear_category / is_open_in_inspector) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
 - The draft surface (default_account_smtp / create_draft) follows the same
@@ -883,6 +883,59 @@ class OutlookClient:
     def entry_id(self, item: Any) -> str:
         """The mail's current EntryID (valid only for its current folder)."""
         return _safe_com(lambda: str(item.EntryID), "")
+
+    def is_open_in_inspector(self, item: Any) -> bool | None:
+        """Whether this mail is open in an Outlook window. ``None`` = unknown.
+
+        An inspector holds its item open for the life of the window, and every
+        write to that item is refused with MAPI_E_OBJECT_CHANGED meanwhile —
+        including on a reference re-acquired by EntryID, which is the same
+        underlying object, and including after a ``Save()``. So both of batch
+        mode's move defences fail by construction on an open mail, and the
+        only useful thing left to do is say so (issue #76).
+
+        Three genuinely different answers, never two:
+
+        ``True``   this mail was found in an open inspector — close it;
+        ``False``  the inspectors were all read and none holds this mail;
+        ``None``   the question could not be answered — no readable EntryID,
+                   Outlook unreachable, or an inspector that would not be read.
+
+        ``None`` is deliberately not folded into ``False``: a check that could
+        not run is not evidence the window is closed, and reporting it as one
+        would point the next operator at the wrong remedy.
+        """
+        entry_id = _safe_com(lambda: str(item.EntryID), "")
+        if not entry_id:
+            return None
+        app = _get_active_application()
+        if app is None:
+            return None
+        try:
+            inspectors = app.Inspectors
+            count = int(inspectors.Count)
+        except Exception as exc:
+            logger.warning("Could not read Outlook's open windows: %s", exc)
+            return None
+
+        unread = False
+        for index in range(1, count + 1):
+            current = _safe_com(
+                lambda i=index: inspectors.Item(i).CurrentItem, None
+            )
+            if current is None:
+                unread = True
+                continue
+            open_id = _safe_com(lambda c=current: str(c.EntryID), "")
+            if not open_id:
+                # An unsaved compose window has no EntryID. It cannot be the
+                # mail being filed, so it is not a gap in the answer.
+                continue
+            if open_id == entry_id:
+                return True
+        # One window that would not be read is enough to make "none of them
+        # holds it" a guess rather than a finding.
+        return None if unread else False
 
     # ------------------------------------------------------ draft surface ---
     #

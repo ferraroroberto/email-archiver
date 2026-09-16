@@ -332,7 +332,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
 | `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
-Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `category_failed`. The last two are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook.
+Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `message_changed`, `category_failed`. The last three are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook, and a [`message_changed`](#retrying-a-mail-that-was-written-but-never-moved) is a `move_failed` that an operator clears in seconds — usually by closing an open mail window.
 
 `apply` fills in a result's `files` **before** it moves the mail, so a mail that was written to disk but failed to move is still fully revertible — that is why a result can carry `ok: false` and a non-empty `files` at the same time.
 
@@ -347,7 +347,19 @@ Two things make it retryable:
 - **`apply` moves a reference it re-acquires from the store by EntryID**, not the one it just wrote to disk, and on a `0x80040109` from that reference too it saves it once and retries the move. Which of the three paths finished the move is logged and reported per result as `move_via`: `refetched` (the re-acquired reference was enough), `saved_retry` (it took a `Save()` and one more attempt) or `original` (the re-acquire failed, so the original reference was moved). A move that fails for any *other* reason is still a plain `move_failed`, never retried.
 - **`apply` accepts a decision for a mail `plan` reported `already_archived`** and finishes it: it writes nothing, moves the mail to the `Archive` folder, tags it, and reports the existing file as `files` with `reused: true` and an empty `sequence_number` (none was allocated). This is what a consumer offers as *retry* on such a mail. The one exception is an index row whose file is gone — no longer proof of anything, so that mail is archived for real instead.
 
-One case is beyond both defences and is called out by name in the result: when the running Outlook process itself is holding the item, every write to it is refused for the life of that process — a re-acquired reference and a `Save()` are refused exactly like the original. The mail keeps its `move_failed`, and the message says what to do: **restart Outlook, then apply the same decision again**. It then completes on the first attempt, and because the files are already on disk it writes nothing.
+One case is beyond both defences and gets its **own error code**, `message_changed`: when something in the running Outlook is holding the item, every write to it is refused while that lasts — a re-acquired reference and a `Save()` are refused exactly like the original. It is separate from `move_failed` because it is the one move failure that is cleared in seconds with nothing actually wrong, and a consumer offering a retry needs to tell the two apart.
+
+Almost always the thing holding the item is **an open mail window** — an Outlook inspector holds its item for the life of the window, so both defences fail by construction. So `apply` asks Outlook whether that mail is in fact open and says which case this is, rather than guessing:
+
+| what the check found | what the message says to do |
+|---|---|
+| the mail is open in a window | **close that window**, then apply the same decision again |
+| no window holds it | **restart Outlook**, then apply the same decision again |
+| the check could not be completed | close any window showing it and re-apply; restart Outlook only if that does not clear it |
+
+The third row is reported as *not determined* and never as "no window": a check that could not run is not evidence the window is closed, and it would point you at a restart you do not need. Either way the files are already on disk and the mail is still in the Inbox, so re-applying the same decision writes nothing.
+
+`schema_version` is unchanged at `1`: `message_changed` is a new value for an existing `error.code` key, so a consumer that does not know it still reads the document exactly as before and still sees a mail that failed.
 
 `plan` also states `in_inbox` on every mail it reports. It is always `true` — `plan` enumerates the Inbox — but it is the fact that separates an `already_archived` mail *still sitting in the Inbox* from one that is properly filed and gone, so a consumer can key a retry offer off the document rather than off an assumption.
 

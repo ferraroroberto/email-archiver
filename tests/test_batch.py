@@ -148,6 +148,11 @@ class FakeOutlookClient:
         self.move_message_changed_always = False
         self.refetch_should_fail = False
         self.refetched: list[str] = []
+        # What Outlook answers when asked whether the mail is open in a window:
+        # True, False, or None for "the check could not be completed" — the
+        # three states `message_changed` reports separately (issue #76).
+        self.open_in_inspector: bool | None = None
+        self.inspector_check_raises = False
         self.category_should_fail = False
         self.moves: list[tuple[str, str | None]] = []
 
@@ -222,6 +227,11 @@ class FakeOutlookClient:
 
     def entry_id(self, item: _FakeMailItem) -> str:
         return item.EntryID
+
+    def is_open_in_inspector(self, item: _FakeMailItem) -> bool | None:
+        if self.inspector_check_raises:
+            raise RuntimeError("Outlook would not list its windows")
+        return self.open_in_inspector
 
 
 # --------------------------------------------------------------- fixtures ---
@@ -692,26 +702,83 @@ def test_apply_reports_a_move_that_fails_for_another_reason_unchanged(
     assert result["files"] and Path(result["files"][0]).exists()
 
 
-def test_a_move_refused_twice_as_changed_says_how_to_recover(cfg, archive_root):
-    """The state the real mailbox was in: refused on the re-acquired reference
-    and after saving it too, because the running Outlook process itself was
-    holding the item. The message has to say that, or the next occurrence is a
-    bare HRESULT again."""
+def _stuck_move(cfg, archive_root, **client_state):
+    """Run an apply whose every Move is refused as 0x80040109, and return the
+    one result — the shape all four `message_changed` cases share."""
     dest = archive_root / "Project Alpha"
     client = FakeOutlookClient([_mail("a@example.invalid", "Stuck fast")])
     client.move_message_changed_always = True
+    for name, value in client_state.items():
+        setattr(client, name, value)
 
     doc = batch.apply(client, cfg, [
         {"message_id": "a@example.invalid", "folder_path": str(dest)},
     ])
+    return client, doc["results"][0]
 
-    result = doc["results"][0]
+
+def test_a_move_refused_twice_as_changed_is_its_own_error_code(cfg, archive_root):
+    """The state the real mailbox was in: refused on the re-acquired reference
+    and after saving it too, because something in the running Outlook was
+    holding the item. It gets its own code so a consumer can tell "close a
+    window and retry" apart from a mail that needs a human (issue #76), and the
+    rest of the result still describes a revertible half-done mail."""
+    client, result = _stuck_move(cfg, archive_root, open_in_inspector=True)
+
     assert result["ok"] is False
-    assert result["error"]["code"] == batch.ERROR_MOVE_FAILED
-    assert "restarting Outlook" in result["error"]["message"]
-    assert "without writing anything" in result["error"]["message"]
+    assert result["error"]["code"] == batch.ERROR_MESSAGE_CHANGED
+    assert result["error"]["code"] != batch.ERROR_MOVE_FAILED
+    assert "re-acquired reference" in result["error"]["message"]
+    assert "re-applying writes nothing" in result["error"]["message"]
     assert result["files"], "the files are on disk and must be reported"
     assert client.folders[None], "the mail is still in the Inbox"
+
+
+def test_a_mail_open_in_a_window_is_told_to_close_it_not_restart(cfg, archive_root):
+    """The 2026-09-16 occurrence: an open inspector held the mail, and closing
+    that one window cleared it with no restart. Leading with the restart is
+    what this replaces, so the message must not ask for one here."""
+    _, result = _stuck_move(cfg, archive_root, open_in_inspector=True)
+
+    message = result["error"]["message"]
+    assert "open in an Outlook window" in message
+    assert "Close that window" in message
+    assert "Restart Outlook" not in message
+
+
+def test_a_mail_no_window_holds_is_told_to_restart(cfg, archive_root):
+    """Issue #59's case, now reached only on evidence rather than by assumption:
+    the windows were read and none holds this mail, so a restart is the remedy
+    that is actually left."""
+    _, result = _stuck_move(cfg, archive_root, open_in_inspector=False)
+
+    message = result["error"]["message"]
+    assert "not open in any Outlook window" in message
+    assert "Restart Outlook" in message
+
+
+@pytest.mark.parametrize(
+    "client_state",
+    [
+        {"open_in_inspector": None},     # the check ran and could not answer
+        {"inspector_check_raises": True},  # the check itself blew up
+    ],
+    ids=["undetermined", "check_raised"],
+)
+def test_an_undetermined_window_check_says_so_and_never_claims_no_window(
+    cfg, archive_root, client_state
+):
+    """A check that could not establish the fact reports that as its own state
+    (global CLAUDE.md) — folding it into "no window" would point an operator at
+    a restart they do not need, which is the whole failure #76 is about."""
+    _, result = _stuck_move(cfg, archive_root, **client_state)
+
+    message = result["error"]["message"]
+    assert result["error"]["code"] == batch.ERROR_MESSAGE_CHANGED
+    assert "could not be determined" in message
+    assert "not open in any Outlook window" not in message
+    # Both remedies offered, cheap one first — that is all that is honest here.
+    assert message.index("close any window") < message.index("restart Outlook")
 
 
 def test_apply_finishes_an_already_archived_mail_without_writing_files(
