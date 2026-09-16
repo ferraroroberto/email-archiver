@@ -20,6 +20,10 @@ Design decisions:
   otherwise drop the attachment without a word.
 - **The ref token is reported honestly.** ``ref_header`` says whether the
   ``X-Archive-Ref`` header was actually stamped, with the reason when not.
+- **An update edits the same item** (``update``): a caller iterating on one
+  mail gets one draft, not a trail of near-duplicates. Only an unsent item in
+  Drafts whose body the tool marked is touched; anything else is refused before
+  the first write.
 """
 from __future__ import annotations
 
@@ -200,24 +204,46 @@ def create(client: Any, spec: DraftSpec, self_address: str) -> dict[str, Any]:
         body_html=spec.body_html, attachments=spec.attachments,
         ref=spec.ref, display=spec.display,
     )
+    return _document(spec, bcc, created, updated=False)
+
+
+def update(client: Any, entry_id: str, spec: DraftSpec, self_address: str) -> dict[str, Any]:
+    """Re-fill the existing draft ``entry_id`` from ``spec``; the same document
+    as :func:`create`, with ``updated: true`` and ``updated_at``.
+
+    Raises:
+        DraftUpdateError: the item is gone, sent, outside Drafts, or has no
+            marked body region — raised by the client before any write.
+    """
+    bcc = with_self_bcc(spec.bcc, self_address)
+    updated = client.update_draft(
+        entry_id=entry_id, to=spec.to, cc=spec.cc, bcc=bcc, subject=spec.subject,
+        body_html=spec.body_html, attachments=spec.attachments,
+        ref=spec.ref, display=spec.display,
+    )
+    return _document(spec, bcc, updated, updated=True)
+
+
+def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) -> dict[str, Any]:
     if spec.ref is None:
         ref_reason = REF_REASON_NONE_GIVEN
     else:
-        ref_reason = "" if created.ref_stamped else created.ref_reason
+        ref_reason = "" if result.ref_stamped else result.ref_reason
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     return {
         "verb": VERB,
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
-        "entry_id": created.entry_id,
+        "entry_id": result.entry_id,
         "subject": spec.subject,
         "to": list(spec.to),
         "cc": list(spec.cc),
         "bcc": bcc,
         "attachments": list(spec.attachments),
         "ref": spec.ref,
-        "ref_header": REF_STAMPED if created.ref_stamped else REF_NOT_STAMPED,
+        "ref_header": REF_STAMPED if result.ref_stamped else REF_NOT_STAMPED,
         "ref_header_reason": ref_reason,
-        "displayed": created.displayed,
-        "created_at": now,
+        "displayed": result.displayed,
+        "updated": updated,
+        "updated_at" if updated else "created_at": now,
     }

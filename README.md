@@ -330,7 +330,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
+| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` / `draft_body_unmarked` (`draft --update` only). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `message_changed`, `category_failed`. The last three are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook, and a [`message_changed`](#retrying-a-mail-that-was-written-but-never-moved) is a `move_failed` that an operator clears in seconds — usually by closing an open mail window.
 
@@ -435,9 +435,26 @@ The document:
   "to": ["…"], "cc": [], "bcc": ["…", "<your address>"],
   "attachments": ["C:/…/file.pdf"],
   "ref": "opaque-caller-token", "ref_header": "stamped", "ref_header_reason": "",
-  "displayed": true, "created_at": "2026-09-15T10:00:00+02:00"
+  "displayed": true, "updated": false, "created_at": "2026-09-15T10:00:00+02:00"
 }
 ```
+
+#### Updating the same draft
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py draft --update <entry_id> --spec spec.json
+```
+
+A caller iterating on one mail ("make it shorter") edits the draft it already made instead of leaving a near-duplicate in Drafts. `<entry_id>` is the `entry_id` the first `draft` returned; the spec is the full new spec, validated exactly as above.
+
+- **Same item, re-filled.** Recipients (your own address still blind-copied exactly once), subject, attachments (every existing one removed, the spec's added) and the `X-Archive-Ref` header are set again, and the item is saved. With `display: true` it is shown again afterwards. **Never sent.**
+- **An open compose window on that draft is closed first, saving it.** The window holds its own copy: left open it would still show the old text, and Send pressed there would send that. The update then works on what the window saved.
+- **Only the body the tool wrote is replaced.** `draft` wraps the caller's body in `<div id="archive-draft-body">…</div><!--/archive-draft-body-->`; an update swaps that region and keeps everything after it, which is where the signature sits. Text the user typed into the draft by hand inside that region is overwritten, as is any hand edit to the recipients or subject.
+- **Refused, and the item left untouched**, each with its own code and exit 2:
+  - `draft_not_found` — the EntryID no longer resolves (the draft was deleted, or sent and moved);
+  - `draft_not_editable` — the item was sent, or is not in the Drafts folder;
+  - `draft_body_unmarked` — no marked body region: a draft created before `--update` existed, or one whose HTML was rewritten. Guessing where the body ends could eat the signature or the user's own text.
+- The document is the one above with `updated: true` and `updated_at` in place of `created_at`.
 
 ### Safety
 

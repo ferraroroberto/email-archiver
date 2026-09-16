@@ -18,7 +18,7 @@ Design decisions:
   set_category / clear_category / is_open_in_inspector) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
-- The draft surface (default_account_smtp / create_draft) follows the same
+- The draft surface (default_account_smtp / create_draft / update_draft) follows the same
   split for email_archiver/draft.py. No code path in this module sends mail.
 """
 from __future__ import annotations
@@ -255,6 +255,10 @@ DASL_FLAG_STATUS = "http://schemas.microsoft.com/mapi/proptag/0x10900003"
 
 # olMailItem, for Application.CreateItem. The draft verb creates nothing else.
 OL_MAIL_ITEM = 0
+# olFolderDrafts: the only folder `update_draft` edits an item in.
+OL_FOLDER_DRAFTS = 16
+# olSave, for Inspector.Close: keep what the open window holds.
+OL_SAVE = 0
 # DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
 # draft stamped with it carries ``X-Archive-Ref: <token>`` into the sent mail, so
 # a caller can recognise its own copy when it lands back in the Inbox.
@@ -376,6 +380,41 @@ def received_since_filter(since: datetime) -> str:
 _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 
 
+# The caller's body sits between these two, so `update_draft` can replace
+# exactly what `create_draft` wrote and leave everything after it — the
+# signature Outlook inserted — alone. The closing comment, not the bare
+# `</div>`, is what ends the region: a caller's own HTML may nest divs.
+DRAFT_BODY_OPEN = '<div id="archive-draft-body">'
+DRAFT_BODY_CLOSE = "</div><!--/archive-draft-body-->"
+_DRAFT_BODY_OPEN_TAG = re.compile(r"""<div\s+id=["']?archive-draft-body["']?\s*>""", re.IGNORECASE)
+_DRAFT_BODY_CLOSE_TAG = re.compile(r"</div>\s*<!--\s*/archive-draft-body\s*-->", re.IGNORECASE)
+
+
+def mark_body_html(body_html: str) -> str:
+    """``body_html`` wrapped in the markers ``replace_marked_body_html`` finds."""
+    return f"{DRAFT_BODY_OPEN}{body_html}{DRAFT_BODY_CLOSE}"
+
+
+def replace_marked_body_html(existing_html: str | None, body_html: str) -> str | None:
+    """``existing_html`` with its marked body region replaced by ``body_html``.
+
+    ``None`` when the region cannot be found — a draft created before the
+    markers existed, or one whose HTML Outlook rewrote. The caller refuses
+    then: replacing a guessed region could eat the signature or text the user
+    typed. The last closing marker is used, so a body that itself quotes the
+    marker text still ends where the tool's own region ends. Pure, like
+    ``insert_body_html``.
+    """
+    existing = existing_html or ""
+    opened = _DRAFT_BODY_OPEN_TAG.search(existing)
+    if opened is None:
+        return None
+    closes = list(_DRAFT_BODY_CLOSE_TAG.finditer(existing, opened.end()))
+    if not closes:
+        return None
+    return f"{existing[:opened.start()]}{mark_body_html(body_html)}{existing[closes[-1].end():]}"
+
+
 def insert_body_html(existing_html: str | None, body_html: str) -> str:
     """Return ``existing_html`` with ``body_html`` inserted at the top of its body.
 
@@ -400,6 +439,25 @@ class CreatedDraft:
     ref_stamped: bool = False
     ref_reason: str = ""           # why the ref header is absent; "" when stamped
     displayed: bool = False
+
+
+# Why `update_draft` refused. Each is its own `error.code` in `main_batch.py`,
+# and each is raised before the item is changed.
+DRAFT_NOT_FOUND = "draft_not_found"          # the EntryID no longer resolves
+DRAFT_NOT_EDITABLE = "draft_not_editable"    # sent, or not in Drafts
+DRAFT_BODY_UNMARKED = "draft_body_unmarked"  # no marked body region to replace
+_UNMARKED_MESSAGE = (
+    "the draft has no marked body region (created before draft --update existed, "
+    "or its HTML was rewritten); refusing to guess where the body ends"
+)
+
+
+class DraftUpdateError(Exception):
+    """An existing draft that cannot be updated; the item is left untouched."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _outlook_executable() -> str | None:
@@ -1086,7 +1144,105 @@ class OutlookClient:
                 "marker %s.", len(existing_html),
                 "present" if "_MailAutoSig" in existing_html else "absent",
             )
-        mail.HTMLBody = insert_body_html(existing_html, body_html)
+        mail.HTMLBody = insert_body_html(existing_html, mark_body_html(body_html))
         mail.Save()
         created.entry_id = _safe_com(lambda: str(mail.EntryID), "")
         return created
+
+    def update_draft(
+        self,
+        *,
+        entry_id: str,
+        to: list[str],
+        cc: list[str],
+        bcc: list[str],
+        subject: str,
+        body_html: str,
+        attachments: list[str],
+        ref: str | None,
+        display: bool,
+    ) -> CreatedDraft:
+        """Re-fill the unsent draft ``entry_id`` in place. Never sends it.
+
+        Every check runs before the first write, so a refusal
+        (:class:`DraftUpdateError`) leaves the item exactly as it was. Only the
+        marked body region is replaced; the signature below it stays. The
+        attachments are all removed and the spec's re-added, so the draft ends
+        up carrying exactly what the caller asked for.
+        """
+        namespace = self._namespace()
+        try:
+            mail = namespace.GetItemFromID(entry_id)
+        except Exception as exc:
+            raise DraftUpdateError(
+                DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if mail is None:
+            raise DraftUpdateError(DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}")
+        if _safe_com(lambda: bool(mail.Sent), True):
+            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item has been sent; only an unsent draft is updated")
+        drafts_id = _safe_com(lambda: str(namespace.GetDefaultFolder(OL_FOLDER_DRAFTS).EntryID), "")
+        parent_id = _safe_com(lambda: str(mail.Parent.EntryID), "")
+        if not drafts_id or parent_id != drafts_id:
+            raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item is not in the Drafts folder")
+        if replace_marked_body_html(_safe_com(lambda: mail.HTMLBody or "", ""), body_html) is None:
+            # Checked on the stored item first too, so an unmarked draft is
+            # refused without closing the user's open window on it.
+            raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
+        if self._close_inspectors_of(entry_id):
+            # The window held its own copy of the item: re-read what it saved,
+            # or the region check below would run on stale HTML.
+            mail = namespace.GetItemFromID(entry_id)
+        new_html = replace_marked_body_html(_safe_com(lambda: mail.HTMLBody or "", ""), body_html)
+        if new_html is None:
+            raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
+
+        mail.To = "; ".join(to)
+        mail.CC = "; ".join(cc)
+        mail.BCC = "; ".join(bcc)
+        mail.Subject = subject
+        while int(mail.Attachments.Count):
+            mail.Attachments.Remove(1)
+        for path in attachments:
+            mail.Attachments.Add(path)
+
+        updated = CreatedDraft()
+        if ref:
+            try:
+                mail.PropertyAccessor.SetProperty(DASL_X_ARCHIVE_REF, ref)
+                updated.ref_stamped = True
+            except Exception as exc:
+                updated.ref_reason = f"SetProperty refused: {type(exc).__name__}: {exc}"
+                logger.warning("Could not stamp X-Archive-Ref: %s", exc)
+
+        mail.HTMLBody = new_html
+        mail.Save()
+        if display:
+            mail.Display(False)  # non-modal: this process does not wait on it
+            updated.displayed = True
+        updated.entry_id = _safe_com(lambda: str(mail.EntryID), "") or entry_id
+        logger.info("Draft updated in place.")
+        return updated
+
+    def _close_inspectors_of(self, entry_id: str) -> int:
+        """Close every open compose window showing ``entry_id``, saving it.
+
+        An open window keeps its own copy of the draft: left open over an
+        update it still shows the old text, and Send pressed there would send
+        that. Closed with olSave so nothing the user typed is discarded before
+        the update replaces it. Returns how many were closed.
+        """
+        app = _get_active_application()
+        inspectors = _safe_com(lambda: app.Inspectors, None) if app is not None else None
+        count = _safe_com(lambda: int(inspectors.Count), 0) if inspectors is not None else 0
+        closed = 0
+        for i in range(count, 0, -1):
+            inspector = _safe_com(lambda i=i: inspectors.Item(i), None)
+            if inspector is None:
+                continue
+            if _safe_com(lambda ins=inspector: str(ins.CurrentItem.EntryID), "") == entry_id:
+                inspector.Close(OL_SAVE)
+                closed += 1
+        if closed:
+            logger.info("Closed %d open window(s) on the draft before updating it.", closed)
+        return closed
