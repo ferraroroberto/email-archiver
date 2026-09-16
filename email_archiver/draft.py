@@ -92,6 +92,26 @@ def text_to_html(text: str) -> str:
     )
 
 
+_PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.DOTALL)
+
+
+def html_to_text(body_html: str) -> str | None:
+    """The plain text ``text_to_html`` turned into ``body_html``, or ``None``.
+
+    An exact inverse, not a renderer: it answers only for HTML that
+    ``text_to_html`` could have written — proven by encoding the answer again
+    and getting the same HTML back — so a body anyone reshaped reads as
+    ``None`` rather than as a lossy approximation.
+    """
+    paragraphs = _PARAGRAPH.findall(body_html)
+    if "".join(f"<p>{p}</p>" for p in paragraphs) != body_html:
+        return None
+    text = "\n\n".join(
+        "\n".join(html.unescape(line) for line in p.split("<br>")) for p in paragraphs
+    )
+    return text if text_to_html(text) == body_html else None
+
+
 def parse_spec(data: Any) -> DraftSpec:
     """Validate a decoded spec and return it as a :class:`DraftSpec`.
 

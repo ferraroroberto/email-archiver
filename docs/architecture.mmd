@@ -13,7 +13,7 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft,\none JSON document on stdout"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send, one JSON document on stdout"]
     NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
   end
 
@@ -105,3 +105,12 @@ flowchart TB
   MAINBATCH -->|draft verb| DRAFT
   DRAFT -->|outlook.self_address| CONFIG
   DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save| OUTLOOK
+
+  subgraph sendflow["Guarded send (headless, spawned by another app after the user approved)"]
+    SEND["send.py\nread_document · fingerprint (sha256 per part + one hash) ·\ncheck_approval — refuses naming the parts. No COM"]
+    SENDING["outlook/sending.py\nsend_if_approved — close windows (save), re-read,\ncheck, then the app's only Send() on that item"]
+  end
+  MAINBATCH -->|read verb · send verb| SEND
+  SEND -->|read_draft: open_draft by EntryID, snapshot_draft| OUTLOOK
+  SEND --> SENDING
+  SENDING -->|open_draft · close_inspectors_of · snapshot_draft · Send| OUTLOOK
