@@ -58,7 +58,6 @@ def _safe_str(value: object) -> str:
 # Outlook wrote with SaveAs: a flagged item reads 2, an unflagged item has no
 # 0x1090 property at all. So "absent" means unflagged, not "read failed".
 _PR_FLAG_STATUS = "10900003"
-FLAG_FOLLOWUP = 2
 
 
 def _flag_status(msg: object) -> int:

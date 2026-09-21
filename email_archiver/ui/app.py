@@ -63,7 +63,6 @@ class ArchiveDialog:
         self._cfg = cfg
         self._email: EmailData | None = None
         self._suggestions: list[RankedSuggestion] = []
-        self._chosen_folder: str | None = None
 
         self._root = tk.Tk()
         self._root.title("Email Archiver – Archive")
