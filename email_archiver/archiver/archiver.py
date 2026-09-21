@@ -51,7 +51,7 @@ from email_archiver.config import (
     get_date_prefix_mode,
     get_max_path_length,
 )
-from email_archiver.outlook.client import _sent_datetime
+from email_archiver.outlook.client import sent_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -285,14 +285,14 @@ def _get_sent_date_prefix(mail_item: Any) -> str | None:
     Resolve the email's sent date as a ``YYYY-MM-DD`` string in local time.
 
     Only called when ``naming.date_prefix`` is on. Formats whatever
-    ``outlook.client._sent_datetime`` resolves (``SentOn`` falling back to
+    ``outlook.client.sent_datetime`` resolves (``SentOn`` falling back to
     ``ReceivedTime``) — the single implementation of that rule, so the date a
     batch ``plan`` reports and the date a ``YYYY-MM-DD -`` prefix carries can
     never disagree. Returns ``None`` — and logs why — when neither resolves,
     signalling the caller to fall back to the undated filename form rather
     than invent a placeholder date.
     """
-    value = _sent_datetime(mail_item)
+    value = sent_datetime(mail_item)
     if value is None:
         logger.warning(
             "Could not resolve a sent date for this email "

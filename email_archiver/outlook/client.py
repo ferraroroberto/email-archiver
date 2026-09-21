@@ -104,7 +104,7 @@ def _safe_com(read: Any, default: Any) -> Any:
         return default
 
 
-def _sent_datetime(mail_item: Any) -> datetime | None:
+def sent_datetime(mail_item: Any) -> datetime | None:
     """The mail's sent time as a stdlib datetime, or ``None``.
 
     Tries ``SentOn`` (when it was actually sent) before ``ReceivedTime``.
@@ -725,7 +725,7 @@ class OutlookClient:
                 subject=_clean_subject(item.Subject),
                 sender=_get_sender_smtp(item),
                 recipients=_get_recipients_smtp(item),
-                date_sent=_sent_datetime(item),
+                date_sent=sent_datetime(item),
             )
 
         except Exception as exc:
@@ -905,7 +905,7 @@ class OutlookClient:
             subject=_clean_subject(_safe_com(lambda: item.Subject, "")),
             sender=_get_sender_smtp(item),
             recipients=_get_recipients_smtp(item),
-            date_sent=_sent_datetime(item),
+            date_sent=sent_datetime(item),
             date_received=_com_datetime(item, "ReceivedTime"),
             body_preview=_safe_com(lambda: (item.Body or "")[:preview_len], ""),
             attachment_count=_safe_com(lambda: int(item.Attachments.Count), 0),
