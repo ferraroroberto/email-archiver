@@ -27,7 +27,11 @@ from email_archiver.explorer import (
     ExplorerUnavailableError,
     get_current_explorer_folder,
 )
-from email_archiver.outlook.client import EmailData, OutlookClient, get_selected_mail_item
+from email_archiver.outlook.client import (
+    EmailData,
+    OutlookClient,
+    get_selected_mail_item,
+)
 from email_archiver.ui.dialogs import browse_folder
 
 logger = logging.getLogger(__name__)

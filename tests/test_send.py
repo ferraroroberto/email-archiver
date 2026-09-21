@@ -24,10 +24,10 @@ import pytest
 
 import main_batch
 from email_archiver import draft, send
-from email_archiver.outlook import client as client_mod
-from email_archiver.outlook.client import (
-    DraftUpdateError,
-    OutlookClient,
+from email_archiver.outlook import mapi, process
+from email_archiver.outlook.client import OutlookClient
+from email_archiver.outlook.drafts import DraftUpdateError
+from email_archiver.outlook.mapi import (
     mark_body_html,
     marked_body_region,
     recipient_address,
@@ -80,8 +80,8 @@ class _FakeDraft:
         self.Parent = types.SimpleNamespace(EntryID="drafts")
         # Unresolved, as on a fresh draft: the address is in Name, Address is empty.
         self.Recipients = _FakeCollection([
-            _FakeRecipient(client_mod.OL_TO, name=OTHER),
-            _FakeRecipient(client_mod.OL_BCC, address=SELF),
+            _FakeRecipient(mapi.OL_TO, name=OTHER),
+            _FakeRecipient(mapi.OL_BCC, address=SELF),
         ])
         self.Attachments = _FakeCollection([_FakeAttachment("note.txt", b"synthetic bytes")])
         self.calls: list[tuple] = []
@@ -101,7 +101,7 @@ class _FakeNamespace:
         return self.items[entry_id]
 
     def GetDefaultFolder(self, kind: int):  # noqa: N802 - COM's spelling
-        assert kind == client_mod.OL_FOLDER_DRAFTS
+        assert kind == mapi.OL_FOLDER_DRAFTS
         return types.SimpleNamespace(EntryID="drafts")
 
 
@@ -123,7 +123,7 @@ def _client(monkeypatch, *items: _FakeDraft, inspectors: list[_FakeInspector] | 
     monkeypatch.setattr(client, "_namespace", lambda: namespace)
     # Never the real Outlook: the only one on this machine is the user's own.
     app = types.SimpleNamespace(Inspectors=_FakeCollection(inspectors or []))
-    monkeypatch.setattr(client_mod, "_get_active_application", lambda: app)
+    monkeypatch.setattr(process, "get_active_application", lambda: app)
     return client
 
 
@@ -208,7 +208,7 @@ def test_a_window_open_on_the_draft_is_closed_saving_before_the_read(monkeypatch
 
     _send(monkeypatch, mail, approval, inspectors=[inspector])
 
-    assert inspector.closed_with == [client_mod.OL_SAVE]
+    assert inspector.closed_with == [mapi.OL_SAVE]
     assert mail.calls == [("Send",)]
 
 
@@ -231,7 +231,7 @@ def _tamper_recipient(mail):
 
 
 def _add_recipient(mail):
-    mail.Recipients.items.append(_FakeRecipient(client_mod.OL_CC, address="extra@example.invalid"))
+    mail.Recipients.items.append(_FakeRecipient(mapi.OL_CC, address="extra@example.invalid"))
 
 
 def _tamper_attachment(mail):
@@ -296,7 +296,7 @@ def test_a_wrong_expected_to_is_refused_even_when_the_hash_matches(monkeypatch):
 
 def test_a_recipient_with_no_readable_address_is_refused(monkeypatch):
     mail = _FakeDraft()
-    mail.Recipients.items.append(_FakeRecipient(client_mod.OL_CC, name="Nobody Resolvable"))
+    mail.Recipients.items.append(_FakeRecipient(mapi.OL_CC, name="Nobody Resolvable"))
     approval = _approved(monkeypatch, mail)
 
     with pytest.raises(send.SendRefused) as refused:

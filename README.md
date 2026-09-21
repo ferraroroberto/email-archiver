@@ -124,7 +124,11 @@ archiver/
 │   │   └── scanner.py          ← Incremental .msg file indexer (FolderScanner)
 │   │
 │   ├── outlook/
-│   │   └── client.py           ← Outlook COM isolation (OutlookClient)
+│   │   ├── client.py           ← Outlook COM isolation (OutlookClient): read path + batch surface
+│   │   ├── drafts.py           ← Draft surface OutlookClient inherits (DraftSurface)
+│   │   ├── process.py          ← Outlook process: is_running / ensure_running
+│   │   ├── mapi.py             ← Shared constants and COM-free helpers
+│   │   └── sending.py          ← The one COM Send call (send verb only)
 │   │
 │   ├── archiver/
 │   │   └── archiver.py         ← File saving logic (EmailArchiver)

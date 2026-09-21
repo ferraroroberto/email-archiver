@@ -25,12 +25,11 @@ import pytest
 
 import main_batch
 from email_archiver import draft
-from email_archiver.outlook import client as client_mod
-from email_archiver.outlook.client import (
+from email_archiver.outlook import mapi, process
+from email_archiver.outlook.client import OutlookClient
+from email_archiver.outlook.drafts import CreatedDraft, DraftUpdateError
+from email_archiver.outlook.mapi import (
     DASL_X_ARCHIVE_REF,
-    CreatedDraft,
-    DraftUpdateError,
-    OutlookClient,
     insert_body_html,
     mark_body_html,
     replace_marked_body_html,
@@ -296,7 +295,7 @@ def test_no_ref_is_reported_as_not_stamped():
 
 def _client_with(monkeypatch, mail: _FakeComMail) -> tuple[OutlookClient, _FakeApplication]:
     app = _FakeApplication(mail)
-    monkeypatch.setattr(client_mod, "_get_active_application", lambda: app)
+    monkeypatch.setattr(process, "get_active_application", lambda: app)
     return OutlookClient(), app
 
 
@@ -316,7 +315,7 @@ def test_create_draft_fills_saves_and_shows_the_mail_but_never_sends(monkeypatch
 
     created = _create(client)
 
-    assert app.created == [client_mod.OL_MAIL_ITEM]
+    assert app.created == [mapi.OL_MAIL_ITEM]
     assert (mail.To, mail.CC, mail.BCC, mail.Subject) == (
         "a@example.invalid", "c@example.invalid", f"{SELF}; b@example.invalid", "S",
     )
@@ -377,7 +376,12 @@ def test_no_draft_code_path_calls_send():
     # Spelled in two halves so a grep of the repo for the call finds nothing,
     # this test included.
     needle = "." + "Send("
-    for relative in ("email_archiver/draft.py", "email_archiver/outlook/client.py", "main_batch.py"):
+    for relative in (
+        "email_archiver/draft.py",
+        "email_archiver/outlook/client.py",
+        "email_archiver/outlook/drafts.py",
+        "main_batch.py",
+    ):
         assert needle not in (REPO_ROOT / relative).read_text(encoding="utf-8"), relative
 
 
@@ -560,7 +564,7 @@ class _FakeNamespace:
         return self.mail
 
     def GetDefaultFolder(self, kind: int) -> _FakeFolder:  # noqa: N802 - COM's spelling
-        assert kind == client_mod.OL_FOLDER_DRAFTS
+        assert kind == mapi.OL_FOLDER_DRAFTS
         return _FakeFolder("drafts")
 
 
@@ -595,7 +599,7 @@ def _update(
     monkeypatch.setattr(client, "_namespace", lambda: _FakeNamespace(mail))
     # Never the real Outlook: the only one on this machine is the user's own.
     app = types.SimpleNamespace(Inspectors=_FakeInspectors(inspectors or []))
-    monkeypatch.setattr(client_mod, "_get_active_application", lambda: app)
+    monkeypatch.setattr(process, "get_active_application", lambda: app)
     kwargs = dict(
         entry_id="draft-entry-1", to=["a@example.invalid"], cc=[], bcc=[SELF],
         subject="New subject", body_html="<p>New</p>", attachments=["C:/synthetic/new.pdf"],
@@ -710,7 +714,7 @@ def test_an_open_window_on_the_draft_is_saved_and_closed_before_the_update(monke
 
     _update(monkeypatch, mail, inspectors=[other, own])
 
-    assert own.closed_with == [client_mod.OL_SAVE]
+    assert own.closed_with == [mapi.OL_SAVE]
     assert other.closed_with == []
     assert mail.HTMLBody == _marked("<p>New</p>")
 

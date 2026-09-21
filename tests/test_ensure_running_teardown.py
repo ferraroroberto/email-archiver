@@ -18,11 +18,10 @@ from pathlib import Path
 import pytest
 
 from email_archiver.outlook import client as client_mod
-from email_archiver.outlook.client import (
-    OutlookClient,
-    OutlookUnavailableError,
-    _terminate_spawned_outlook,
-)
+from email_archiver.outlook import process as process_mod
+from email_archiver.outlook.client import OutlookClient
+from email_archiver.outlook.mapi import OutlookUnavailableError
+from email_archiver.outlook.process import _terminate_spawned_outlook
 
 FAKE_EXE = r"C:\fake\outlook.exe"
 
@@ -67,7 +66,7 @@ class _FakeProc:
 def _arrange(monkeypatch, *, active, proc: _FakeProc | None):
     """Point ensure_running() at fakes and return the spawn call log.
 
-    ``active`` is either a value returned by every _get_active_application()
+    ``active`` is either a value returned by every get_active_application()
     call, or a list consumed one call at a time (so a test can make Outlook
     appear partway through the poll loop).
     """
@@ -88,10 +87,10 @@ def _arrange(monkeypatch, *, active, proc: _FakeProc | None):
         assert proc is not None, "ensure_running spawned when it should not have"
         return proc
 
-    monkeypatch.setattr(client_mod, "_get_active_application", fake_active)
-    monkeypatch.setattr(client_mod, "_outlook_executable", lambda: FAKE_EXE)
-    monkeypatch.setattr(client_mod, "_spawn_outlook", fake_spawn)
-    monkeypatch.setattr(client_mod, "_POLL_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(process_mod, "get_active_application", fake_active)
+    monkeypatch.setattr(process_mod, "_outlook_executable", lambda: FAKE_EXE)
+    monkeypatch.setattr(process_mod, "_spawn_outlook", fake_spawn)
+    monkeypatch.setattr(process_mod, "_POLL_INTERVAL_SECONDS", 0.0)
     return calls
 
 
@@ -172,13 +171,13 @@ def test_a_process_that_will_not_die_is_reported_as_still_running(monkeypatch):
 
 
 def test_a_spawn_that_fails_outright_raises_without_a_teardown(monkeypatch):
-    monkeypatch.setattr(client_mod, "_get_active_application", lambda: None)
-    monkeypatch.setattr(client_mod, "_outlook_executable", lambda: FAKE_EXE)
+    monkeypatch.setattr(process_mod, "get_active_application", lambda: None)
+    monkeypatch.setattr(process_mod, "_outlook_executable", lambda: FAKE_EXE)
 
     def boom(exe: str):
         raise OSError("not executable")
 
-    monkeypatch.setattr(client_mod, "_spawn_outlook", boom)
+    monkeypatch.setattr(process_mod, "_spawn_outlook", boom)
 
     with pytest.raises(OutlookUnavailableError, match="Could not start Outlook"):
         OutlookClient().ensure_running(timeout=0.01)
@@ -212,6 +211,9 @@ def test_the_client_never_kills_outlook_by_image_name():
     the process list (is_running's tasklist fallback) and must never do more
     than read it.
     """
-    source = Path(client_mod.__file__).read_text(encoding="utf-8")
+    source = "".join(
+        Path(mod.__file__).read_text(encoding="utf-8")
+        for mod in (client_mod, process_mod)
+    )
     assert "taskkill" not in source.lower()
     assert "/IM" not in source

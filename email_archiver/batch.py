@@ -73,7 +73,8 @@ from email_archiver.config import (
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
-from email_archiver.outlook.client import EmailData, is_message_changed_error
+from email_archiver.outlook.client import EmailData
+from email_archiver.outlook.mapi import is_message_changed_error
 from email_archiver.paths import (
     REFUSED_OUTSIDE_ROOTS,
     REFUSED_UNRESOLVABLE,

@@ -28,11 +28,8 @@ import pytest
 
 import main_batch
 from email_archiver import batch
-from email_archiver.outlook.client import (
-    InboxMail,
-    header_value,
-    received_since_filter,
-)
+from email_archiver.outlook.client import InboxMail
+from email_archiver.outlook.mapi import header_value, received_since_filter
 from tests.test_batch import (  # noqa: F401 - fixtures are used by name
     FakeOutlookClient,
     _mail,
@@ -401,14 +398,15 @@ def test_the_client_walks_the_inbox_when_the_store_rejects_the_filter(monkeypatc
 
 def test_archive_ref_prefers_the_transport_headers_then_the_named_property():
     from email_archiver.outlook import client as client_mod
+    from email_archiver.outlook import mapi
 
     client = client_mod.OutlookClient()
     transport = types.SimpleNamespace(PropertyAccessor=_ComAccessor({
-        client_mod.DASL_TRANSPORT_HEADERS: "X-Archive-Ref: from-headers\r\n",
-        client_mod.DASL_X_ARCHIVE_REF: "from-named",
+        mapi.DASL_TRANSPORT_HEADERS: "X-Archive-Ref: from-headers\r\n",
+        mapi.DASL_X_ARCHIVE_REF: "from-named",
     }))
     named_only = types.SimpleNamespace(PropertyAccessor=_ComAccessor({
-        client_mod.DASL_X_ARCHIVE_REF: " from-named ",
+        mapi.DASL_X_ARCHIVE_REF: " from-named ",
     }))
     neither = types.SimpleNamespace(PropertyAccessor=_ComAccessor({}))
 
