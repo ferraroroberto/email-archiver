@@ -757,6 +757,19 @@ def test_a_mail_no_window_holds_is_told_to_restart(cfg, archive_root):
     assert "Restart Outlook" in message
 
 
+def test_a_mail_no_window_holds_is_not_told_a_re_apply_will_help(cfg, archive_root):
+    """Issue #84: with no window holding the mail, three re-applies over 40
+    seconds were all refused — the message must not invite a caller to burn
+    retries before the restart, and must flag that deleting the Inbox mail by
+    hand leaves the written files as its only, unlinked copy."""
+    _, result = _stuck_move(cfg, archive_root, open_in_inspector=False)
+
+    message = result["error"]["message"]
+    assert "not expected to help" in message
+    assert "Deleting the mail from the Inbox by hand" in message
+    assert message.index("not expected to help") < message.index("Restart Outlook")
+
+
 @pytest.mark.parametrize(
     "client_state",
     [
