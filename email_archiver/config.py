@@ -7,6 +7,7 @@ can be launched from any working directory (e.g. via Stream Deck).
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +202,18 @@ def setup_logging(cfg: dict[str, Any] | None = None) -> None:
 
     fmt = "%(asctime)s [%(levelname)s] %(name)s – %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
+
+    # Records carry archive paths and mail subjects, accented as often as not.
+    # Under a captured stream Python writes stderr in the ANSI code page, so a
+    # caller decoding it as UTF-8 (task-os does, without setting PYTHONUTF8)
+    # gets U+FFFD and \uXXXX escapes in the failure detail it shows. Fixed
+    # here, the one call every entry point makes, so it depends on no caller
+    # remembering the env var (issue #87). pythonw has no stderr at all.
+    if sys.stderr is not None:
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError):  # a stream that cannot be reconfigured
+            pass
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
