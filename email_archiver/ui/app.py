@@ -414,13 +414,10 @@ class ArchiveDialog:
             # COM objects are STA (apartment-threaded). The cached raw_item was
             # obtained in the background worker thread and cannot be used from
             # the main UI thread — doing so produces AttributeError: <unknown>.SaveAs.
-            # Re-acquire a fresh reference from the main thread at click time.
-            # The user's selection in Outlook won't have changed between
-            # seeing suggestions and clicking Archive.
-            import pythoncom
-
-            pythoncom.CoInitialize()
-
+            # Re-acquire a fresh reference from the main thread at click time
+            # (its apartment is held by run()). The user's selection in Outlook
+            # won't have changed between seeing suggestions and clicking
+            # Archive.
             try:
                 mail_item = get_selected_mail_item()
                 if mail_item is None:
@@ -450,7 +447,18 @@ class ArchiveDialog:
             messagebox.showerror("Archive failed", str(exc))
 
     def run(self) -> None:
-        self._root.mainloop()
+        # The archive click re-acquires the Outlook selection on this, the
+        # main thread, so its COM apartment is held for the dialog's lifetime
+        # and released only once mainloop has returned and no reference taken
+        # inside it can still be alive — the same pairing main_batch.py makes
+        # around its one thread.
+        import pythoncom  # noqa: PLC0415 - Windows-only, imported at use site
+
+        pythoncom.CoInitialize()
+        try:
+            self._root.mainloop()
+        finally:
+            pythoncom.CoUninitialize()
 
 
 # ============================================================ scan window ===
