@@ -81,6 +81,10 @@ class ArchiveDialog:
         # naming.date_prefix so the config sets the default position and the
         # user can still flip it per archive.
         self._date_prefix_var = tk.BooleanVar(value=get_date_prefix_enabled(cfg))
+        # Whether the checkbox's value is the user's own choice. Until they
+        # flip it, the value is only a preview, and the archive defers to
+        # naming.date_prefix for the folder actually chosen (issue #89).
+        self._date_prefix_set_by_hand = False
 
         self._build_ui()
         self._root.bind("<Escape>", lambda e: self._root.destroy())
@@ -148,12 +152,14 @@ class ArchiveDialog:
             font=(ff, fn),
         ).pack(side="left")
 
-        # Per-archive naming opt-in. Starts at the configured
-        # naming.date_prefix (off unless the config says otherwise); ticking it
-        # applies the date prefix to this archive only, without editing config.
+        # Per-archive naming override. Starts at the configured
+        # naming.date_prefix (off unless the config says otherwise); flipping
+        # it by hand applies that form to this archive only, without editing
+        # config.
         tk.Checkbutton(
             bottom, text="Date prefix (YYYY-MM-DD)",
             variable=self._date_prefix_var,
+            command=self._on_date_prefix_toggled,
             bg=_BG, activebackground=_BG, fg="#333",
             font=(ff, fn), padx=8,
         ).pack(side="left", padx=(12, 0))
@@ -330,6 +336,24 @@ class ArchiveDialog:
         self._date_prefix_var.set(
             resolve_date_prefix_for_folder(self._cfg, folder_path)
         )
+        self._date_prefix_set_by_hand = False
+
+    def _on_date_prefix_toggled(self) -> None:
+        """The user flipped the checkbox: from now on its value is theirs."""
+        self._date_prefix_set_by_hand = True
+
+    def _date_prefix_for_archive(self) -> bool | None:
+        """The ``date_prefix`` override to hand ``EmailArchiver``, or ``None``.
+
+        Only a value the user set by hand is an override. Anything else is the
+        seed or a hover preview for a suggestion card, which says nothing about
+        a folder picked through *Browse folder…* or *Explorer folder*. So it
+        defers to ``naming.date_prefix``, which under ``auto`` is inferred from
+        the destination the archiver actually writes into (issue #89).
+        """
+        if self._date_prefix_set_by_hand:
+            return self._date_prefix_var.get()
+        return None
 
     def _show_error(self, msg: str) -> None:
         for w in self._suggestions_frame.winfo_children():
@@ -408,7 +432,7 @@ class ArchiveDialog:
                 return
 
             archiver = EmailArchiver(
-                self._cfg, date_prefix=self._date_prefix_var.get()
+                self._cfg, date_prefix=self._date_prefix_for_archive()
             )
             result = archiver.archive(
                 mail_item=mail_item,
