@@ -723,6 +723,18 @@ def _move_failure_error(
     Outlook restart, which is why that stays as the fallback rather than the
     headline.
 
+    When no window holds the mail the cause is still unresolved (issue #84).
+    What the 2026-09-16 occurrence ruled out: an inspector (the probe read
+    every window and none held it); the modified flag ``SaveAs`` leaves behind
+    (the two re-applies wrote nothing, and the first ``Move`` of a freshly
+    re-acquired reference was still refused); and anything transient (the
+    ``Save()`` meant to clear the flag was refused too, three times across
+    separate processes over 40 seconds). So it is state held on the item in
+    the running Outlook, not a race, and a bounded retry-with-delay would not
+    have cleared it. The message therefore says outright that re-applying
+    before a restart is not expected to help, rather than inviting a caller to
+    burn retries on it; restarting stays the user's call, never this tool's.
+
     So the message leads with the cheap remedy, and says which of the two it
     is on the evidence rather than on the guess: Outlook is asked whether this
     mail is actually open. A check that could not be completed is reported as
@@ -757,8 +769,12 @@ def _move_failure_error(
     elif open_in_window is False:
         cause = (
             "This mail is not open in any Outlook window, so something else "
-            "in the running Outlook is holding it. Restart Outlook and apply "
-            "this same decision again."
+            "in the running Outlook is holding it. That hold outlasts "
+            "re-applies, so applying again before a restart is not expected "
+            "to help. Restart Outlook, then apply this same decision again. "
+            "Deleting the mail from the Inbox by hand instead leaves the "
+            "files already written as its only copy, with nothing in "
+            "Outlook pointing at them."
         )
     else:
         cause = (
@@ -772,8 +788,8 @@ def _move_failure_error(
         "code": ERROR_MESSAGE_CHANGED,
         "message": (
             f"{type(exc).__name__}: {exc} — Outlook refused the move as a "
-            f"changed message twice, on a re-acquired reference and after "
-            f"saving it. {cause} The files are on disk and the mail is still "
+            f"changed message on a re-acquired reference, and again on "
+            f"saving it for a retry. {cause} The files are on disk and the mail is still "
             f"in the Inbox, so re-applying writes nothing."
         ),
     }

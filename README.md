@@ -359,10 +359,14 @@ Almost always the thing holding the item is **an open mail window** — an Outlo
 | what the check found | what the message says to do |
 |---|---|
 | the mail is open in a window | **close that window**, then apply the same decision again |
-| no window holds it | **restart Outlook**, then apply the same decision again |
+| no window holds it | **restart Outlook**, then apply the same decision again — re-applying before the restart is not expected to help |
 | the check could not be completed | close any window showing it and re-apply; restart Outlook only if that does not clear it |
 
 The third row is reported as *not determined* and never as "no window": a check that could not run is not evidence the window is closed, and it would point you at a restart you do not need. Either way the files are already on disk and the mail is still in the Inbox, so re-applying the same decision writes nothing.
+
+The no-window case is not root-caused (issue #84). A live occurrence ruled out an open window, the modified flag `SaveAs` leaves behind (re-applies that wrote nothing were refused on their very first move) and anything transient (three re-applies over 40 seconds, each refused, the `Save()` included) — so `apply` does not retry it on a timer, and the message says plainly that re-applying before a restart will not help. Restarting Outlook is left to you; `apply` never does it.
+
+**Don't delete a stuck mail by hand from the Inbox.** Its `.msg` is already written and indexed, so it becomes the mail's only copy: uncategorized, with nothing in Outlook pointing at it, and the next `plan` no longer lists the mail at all. If you do, the result's `files` is the list to keep (or to pass to `revert` if the archive copy is not wanted either).
 
 `schema_version` is unchanged at `1`: `message_changed` is a new value for an existing `error.code` key, so a consumer that does not know it still reads the document exactly as before and still sees a mail that failed.
 
