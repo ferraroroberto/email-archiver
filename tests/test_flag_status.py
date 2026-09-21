@@ -17,9 +17,13 @@ from __future__ import annotations
 
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
-from email_archiver.scanner.scanner import FLAG_FOLLOWUP, _flag_status
+from email_archiver.scanner.scanner import _flag_status
 
 from .conftest import _FakeMsg
+
+# PidTagFlagStatus for "flagged for follow-up" -- the value task-os reads;
+# the vocabulary is documented on `flag_status` in `models._COLUMNS`.
+FLAG_FOLLOWUP = 2
 
 # The column migration itself (fresh db has it / an existing db gains it
 # without losing rows / the migration is idempotent / every migrated column
