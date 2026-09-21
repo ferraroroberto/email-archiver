@@ -61,13 +61,21 @@ flowchart TB
   MODELS -->|WAL journal| EMAILSDB["data/emails.db (SQLite)"]
 
   subgraph archive["Archive Email data flow"]
-    OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback)"]
+    OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback), batch surface"]
+    PROCESS["outlook/process.py\nis_running tasklist fallback,\nensure_running: start, poll, tear down what it started"]
+    DRAFTS["outlook/drafts.py: DraftSurface\ndraft methods OutlookClient inherits"]
+    MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError,\nCOM-free helpers (categories, headers, body markers)"]
     SUGGESTER["engine/suggester.py: SuggestionEngine\n3-stage blend: 0.45 FTS + 0.30 subject-thread\n+ 0.25 folder-name (rapidfuzz)"]
     ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - sequencing, YYYY-MM-DD prefix\n(forced or auto-inferred per folder),\npath-length fit, SaveAs .msg + SaveAsFile attachments"]
   end
   ARCHIVEDIALOG --> OUTLOOK
   OUTLOOK -->|win32com| OUTLOOKCOM["Outlook COM\n(running Outlook.exe process)"]
   OUTLOOK --> TEXT
+  OUTLOOK -->|inherits| DRAFTS
+  OUTLOOK --> PROCESS
+  OUTLOOK --> MAPI
+  DRAFTS --> MAPI
+  PROCESS --> MAPI
   OUTLOOK -->|EmailData| ARCHIVEDIALOG
   ARCHIVEDIALOG --> SUGGESTER
   SUGGESTER --> REPO
@@ -75,7 +83,7 @@ flowchart TB
   ARCHIVEDIALOG -->|user confirms folder + date-prefix checkbox| ARCHIVER
   ARCHIVER -->|SaveAs / SaveAsFile via| OUTLOOKCOM
   ARCHIVER -->|writes .msg + attachments| ONEDRIVE
-  ARCHIVER -->|_get_sent_date_prefix formats\n_sent_datetime — one implementation\nof SentOn-then-ReceivedTime| OUTLOOK
+  ARCHIVER -->|_get_sent_date_prefix formats\nsent_datetime — one implementation\nof SentOn-then-ReceivedTime| OUTLOOK
 
   subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
     BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference and\nfinishes an already-archived mail\nwithout writing anything"]
@@ -84,7 +92,7 @@ flowchart TB
   CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
   BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category ·\nis_open_in_inspector| OUTLOOK
-  OUTLOOK -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
+  PROCESS -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER
   BATCH -->|plan + apply: already archived?| REPO
   BATCH -->|apply: per-mail date_prefix or auto,\nonly inside archive.root_paths,\nskipped entirely for a reused mail| ARCHIVER

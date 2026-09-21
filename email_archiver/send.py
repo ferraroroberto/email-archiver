@@ -33,7 +33,7 @@ from typing import Any
 
 from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.draft import html_to_text
-from email_archiver.outlook.client import DraftSnapshot
+from email_archiver.outlook.drafts import DraftSnapshot
 from email_archiver.outlook.sending import send_if_approved
 
 logger = logging.getLogger(__name__)

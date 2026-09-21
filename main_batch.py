@@ -55,12 +55,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from email_archiver import batch, draft, send
 from email_archiver.config import load_config, setup_logging
-from email_archiver.outlook.client import (
-    DEFAULT_START_TIMEOUT_SECONDS,
-    DraftUpdateError,
-    OutlookClient,
-    OutlookUnavailableError,
-)
+from email_archiver.outlook.client import OutlookClient
+from email_archiver.outlook.drafts import DraftUpdateError
+from email_archiver.outlook.mapi import OutlookUnavailableError
+from email_archiver.outlook.process import DEFAULT_START_TIMEOUT_SECONDS
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)

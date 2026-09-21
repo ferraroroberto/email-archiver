@@ -1,9 +1,9 @@
 """
 The one place this app sends mail over COM.
 
-Kept out of ``client.py`` on purpose: ``draft`` must have no send path, and a
-test pins that ``draft.py``, ``outlook/client.py`` and ``main_batch.py`` carry
-no ``Send`` call. The only caller is :func:`email_archiver.send.send`.
+Kept out of ``client.py`` and ``drafts.py`` on purpose: ``draft`` must have no
+send path, and a test pins that ``draft.py``, ``outlook/client.py``,
+``outlook/drafts.py`` and ``main_batch.py`` carry no ``Send`` call. The only caller is :func:`email_archiver.send.send`.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from email_archiver.outlook.client import DraftSnapshot
+from email_archiver.outlook.drafts import DraftSnapshot
 
 logger = logging.getLogger(__name__)
 

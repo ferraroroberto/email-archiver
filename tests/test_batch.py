@@ -30,8 +30,8 @@ from email_archiver import renumber as renumber_module
 from email_archiver.archiver import archiver as archiver_module
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
-from email_archiver.outlook.client import (
-    InboxMail,
+from email_archiver.outlook.client import InboxMail
+from email_archiver.outlook.mapi import (
     is_message_changed_error,
     with_category,
     without_category,

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from email_archiver.outlook import client as client_mod
+from email_archiver.outlook import process
 from email_archiver.outlook.client import OutlookClient
 
 
@@ -70,7 +70,7 @@ def client() -> OutlookClient:
 
 
 def _with_app(monkeypatch, app) -> None:
-    monkeypatch.setattr(client_mod, "_get_active_application", lambda: app)
+    monkeypatch.setattr(process, "get_active_application", lambda: app)
 
 
 def _app(*inspectors, count_raises: bool = False) -> _FakeApplication:
