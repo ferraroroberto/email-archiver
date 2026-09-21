@@ -66,6 +66,7 @@ from typing import Any
 
 from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import (
+    DATE_PREFIX_AUTO,
     get_outlook_archive_folder,
     get_outlook_category,
 )
@@ -97,9 +98,6 @@ DEFAULT_CANDIDATES = 10
 # Why a mail got no plan entry.
 SKIP_NO_MESSAGE_ID = "no_message_id"
 SKIP_NOT_IN_INBOX = "not_in_inbox"  # a --message-id that matched nothing
-
-# The `date_prefix` a decision passes to have `apply` infer the form itself.
-DATE_PREFIX_AUTO = "auto"
 
 # `error.code` values, and the reason each one is worth telling apart.
 ERROR_NOT_IN_INBOX = "not_in_inbox"            # already moved, or never there
@@ -135,7 +133,8 @@ MOVE_VIA_SAVED_RETRY = "saved_retry"  # refused with 0x80040109, saved, retried
 
 # ---------------------------------------------------------------- helpers ---
 
-def _now_iso() -> str:
+def now_iso() -> str:
+    """The local-time timestamp every batch-family document carries."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
@@ -214,7 +213,7 @@ def _envelope(
     return {
         "verb": verb,
         "schema_version": SCHEMA_VERSION,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "archive_folder": get_outlook_archive_folder(cfg),
         "category": category or get_outlook_category(cfg),
     }
@@ -282,7 +281,7 @@ def error_document(verb: str, code: str, message: str, **details: Any) -> dict[s
     return {
         "verb": verb,
         "schema_version": SCHEMA_VERSION,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "error": {"code": code, "message": message, **details},
     }
 

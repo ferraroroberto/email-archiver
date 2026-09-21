@@ -29,10 +29,9 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION
+from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.draft import html_to_text
 from email_archiver.outlook.client import DraftSnapshot
 from email_archiver.outlook.sending import send_if_approved
@@ -55,10 +54,6 @@ class SendRefused(Exception):
         super().__init__(message)
         self.code = code
         self.differs = differs or []
-
-
-def _now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _addresses(values: list[str]) -> list[str]:
@@ -95,7 +90,7 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
     return {
         "verb": READ_VERB,
         "schema_version": SCHEMA_VERSION,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "entry_id": snapshot.entry_id,
         "subject": snapshot.subject,
         "to": list(snapshot.to),
@@ -167,7 +162,7 @@ def send(
     return {
         "verb": SEND_VERB,
         "schema_version": SCHEMA_VERSION,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "entry_id": entry_id,
         "subject": snapshot.subject,
         "to": list(snapshot.to),
@@ -176,5 +171,5 @@ def send(
         "attachments": [a.name for a in snapshot.attachments],
         "fingerprint": expect_hash,
         "sent": True,
-        "sent_at": _now_iso(),
+        "sent_at": now_iso(),
     }

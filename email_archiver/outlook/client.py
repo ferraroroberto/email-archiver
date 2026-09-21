@@ -710,8 +710,7 @@ class OutlookClient:
             return None
 
         try:
-            # Ensure it is a MailItem (Class == 43)
-            if item.Class != 43:
+            if item.Class != OL_CLASS_MAIL_ITEM:
                 logger.warning(
                     "Selected item is not a MailItem (class=%s).", item.Class
                 )

@@ -31,11 +31,10 @@ import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION
+from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.config import get_outlook_self_address
 
 VERB = "draft"
@@ -249,7 +248,7 @@ def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) ->
         ref_reason = REF_REASON_NONE_GIVEN
     else:
         ref_reason = "" if result.ref_stamped else result.ref_reason
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    now = now_iso()
     return {
         "verb": VERB,
         "schema_version": SCHEMA_VERSION,
