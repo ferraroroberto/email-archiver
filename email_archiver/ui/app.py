@@ -192,8 +192,7 @@ class ArchiveDialog:
     def _load_worker(self) -> None:
         """Runs in background thread: fetch email + suggestions."""
         try:
-            client = OutlookClient()
-            email = client.get_selected_email()
+            email = self._read_selected_email()
 
             if email is None:
                 self._root.after(0, lambda: self._show_error(
@@ -215,6 +214,24 @@ class ArchiveDialog:
             self._root.after(
                 0, lambda: self._show_error(f"Unexpected error:\n{exc}")
             )
+
+    @staticmethod
+    def _read_selected_email() -> Any:
+        """The selected mail as plain data, read inside this thread's own COM apartment.
+
+        The worker is not the main thread, so the apartment ``run()`` holds is
+        no use to it: without its own ``CoInitialize`` every Outlook call fails
+        with "CoInitialize has not been called" and reads as "no email
+        selected". ``EmailData`` carries no COM reference, so releasing the
+        apartment on return is safe.
+        """
+        import pythoncom  # noqa: PLC0415 - Windows-only, imported at use site
+
+        pythoncom.CoInitialize()
+        try:
+            return OutlookClient().get_selected_email()
+        finally:
+            pythoncom.CoUninitialize()
 
     def _show_email_meta(self) -> None:
         if not self._email:
