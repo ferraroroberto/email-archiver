@@ -64,7 +64,7 @@ flowchart TB
     OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback), batch surface"]
     PROCESS["outlook/process.py\nis_running tasklist fallback,\nensure_running: start, poll, tear down what it started"]
     DRAFTS["outlook/drafts.py: DraftSurface\ndraft methods OutlookClient inherits"]
-    MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError,\nCOM-free helpers (categories, headers, body markers)"]
+    MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError, SelectedEmailError,\nCOM-free helpers (categories, headers, body markers)"]
     SUGGESTER["engine/suggester.py: SuggestionEngine\n3-stage blend: 0.45 FTS + 0.30 subject-thread\n+ 0.25 folder-name (rapidfuzz)"]
     ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - sequencing, YYYY-MM-DD prefix\n(forced or auto-inferred per folder),\npath-length fit, SaveAs .msg + SaveAsFile attachments"]
   end

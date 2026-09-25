@@ -2,7 +2,8 @@
 Outlook vocabulary shared by every COM surface, and the helpers that need no COM.
 
 Constants (folder, class and recipient-type numbers, DASL property names, the
-MAPI error code batch mode retries on), ``OutlookUnavailableError``, and the
+MAPI error code batch mode retries on), ``OutlookUnavailableError``,
+``SelectedEmailError``, and the
 pure string/HTML helpers the batch and draft surfaces build on: category
 arithmetic, header parsing, the ``--since`` filter and the marked draft-body
 region. Nothing here imports win32com, so all of it tests without Outlook.
@@ -20,6 +21,15 @@ class OutlookUnavailableError(RuntimeError):
     Distinct from "there is nothing to do": this means the COM object model
     never answered, so the caller must exit non-zero rather than report an
     empty Inbox it never actually read.
+    """
+
+
+class SelectedEmailError(RuntimeError):
+    """The selected Outlook mail could not be read; the message says why.
+
+    Distinct from "nothing is selected", which ``get_selected_email`` reports as
+    ``None``: this is a failure to read what may well be selected, so the
+    dialog must show the reason instead of asking the user to select a mail.
     """
 
 
