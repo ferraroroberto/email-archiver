@@ -39,6 +39,7 @@ from email_archiver.outlook.mapi import (
     OL_CLASS_MAIL_ITEM,
     OL_FOLDER_INBOX,
     OutlookUnavailableError,
+    SelectedEmailError,
     header_value,
     received_since_filter,
     safe_com,
@@ -225,25 +226,33 @@ class OutlookClient(DraftSurface):
 
     def get_selected_email(self) -> EmailData | None:
         """
-        Return metadata for the currently selected email in Outlook.
-        Returns None if Outlook is not running, no email is selected, or
-        if the selected item is not a MailItem.
+        Return metadata for the currently selected email in Outlook, or None
+        when nothing is selected.
+
+        Every other outcome that leaves no email to return raises
+        ``SelectedEmailError`` carrying the reason (pywin32 missing, Outlook
+        not running, COM failure, a selected item that is not a MailItem), so
+        the caller never mistakes a failed read for an empty selection.
         """
         try:
-            import win32com.client  # noqa: PLC0415
-        except ImportError:
+            import win32com.client  # noqa: PLC0415, F401
+        except ImportError as exc:
             logger.error("pywin32 not installed. Run: pip install pywin32")
-            return None
+            raise SelectedEmailError(
+                "pywin32 is not installed (pip install pywin32)."
+            ) from exc
 
         if not self.is_running():
             logger.warning("Outlook is not running.")
-            return None
+            raise SelectedEmailError(
+                "Outlook is not running. Start Outlook and try again."
+            )
 
         try:
             item = get_selected_mail_item()
         except Exception as exc:
             logger.error("Cannot access Outlook or selection: %s", exc)
-            return None
+            raise SelectedEmailError(f"Cannot reach Outlook: {exc}") from exc
 
         if item is None:
             logger.warning("No email selected in Outlook.")
@@ -254,11 +263,18 @@ class OutlookClient(DraftSurface):
                 logger.warning(
                     "Selected item is not a MailItem (class=%s).", item.Class
                 )
-                return None
+                raise SelectedEmailError(
+                    "The selected Outlook item is not an email "
+                    f"(class {item.Class})."
+                )
 
+        except SelectedEmailError:
+            raise
         except Exception as exc:
             logger.error("Error accessing Outlook selection: %s", exc)
-            return None
+            raise SelectedEmailError(
+                f"Cannot read the selected Outlook item: {exc}"
+            ) from exc
 
         try:
             return EmailData(
@@ -270,7 +286,9 @@ class OutlookClient(DraftSurface):
 
         except Exception as exc:
             logger.error("Error extracting email metadata: %s", exc)
-            return None
+            raise SelectedEmailError(
+                f"Cannot read the selected email: {exc}"
+            ) from exc
 
     # ------------------------------------------------------ batch surface ---
     #

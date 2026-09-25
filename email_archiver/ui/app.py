@@ -32,6 +32,7 @@ from email_archiver.outlook.client import (
     OutlookClient,
     get_selected_mail_item,
 )
+from email_archiver.outlook.mapi import SelectedEmailError
 from email_archiver.ui.dialogs import browse_folder
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,13 @@ class ArchiveDialog:
     def _load_worker(self) -> None:
         """Runs in background thread: fetch email + suggestions."""
         try:
-            email = self._read_selected_email()
+            try:
+                email = self._read_selected_email()
+            except SelectedEmailError as exc:
+                logger.warning("Cannot read the selected email: %s", exc)
+                reason = str(exc)
+                self._root.after(0, lambda: self._show_error(reason))
+                return
 
             if email is None:
                 self._root.after(0, lambda: self._show_error(
@@ -221,8 +228,7 @@ class ArchiveDialog:
 
         The worker is not the main thread, so the apartment ``run()`` holds is
         no use to it: without its own ``CoInitialize`` every Outlook call fails
-        with "CoInitialize has not been called" and reads as "no email
-        selected". ``EmailData`` carries no COM reference, so releasing the
+        with "CoInitialize has not been called". ``EmailData`` carries no COM reference, so releasing the
         apartment on return is safe.
         """
         import pythoncom  # noqa: PLC0415 - Windows-only, imported at use site
