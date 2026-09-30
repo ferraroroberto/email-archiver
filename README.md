@@ -298,7 +298,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path` (which must be inside `archive.root_paths`), then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
 | `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](#renumbering-a-folder). |
-| `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
+| `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display, reply_to, reply_all}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review; with `reply_to`, a real threaded reply. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
 | `read` | nothing | Reads one unsent draft back as it is stored, with its fingerprint. Writes nothing, shows nothing. See [Sending an approved draft](#sending-an-approved-draft). |
 | `send` | `--expect-hash` (and optionally `--expect-part`, `--expect-to`) | Sends that one draft, only if its live fingerprint still matches. Refused with `approval_mismatch` naming what differs otherwise. |
 
@@ -451,6 +451,27 @@ The document:
   "displayed": true, "updated": false, "created_at": "2026-09-15T10:00:00+02:00"
 }
 ```
+
+#### Replying to a mail
+
+Add `reply_to` to make the draft a **real Outlook reply** instead of a fresh mail: it carries the thread link (In-Reply-To), the original quoted under the body, a `Re:` subject and the original's recipients, so Outlook threads it under the original.
+
+```json
+{
+  "reply_to": {"message_id": "<id of an Inbox mail>"},
+  "reply_all": false,
+  "body_text": "…"
+}
+```
+
+- **The original** is `{"message_id": …}` (an Inbox mail, found by its Message-ID) or `{"msg_path": "C:/…/saved.msg"}` (an archived `.msg`, absolute, opened with `Namespace.OpenSharedItem` and closed again without saving). Exactly one of the two. `reply_all: true` asks for Reply All (recipients and CC kept); it needs `reply_to`.
+- **`to`, `cc` and `subject` become optional** and default to what Outlook computed. Any that you give overrides it. `bcc` (your own address) is unchanged.
+- **The same steps as any draft**, in the same order: `X-Archive-Ref` stamped, the compose window displayed first (that is when the signature appears), then your body written **above** the signature and the quote, then saved. The quote is Outlook's and is never rewritten. Without a readable body from Outlook the run stops rather than write a body that would drop the quote.
+- **Refused before anything is saved**, exit 2: `reply_source_not_found` (no Inbox mail with that Message-ID, or the `.msg` cannot be opened or is not a mail) and `reply_unavailable` (the original opened but Outlook would not reply to it — for example a `.msg` with no account to reply from).
+- **The document reports the reply**, in the style of `ref_header`: `reply_to` (what was asked), `replied_to_message_id` (the original's own id), the `to` / `cc` / `subject` the saved draft carries, and `thread_header` — `set` when the saved draft holds the original as its In-Reply-To (read back from the draft, not assumed), else `not_set` with `thread_header_reason`. A new mail reports `not_a_reply`.
+- **`read` and `send` are unchanged.** The fingerprint's `body` part is the whole stored HTML, so the quoted original is bound by the approval; `read` reports the whole body under `body.html` and the caller's own text under `body.region_text`, so a preview shown for approval can include the quote.
+- **`draft --update <entry_id>` on a reply** re-fills only the marked region; the quote below it is left alone. `reply_to` in the update spec is accepted but not re-applied (the draft keeps the thread link it was created with), and a `to` / `cc` / `subject` you leave out stays as the draft has it (reported as `null`, `thread_header: "unchanged"`).
+- The real In-Reply-To on the *sent* copy is Outlook's and can only be seen after a send; check it by hand on a mail to yourself.
 
 #### Updating the same draft
 

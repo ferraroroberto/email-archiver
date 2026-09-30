@@ -107,12 +107,12 @@ flowchart TB
   RENUMBER -->|find_in_folder · update_path · delete_by_path| REPO
 
   subgraph draftflow["Draft data flow (headless, spawned by another app)"]
-    DRAFT["draft.py\nload_spec — validated before Outlook starts ·\nresolve_self_address · with_self_bcc ·\ncreate — the draft document. No COM, never sends"]
+    DRAFT["draft.py\nload_spec — validated before Outlook starts ·\nresolve_self_address · with_self_bcc ·\ncreate — the draft document; reply_to validated into a ReplyTarget.\nNo COM, never sends"]
   end
   DRAFTCALLER["another local app (life-os)\nwrites a spec, spawns the process,\nthe user reviews and sends"] -->|subprocess: draft --spec| MAINBATCH
   MAINBATCH -->|draft verb| DRAFT
   DRAFT -->|outlook.self_address| CONFIG
-  DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save| OUTLOOK
+  DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save.\nWith reply_to: Reply / ReplyAll of an Inbox item or an\nOpenSharedItem .msg instead of CreateItem, quote kept| OUTLOOK
 
   subgraph sendflow["Guarded send (headless, spawned by another app after the user approved)"]
     SEND["send.py\nread_document · fingerprint (sha256 per part + one hash) ·\ncheck_approval — refuses naming the parts. No COM"]

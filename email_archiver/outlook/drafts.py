@@ -14,14 +14,18 @@ import hashlib
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from email_archiver.outlook import process
 from email_archiver.outlook.mapi import (
+    DASL_IN_REPLY_TO_ID,
+    DASL_INTERNET_MESSAGE_ID,
     DASL_X_ARCHIVE_REF,
     OL_BCC,
     OL_CC,
+    OL_CLASS_MAIL_ITEM,
+    OL_DISCARD,
     OL_FOLDER_DRAFTS,
     OL_MAIL_ITEM,
     OL_SAVE,
@@ -34,18 +38,51 @@ from email_archiver.outlook.mapi import (
     replace_marked_body_html,
     safe_com,
 )
+from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
 
 
+REPLY_BY_MESSAGE_ID = "message_id"
+REPLY_BY_MSG_PATH = "msg_path"
+
+THREAD_SET = "set"
+THREAD_NOT_SET = "not_set"
+
+
+@dataclass
+class ReplyTarget:
+    """The mail a draft answers: an Inbox item by Message-ID, or a saved ``.msg``.
+
+    ``kind`` is :data:`REPLY_BY_MESSAGE_ID` or :data:`REPLY_BY_MSG_PATH`;
+    ``value`` is the Message-ID or the absolute file path.
+    """
+
+    kind: str
+    value: str
+    reply_all: bool = False
+
+
 @dataclass
 class CreatedDraft:
-    """What Outlook reports back about a draft ``create_draft`` saved."""
+    """What Outlook reports back about a draft ``create_draft`` saved.
+
+    The reply fields are filled only for a reply: ``to`` / ``cc`` / ``subject``
+    are what the saved draft actually carries (Outlook computed them, unless the
+    caller overrode them), ``replied_to_message_id`` is the original's own id and
+    ``thread_header`` says whether the draft holds it as its In-Reply-To.
+    """
 
     entry_id: str = ""
     ref_stamped: bool = False
     ref_reason: str = ""           # why the ref header is absent; "" when stamped
     displayed: bool = False
+    subject: str = ""
+    to: list[str] = field(default_factory=list)
+    cc: list[str] = field(default_factory=list)
+    replied_to_message_id: str = ""
+    thread_header: str = ""        # THREAD_SET / THREAD_NOT_SET; "" for a new mail
+    thread_header_reason: str = ""
 
 
 @dataclass
@@ -89,6 +126,20 @@ _UNMARKED_MESSAGE = (
     "the draft has no marked body region (created before draft --update existed, "
     "or its HTML was rewritten); refusing to guess where the body ends"
 )
+
+
+# Why a reply could not be started. Each is its own `error.code` in
+# `main_batch.py`, and each is raised before anything is saved.
+REPLY_SOURCE_NOT_FOUND = "reply_source_not_found"  # the original cannot be found or opened
+REPLY_UNAVAILABLE = "reply_unavailable"            # the original opened but Outlook would not reply to it
+
+
+class ReplySourceError(Exception):
+    """The mail to reply to is unusable; no draft was saved."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class DraftUpdateError(Exception):
@@ -142,16 +193,23 @@ class DraftSurface:
     def create_draft(
         self,
         *,
-        to: list[str],
-        cc: list[str],
+        to: list[str] | None,
+        cc: list[str] | None,
         bcc: list[str],
-        subject: str,
+        subject: str | None,
         body_html: str,
         attachments: list[str],
         ref: str | None,
         display: bool,
+        reply_to: ReplyTarget | None = None,
     ) -> CreatedDraft:
         """Create, save and (optionally) show a new mail. Never sends it.
+
+        With ``reply_to`` the item is Outlook's own ``Reply()`` / ``ReplyAll()``
+        of that mail instead of a blank one, so it carries the thread link, the
+        quoted original, the ``Re:`` subject and the original's recipients.
+        ``to`` / ``cc`` / ``subject`` of ``None`` keep what Outlook computed;
+        anything given overrides it. The caller's body goes above the quote.
 
         Every step that can fail on caller data (attachments, the ref header)
         runs before ``Display``, so a failure leaves no half-filled window on
@@ -164,11 +222,18 @@ class DraftSurface:
         if app is None:
             raise OutlookUnavailableError("Outlook is no longer reachable over COM.")
 
-        mail = app.CreateItem(OL_MAIL_ITEM)
-        mail.To = "; ".join(to)
-        mail.CC = "; ".join(cc)
+        replied_to_id = ""
+        if reply_to is None:
+            mail = app.CreateItem(OL_MAIL_ITEM)
+        else:
+            mail, replied_to_id = self._start_reply(reply_to)
+        if to is not None:
+            mail.To = "; ".join(to)
+        if cc is not None:
+            mail.CC = "; ".join(cc)
         mail.BCC = "; ".join(bcc)
-        mail.Subject = subject
+        if subject is not None:
+            mail.Subject = subject
         for path in attachments:
             mail.Attachments.Add(path)
 
@@ -191,19 +256,102 @@ class DraftSurface:
                 "marker %s.", len(existing_html),
                 "present" if "_MailAutoSig" in existing_html else "absent",
             )
+        elif reply_to is not None:
+            existing_html = safe_com(lambda: mail.HTMLBody or "", "")
+        if reply_to is not None and not existing_html:
+            # Writing the body without Outlook's own HTML would replace the
+            # quote with nothing: refuse before anything is saved.
+            safe_com(lambda: mail.Close(OL_DISCARD), None)
+            raise ReplySourceError(
+                REPLY_UNAVAILABLE,
+                "Outlook's reply carries no readable body, so the quoted original "
+                "cannot be kept; nothing was saved",
+            )
         mail.HTMLBody = insert_body_html(existing_html, mark_body_html(body_html))
         mail.Save()
         created.entry_id = safe_com(lambda: str(mail.EntryID), "")
+        if reply_to is not None:
+            self._describe_reply(mail, created, replied_to_id)
         return created
+
+    def _start_reply(self, target: ReplyTarget) -> tuple[Any, str]:
+        """Outlook's reply item to ``target``, and the original's Message-ID.
+
+        Raises :class:`ReplySourceError` when the original cannot be found or
+        opened, or Outlook will not reply to it (a ``.msg`` opened outside any
+        store may have nowhere to reply from). ``Reply()`` only builds an
+        unsaved item, so a refusal here has left nothing behind. An original
+        opened from a file is closed again, discarding, once the reply exists.
+        """
+        original = self._open_reply_source(target)
+        try:
+            replied_to_id = normalize_message_id(safe_com(
+                lambda: original.PropertyAccessor.GetProperty(DASL_INTERNET_MESSAGE_ID), None,
+            ))
+            try:
+                mail = original.ReplyAll() if target.reply_all else original.Reply()
+            except Exception as exc:
+                raise ReplySourceError(
+                    REPLY_UNAVAILABLE,
+                    f"Outlook could not reply to the original: {type(exc).__name__}: {exc}",
+                ) from exc
+        finally:
+            if target.kind == REPLY_BY_MSG_PATH:
+                safe_com(lambda: original.Close(OL_DISCARD), None)
+        if mail is None:
+            raise ReplySourceError(REPLY_UNAVAILABLE, "Outlook returned no reply item for the original")
+        return mail, replied_to_id
+
+    def _open_reply_source(self, target: ReplyTarget) -> Any:
+        """The original as an Outlook MailItem, or :class:`ReplySourceError`."""
+        if target.kind == REPLY_BY_MSG_PATH:
+            try:
+                original = self._namespace().OpenSharedItem(target.value)
+            except Exception as exc:
+                raise ReplySourceError(
+                    REPLY_SOURCE_NOT_FOUND,
+                    f"Outlook could not open the .msg file: {type(exc).__name__}: {exc}",
+                ) from exc
+        else:
+            original = self.find_by_message_id(normalize_message_id(target.value), None)
+        if original is None:
+            raise ReplySourceError(
+                REPLY_SOURCE_NOT_FOUND, f"no Inbox mail with Message-ID {target.value}",
+            )
+        if safe_com(lambda: int(original.Class), OL_CLASS_MAIL_ITEM) != OL_CLASS_MAIL_ITEM:
+            if target.kind == REPLY_BY_MSG_PATH:
+                safe_com(lambda: original.Close(OL_DISCARD), None)
+            raise ReplySourceError(REPLY_SOURCE_NOT_FOUND, "the original is not a mail item")
+        return original
+
+    @staticmethod
+    def _describe_reply(mail: Any, created: CreatedDraft, replied_to_id: str) -> None:
+        """Fill the reply fields of ``created`` from the saved draft.
+
+        The In-Reply-To is read back from the draft itself (PR_IN_REPLY_TO_ID),
+        so ``thread_header`` reports what is stored, not what was hoped for.
+        """
+        lines, _ = _recipient_lines(mail)
+        created.to, created.cc = lines[OL_TO], lines[OL_CC]
+        created.subject = str(safe_com(lambda: mail.Subject or "", ""))
+        created.replied_to_message_id = replied_to_id
+        in_reply_to = normalize_message_id(safe_com(
+            lambda: mail.PropertyAccessor.GetProperty(DASL_IN_REPLY_TO_ID), None,
+        ))
+        if in_reply_to:
+            created.thread_header = THREAD_SET
+        else:
+            created.thread_header = THREAD_NOT_SET
+            created.thread_header_reason = "the saved draft has no In-Reply-To property"
 
     def update_draft(
         self,
         *,
         entry_id: str,
-        to: list[str],
-        cc: list[str],
+        to: list[str] | None,
+        cc: list[str] | None,
         bcc: list[str],
-        subject: str,
+        subject: str | None,
         body_html: str,
         attachments: list[str],
         ref: str | None,
@@ -215,7 +363,10 @@ class DraftSurface:
         (:class:`DraftUpdateError`) leaves the item exactly as it was. Only the
         marked body region is replaced; the signature below it stays. The
         attachments are all removed and the spec's re-added, so the draft ends
-        up carrying exactly what the caller asked for.
+        up carrying exactly what the caller asked for. ``to`` / ``cc`` /
+        ``subject`` of ``None`` stay as the draft has them (a reply's own), and
+        a reply's quoted original, which sits after the marked region, is never
+        touched.
         """
         mail = self.open_draft(entry_id)
         if replace_marked_body_html(safe_com(lambda: mail.HTMLBody or "", ""), body_html) is None:
@@ -230,10 +381,13 @@ class DraftSurface:
         if new_html is None:
             raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
 
-        mail.To = "; ".join(to)
-        mail.CC = "; ".join(cc)
+        if to is not None:
+            mail.To = "; ".join(to)
+        if cc is not None:
+            mail.CC = "; ".join(cc)
         mail.BCC = "; ".join(bcc)
-        mail.Subject = subject
+        if subject is not None:
+            mail.Subject = subject
         while int(mail.Attachments.Count):
             mail.Attachments.Remove(1)
         for path in attachments:
@@ -296,17 +450,7 @@ class DraftSurface:
         An attachment that cannot be saved raises: a snapshot that silently
         skipped one would bind less than it claims.
         """
-        lines: dict[int, list[str]] = {OL_TO: [], OL_CC: [], OL_BCC: []}
-        unreadable = 0
-        recipients = mail.Recipients
-        for index in range(1, int(recipients.Count) + 1):
-            recipient = recipients.Item(index)
-            address = recipient_address(recipient)
-            kind = safe_com(lambda r=recipient: int(r.Type), 0)
-            if not address or kind not in lines:
-                unreadable += 1
-                continue
-            lines[kind].append(address)
+        lines, unreadable = _recipient_lines(mail)
 
         attachments: list[DraftAttachment] = []
         with tempfile.TemporaryDirectory(prefix="email-archiver-read-") as scratch:
@@ -352,3 +496,20 @@ class DraftSurface:
         if closed:
             logger.info("Closed %d open window(s) on the draft before updating it.", closed)
         return closed
+
+
+def _recipient_lines(mail: Any) -> tuple[dict[int, list[str]], int]:
+    """A mail's recipient addresses by line (To / CC / BCC), and how many
+    recipients had no readable address or line."""
+    lines: dict[int, list[str]] = {OL_TO: [], OL_CC: [], OL_BCC: []}
+    unreadable = 0
+    recipients = mail.Recipients
+    for index in range(1, int(recipients.Count) + 1):
+        recipient = recipients.Item(index)
+        address = recipient_address(recipient)
+        kind = safe_com(lambda r=recipient: int(r.Type), 0)
+        if not address or kind not in lines:
+            unreadable += 1
+            continue
+        lines[kind].append(address)
+    return lines, unreadable

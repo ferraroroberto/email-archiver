@@ -20,6 +20,13 @@ Design decisions:
   otherwise drop the attachment without a word.
 - **The ref token is reported honestly.** ``ref_header`` says whether the
   ``X-Archive-Ref`` header was actually stamped, with the reason when not.
+- **A reply is Outlook's own.** ``reply_to`` names the mail to answer (an Inbox
+  item by Message-ID, or a saved ``.msg``) and the client builds the draft from
+  ``Reply()`` / ``ReplyAll()``, so the thread link, the quote, the ``Re:`` subject
+  and the recipients are Outlook's. ``to`` / ``cc`` / ``subject`` become optional
+  overrides; a mail that cannot be found is ``reply_source_not_found`` and no
+  draft exists. The document reports what was replied to and whether the draft
+  holds the In-Reply-To, as honestly as ``ref_header``.
 - **An update edits the same item** (``update``): a caller iterating on one
   mail gets one draft, not a trail of near-duplicates. Only an unsent item in
   Drafts whose body the tool marked is touched; anything else is refused before
@@ -36,6 +43,12 @@ from typing import Any
 
 from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.config import get_outlook_self_address
+from email_archiver.outlook.drafts import (
+    REPLY_BY_MESSAGE_ID,
+    REPLY_BY_MSG_PATH,
+    ReplyTarget,
+)
+from email_archiver.text import normalize_message_id
 
 VERB = "draft"
 
@@ -43,9 +56,13 @@ REF_STAMPED = "stamped"
 REF_NOT_STAMPED = "not_stamped"
 REF_REASON_NONE_GIVEN = "no ref given"
 
-_SPEC_KEYS = frozenset(
-    {"to", "cc", "bcc", "subject", "body_text", "body_html", "attachments", "ref", "display"}
-)
+THREAD_NOT_APPLICABLE = "not_a_reply"
+THREAD_UNCHANGED = "unchanged"
+
+_SPEC_KEYS = frozenset({
+    "to", "cc", "bcc", "subject", "body_text", "body_html", "attachments", "ref", "display",
+    "reply_to", "reply_all",
+})
 _BLANK_LINES = re.compile(r"\n\s*\n")
 
 
@@ -55,16 +72,21 @@ class SpecError(ValueError):
 
 @dataclass
 class DraftSpec:
-    """A validated draft spec. ``attachments`` are absolute paths to files."""
+    """A validated draft spec. ``attachments`` are absolute paths to files.
 
-    to: list[str]
-    subject: str
+    ``to`` / ``cc`` / ``subject`` are ``None`` only on a reply, where they were
+    not given and Outlook's own stay; a new mail always has all three.
+    """
+
+    to: list[str] | None
+    subject: str | None
     body_html: str
-    cc: list[str] = field(default_factory=list)
+    cc: list[str] | None = field(default_factory=list)
     bcc: list[str] = field(default_factory=list)
     attachments: list[str] = field(default_factory=list)
     ref: str | None = None
     display: bool = True
+    reply_to: ReplyTarget | None = None
 
 
 # ------------------------------------------------------------------- spec ---
@@ -111,6 +133,41 @@ def html_to_text(body_html: str) -> str | None:
     return text if text_to_html(text) == body_html else None
 
 
+def _reply_target(data: dict[str, Any]) -> ReplyTarget | None:
+    """The validated ``reply_to`` / ``reply_all`` of a spec, or ``None``."""
+    reply_all = data.get("reply_all", False)
+    if not isinstance(reply_all, bool):
+        raise SpecError("`reply_all` must be true or false")
+    raw = data.get("reply_to")
+    if raw is None:
+        if reply_all:
+            raise SpecError("`reply_all` needs `reply_to`")
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("`reply_to` must be an object with `message_id` or `msg_path`")
+    unknown = sorted(set(raw) - {REPLY_BY_MESSAGE_ID, REPLY_BY_MSG_PATH})
+    if unknown:
+        raise SpecError(f"unknown `reply_to` keys: {', '.join(unknown)}")
+    kinds = [k for k in (REPLY_BY_MESSAGE_ID, REPLY_BY_MSG_PATH) if k in raw]
+    if len(kinds) != 1:
+        raise SpecError("`reply_to` needs exactly one of `message_id` or `msg_path`")
+    kind, value = kinds[0], raw[kinds[0]]
+    if not isinstance(value, str) or not value.strip():
+        raise SpecError(f"`reply_to.{kind}` must be a non-empty string")
+    if kind == REPLY_BY_MESSAGE_ID:
+        value = normalize_message_id(value)
+        if not value:
+            raise SpecError("`reply_to.message_id` must be a non-empty string")
+    else:
+        path = Path(value.strip())
+        if not path.is_absolute():
+            raise SpecError(f"`reply_to.msg_path` must be an absolute path: {value}")
+        if path.suffix.lower() != ".msg" or not path.is_file():
+            raise SpecError(f"`reply_to.msg_path` is not an existing .msg file: {value}")
+        value = str(path)
+    return ReplyTarget(kind=kind, value=value, reply_all=reply_all)
+
+
 def parse_spec(data: Any) -> DraftSpec:
     """Validate a decoded spec and return it as a :class:`DraftSpec`.
 
@@ -123,12 +180,17 @@ def parse_spec(data: Any) -> DraftSpec:
     if unknown:
         raise SpecError(f"unknown spec keys: {', '.join(unknown)}")
 
-    to = _address_list(data, "to", required=True)
-    cc = _address_list(data, "cc")
+    reply_to = _reply_target(data)
+    # A reply takes its recipients and subject from Outlook; a key that is
+    # present overrides, one that is absent leaves Outlook's own.
+    to = _address_list(data, "to", required=True) if reply_to is None or "to" in data else None
+    cc = _address_list(data, "cc") if reply_to is None or "cc" in data else None
     bcc = _address_list(data, "bcc")
 
     subject = data.get("subject")
-    if not isinstance(subject, str) or not subject.strip():
+    if not (reply_to is not None and subject is None) and (
+        not isinstance(subject, str) or not subject.strip()
+    ):
         raise SpecError("`subject` must be a non-empty string")
 
     bodies = [k for k in ("body_text", "body_html") if k in data]
@@ -162,6 +224,7 @@ def parse_spec(data: Any) -> DraftSpec:
     return DraftSpec(
         to=to, cc=cc, bcc=bcc, subject=subject, body_html=body_html,
         attachments=attachments, ref=ref.strip() if ref else None, display=display,
+        reply_to=reply_to,
     )
 
 
@@ -221,7 +284,7 @@ def create(client: Any, spec: DraftSpec, self_address: str) -> dict[str, Any]:
     created = client.create_draft(
         to=spec.to, cc=spec.cc, bcc=bcc, subject=spec.subject,
         body_html=spec.body_html, attachments=spec.attachments,
-        ref=spec.ref, display=spec.display,
+        ref=spec.ref, display=spec.display, reply_to=spec.reply_to,
     )
     return _document(spec, bcc, created, updated=False)
 
@@ -229,6 +292,9 @@ def create(client: Any, spec: DraftSpec, self_address: str) -> dict[str, Any]:
 def update(client: Any, entry_id: str, spec: DraftSpec, self_address: str) -> dict[str, Any]:
     """Re-fill the existing draft ``entry_id`` from ``spec``; the same document
     as :func:`create`, with ``updated: true`` and ``updated_at``.
+
+    A ``reply_to`` in the spec is not re-applied: the draft keeps the thread
+    link and quote it was created with, so a caller may reuse its create spec.
 
     Raises:
         DraftUpdateError: the item is gone, sent, outside Drafts, or has no
@@ -243,25 +309,62 @@ def update(client: Any, entry_id: str, spec: DraftSpec, self_address: str) -> di
     return _document(spec, bcc, updated, updated=True)
 
 
+def _reply_fields(spec: DraftSpec, result: Any, *, updated: bool) -> dict[str, Any]:
+    """The reply part of the document: what was replied to, and the thread link.
+
+    ``thread_header`` is ``set`` / ``not_set`` as read back from the saved draft,
+    ``unchanged`` on an update (the link was made at creation) and
+    ``not_a_reply`` for a new mail, with ``thread_header_reason`` saying why not.
+    """
+    if spec.reply_to is None:
+        return {"reply_to": None, "thread_header": THREAD_NOT_APPLICABLE, "thread_header_reason": ""}
+    fields: dict[str, Any] = {
+        "reply_to": {
+            spec.reply_to.kind: spec.reply_to.value,
+            "reply_all": spec.reply_to.reply_all,
+        },
+    }
+    if updated:
+        return {**fields, "thread_header": THREAD_UNCHANGED, "thread_header_reason": ""}
+    return {
+        **fields,
+        "replied_to_message_id": result.replied_to_message_id,
+        "thread_header": result.thread_header,
+        "thread_header_reason": result.thread_header_reason,
+    }
+
+
+def _reported(given: list[str] | None, saved: list[str], replying: bool) -> list[str] | None:
+    """A recipient line for the document: the caller's when given, the saved
+    reply's when Outlook computed it, ``None`` when an update left it as it was."""
+    if given is not None:
+        return list(given)
+    return list(saved) if replying else None
+
+
 def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) -> dict[str, Any]:
     if spec.ref is None:
         ref_reason = REF_REASON_NONE_GIVEN
     else:
         ref_reason = "" if result.ref_stamped else result.ref_reason
     now = now_iso()
+    replying = spec.reply_to is not None and not updated
     return {
         "verb": VERB,
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
         "entry_id": result.entry_id,
-        "subject": spec.subject,
-        "to": list(spec.to),
-        "cc": list(spec.cc),
+        # A reply's own subject and recipients are what Outlook saved; ``None``
+        # is an update that left them as the draft has them.
+        "subject": result.subject if replying and spec.subject is None else spec.subject,
+        "to": _reported(spec.to, result.to, replying),
+        "cc": _reported(spec.cc, result.cc, replying),
         "bcc": bcc,
         "attachments": list(spec.attachments),
         "ref": spec.ref,
         "ref_header": REF_STAMPED if result.ref_stamped else REF_NOT_STAMPED,
         "ref_header_reason": ref_reason,
+        **_reply_fields(spec, result, updated=updated),
         "displayed": result.displayed,
         "updated": updated,
         "updated_at" if updated else "created_at": now,

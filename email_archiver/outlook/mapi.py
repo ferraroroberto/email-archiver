@@ -70,6 +70,8 @@ OL_CC = 2
 OL_BCC = 3
 # olSave, for Inspector.Close: keep what the open window holds.
 OL_SAVE = 0
+# olDiscard, for MailItem.Close: drop an item opened only to be replied to.
+OL_DISCARD = 1
 # DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
 # draft stamped with it carries ``X-Archive-Ref: <token>`` into the sent mail, so
 # a caller can recognise its own copy when it lands back in the Inbox.
@@ -82,6 +84,9 @@ ARCHIVE_REF_HEADER = "X-Archive-Ref"
 # block of a mail that arrived through a server. It is where the Step 3 probe
 # read X-Archive-Ref back on an IMAP mailbox (email-archiver#70).
 DASL_TRANSPORT_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+# DASL name for MAPI PR_IN_REPLY_TO_ID (0x1042001F): the Message-ID a reply
+# answers, which Outlook sends as the In-Reply-To header.
+DASL_IN_REPLY_TO_ID = "http://schemas.microsoft.com/mapi/proptag/0x1042001F"
 # DASL name for the received time, used by the `plan --since` Restrict filter.
 DASL_DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
 

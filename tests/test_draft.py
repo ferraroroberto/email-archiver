@@ -27,7 +27,14 @@ import main_batch
 from email_archiver import draft
 from email_archiver.outlook import mapi, process
 from email_archiver.outlook.client import OutlookClient
-from email_archiver.outlook.drafts import CreatedDraft, DraftUpdateError
+from email_archiver.outlook.drafts import (
+    REPLY_BY_MESSAGE_ID,
+    REPLY_BY_MSG_PATH,
+    CreatedDraft,
+    DraftUpdateError,
+    ReplySourceError,
+    ReplyTarget,
+)
 from email_archiver.outlook.mapi import (
     DASL_X_ARCHIVE_REF,
     insert_body_html,
@@ -147,7 +154,11 @@ class FakeDraftClient:
         self.account_lookups += 1
         return self.account_smtp
 
+    refuse_create: ReplySourceError | None = None
+
     def create_draft(self, **kwargs) -> CreatedDraft:
+        if self.refuse_create is not None:
+            raise self.refuse_create
         self.drafts.append(kwargs)
         return CreatedDraft(
             entry_id="draft-entry-1",
@@ -452,10 +463,12 @@ def batch_process(tmp_path, monkeypatch, capsys):
     def run(
         spec: dict, account_smtp: str = SELF, extra: tuple[str, ...] = (),
         refuse_update: DraftUpdateError | None = None,
+        refuse_create: ReplySourceError | None = None,
     ) -> tuple[int, dict, list[FakeDraftClient]]:
         def _factory() -> FakeDraftClient:
             fake = FakeDraftClient(account_smtp=account_smtp)
             fake.refuse_update = refuse_update
+            fake.refuse_create = refuse_create
             clients.append(fake)
             return fake
 
@@ -727,3 +740,436 @@ def test_an_unmarked_draft_is_refused_without_closing_its_open_window(monkeypatc
         _update(monkeypatch, mail, inspectors=[window])
 
     assert window.closed_with == []
+
+
+# --------------------------------------------------- threaded reply (#101) ---
+
+QUOTE = '<div id="quote">On a day, they wrote:<blockquote>original text</blockquote></div>'
+ORIGINAL_ID = "orig-1@example.invalid"
+
+
+def _msg_file(tmp_path: Path) -> Path:
+    path = tmp_path / "saved.msg"
+    path.write_bytes(b"synthetic")
+    return path
+
+
+class _FakeReplyAccessor(_FakePropertyAccessor):
+    def __init__(self, calls: list, properties: dict) -> None:
+        super().__init__(calls, refuse=False)
+        self._properties = properties
+
+    def GetProperty(self, name: str):  # noqa: N802 - COM's spelling
+        if name not in self._properties:
+            raise RuntimeError("property not found")
+        return self._properties[name]
+
+
+class _FakeRecipient:
+    def __init__(self, address: str, kind: int) -> None:
+        self.Address, self.Type = address, kind
+
+
+class _FakeRecipients:
+    def __init__(self, items: list[_FakeRecipient]) -> None:
+        self._items = items
+        self.Count = len(items)
+
+    def Item(self, i: int) -> _FakeRecipient:  # noqa: N802 - COM's spelling
+        return self._items[i - 1]
+
+
+class _FakeReplyItem(_FakeComMail):
+    """What ``Reply()`` returns: already quoting the original; ``Display`` adds
+    the signature on top of the quote, the way Outlook does."""
+
+    def __init__(self, in_reply_to: str = f"<{ORIGINAL_ID}>", quote_html: str | None = None) -> None:
+        super().__init__()
+        self.Subject = "RE: Original subject"
+        self.Recipients = _FakeRecipients([
+            _FakeRecipient("sender@example.invalid", mapi.OL_TO),
+            _FakeRecipient("other@example.invalid", mapi.OL_CC),
+        ])
+        self._quote = f"<html><body>{QUOTE}</body></html>" if quote_html is None else quote_html
+        self._html = self._quote
+        properties = {mapi.DASL_IN_REPLY_TO_ID: in_reply_to} if in_reply_to else {}
+        self.PropertyAccessor = _FakeReplyAccessor(self.calls, properties)
+
+    def Display(self, modal: bool) -> None:  # noqa: N802 - COM's spelling
+        self.calls.append(("Display", modal))
+        self._html = self._quote.replace("<body>", f"<body>{SIG}", 1)
+
+    def Close(self, mode: int) -> None:  # noqa: N802 - COM's spelling
+        self.calls.append(("Close", mode))
+
+
+class _FakeOriginal:
+    """The mail being answered."""
+
+    def __init__(self, reply: _FakeReplyItem, refuse_reply: bool = False) -> None:
+        self.reply = reply
+        self.refuse_reply = refuse_reply
+        self.Class = mapi.OL_CLASS_MAIL_ITEM
+        self.calls: list = []
+        self.PropertyAccessor = _FakeReplyAccessor(
+            self.calls, {mapi.DASL_INTERNET_MESSAGE_ID: f"<{ORIGINAL_ID}>"},
+        )
+
+    def _answer(self, name: str) -> _FakeReplyItem:
+        self.calls.append((name,))
+        if self.refuse_reply:
+            raise RuntimeError("there is no account to reply from")
+        return self.reply
+
+    def Reply(self) -> _FakeReplyItem:  # noqa: N802 - COM's spelling
+        return self._answer("Reply")
+
+    def ReplyAll(self) -> _FakeReplyItem:  # noqa: N802 - COM's spelling
+        return self._answer("ReplyAll")
+
+    def Close(self, mode: int) -> None:  # noqa: N802 - COM's spelling
+        self.calls.append(("Close", mode))
+
+
+class _FakeSharedNamespace:
+    def __init__(self, original: _FakeOriginal | None) -> None:
+        self.original = original
+        self.opened: list[str] = []
+
+    def OpenSharedItem(self, path: str) -> _FakeOriginal:  # noqa: N802 - COM's spelling
+        self.opened.append(path)
+        if self.original is None:
+            raise RuntimeError("Cannot open the file")
+        return self.original
+
+
+def _reply_client(monkeypatch, original: _FakeOriginal | None):
+    """A client whose Outlook is entirely fake; the only real Outlook here is the user's."""
+    app = _FakeApplication(_FakeComMail())
+    monkeypatch.setattr(process, "get_active_application", lambda: app)
+    client = OutlookClient()
+    namespace = _FakeSharedNamespace(original)
+    monkeypatch.setattr(client, "_namespace", lambda: namespace)
+    looked_up: list[str] = []
+
+    def _find(message_id: str, folder_name=None):
+        looked_up.append(message_id)
+        return original
+
+    monkeypatch.setattr(client, "find_by_message_id", _find)
+    return client, app, namespace, looked_up
+
+
+def _reply(client: OutlookClient, **overrides) -> CreatedDraft:
+    kwargs = dict(
+        to=None, cc=None, bcc=[SELF], subject=None, body_html="<p>My answer</p>",
+        attachments=[], ref="tok", display=True,
+        reply_to=ReplyTarget(REPLY_BY_MESSAGE_ID, ORIGINAL_ID),
+    )
+    kwargs.update(overrides)
+    return client.create_draft(**kwargs)
+
+
+# -- spec --
+
+def test_a_reply_spec_needs_no_recipient_or_subject():
+    spec = draft.parse_spec({
+        "body_text": "Hello", "reply_to": {"message_id": f" <{ORIGINAL_ID}> "}, "reply_all": True,
+    })
+
+    assert (spec.to, spec.cc, spec.subject) == (None, None, None)
+    assert spec.reply_to == ReplyTarget(REPLY_BY_MESSAGE_ID, ORIGINAL_ID, reply_all=True)
+
+
+def test_reply_overrides_are_kept_when_given(tmp_path):
+    msg = _msg_file(tmp_path)
+    spec = draft.parse_spec({
+        "body_text": "Hello", "reply_to": {"msg_path": str(msg)},
+        "to": ["x@example.invalid"], "cc": [], "subject": "Own subject",
+    })
+
+    assert (spec.to, spec.cc, spec.subject) == (["x@example.invalid"], [], "Own subject")
+    assert spec.reply_to == ReplyTarget(REPLY_BY_MSG_PATH, str(msg))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"reply_to": "<id>"}, "`reply_to` must be an object"),
+        ({"reply_to": {}}, "exactly one of `message_id` or `msg_path`"),
+        ({"reply_to": {"message_id": "a", "msg_path": "b"}}, "exactly one of `message_id` or `msg_path`"),
+        ({"reply_to": {"message_id": " "}}, "`reply_to.message_id` must be a non-empty string"),
+        ({"reply_to": {"message_id": "<>"}}, "`reply_to.message_id` must be a non-empty string"),
+        ({"reply_to": {"messageid": "a"}}, "unknown `reply_to` keys: messageid"),
+        ({"reply_to": {"msg_path": "relative/saved.msg"}}, "must be an absolute path"),
+        ({"reply_to": {"msg_path": "Z:/definitely/not/here.msg"}}, "not an existing .msg file"),
+        ({"reply_all": True}, "`reply_all` needs `reply_to`"),
+        ({"reply_to": {"message_id": "a"}, "reply_all": "yes"}, "`reply_all` must be true or false"),
+    ],
+)
+def test_an_unusable_reply_spec_is_refused_with_the_field_named(overrides, message):
+    with pytest.raises(draft.SpecError, match=re.escape(message)):
+        draft.parse_spec({"body_text": "Hello", **overrides})
+
+
+def test_a_msg_path_must_be_a_msg_file(tmp_path):
+    other = tmp_path / "saved.txt"
+    other.write_text("x", encoding="utf-8")
+    with pytest.raises(draft.SpecError, match="not an existing .msg file"):
+        draft.parse_spec({"body_text": "Hello", "reply_to": {"msg_path": str(other)}})
+
+
+@pytest.mark.parametrize("missing", ["to", "subject"])
+def test_a_new_mail_still_needs_its_recipient_and_subject(missing):
+    data = _spec()
+    del data[missing]
+    with pytest.raises(draft.SpecError, match=f"`{missing}`"):
+        draft.parse_spec(data)
+
+
+def test_a_new_mail_spec_is_unchanged_by_the_reply_keys():
+    spec = draft.parse_spec(_spec(cc=["c@example.invalid"]))
+
+    assert spec.reply_to is None
+    assert (spec.to, spec.cc, spec.subject) == (["someone@example.invalid"], ["c@example.invalid"], "A subject")
+
+
+# -- client --
+
+def test_a_reply_by_message_id_is_outlooks_own_reply_with_the_body_above_the_quote(monkeypatch):
+    reply = _FakeReplyItem()
+    original = _FakeOriginal(reply)
+    client, app, _, looked_up = _reply_client(monkeypatch, original)
+
+    created = _reply(client)
+
+    assert looked_up == [ORIGINAL_ID] and app.created == []
+    assert original.calls == [("Reply",)]
+    assert reply.calls == [
+        ("SetProperty", DASL_X_ARCHIVE_REF, "tok"), ("Display", False), ("HTMLBody=",), ("Save",),
+    ]
+    assert reply.HTMLBody == (
+        f"<html><body>{mark_body_html('<p>My answer</p>')}{SIG}{QUOTE}</body></html>"
+    )
+    assert (reply.To, reply.CC, reply.Subject, reply.BCC) == ("", "", "RE: Original subject", SELF)
+    assert ("Send",) not in reply.calls
+    assert created.subject == "RE: Original subject"
+    assert (created.to, created.cc) == (["sender@example.invalid"], ["other@example.invalid"])
+    assert (created.replied_to_message_id, created.thread_header) == (ORIGINAL_ID, "set")
+
+
+def test_reply_all_asks_outlook_for_reply_all(monkeypatch):
+    original = _FakeOriginal(_FakeReplyItem())
+    client, *_ = _reply_client(monkeypatch, original)
+
+    _reply(client, reply_to=ReplyTarget(REPLY_BY_MESSAGE_ID, ORIGINAL_ID, reply_all=True))
+
+    assert original.calls == [("ReplyAll",)]
+
+
+def test_given_recipients_and_subject_override_outlooks(monkeypatch):
+    reply = _FakeReplyItem()
+    client, *_ = _reply_client(monkeypatch, _FakeOriginal(reply))
+
+    _reply(client, to=["x@example.invalid"], cc=[], subject="Own subject")
+
+    assert (reply.To, reply.CC, reply.Subject) == ("x@example.invalid", "", "Own subject")
+
+
+def test_a_reply_by_msg_path_opens_the_file_and_closes_it_again_discarding(monkeypatch, tmp_path):
+    reply = _FakeReplyItem()
+    original = _FakeOriginal(reply)
+    client, app, namespace, looked_up = _reply_client(monkeypatch, original)
+    path = str(_msg_file(tmp_path))
+
+    _reply(client, reply_to=ReplyTarget(REPLY_BY_MSG_PATH, path))
+
+    assert namespace.opened == [path] and looked_up == []
+    assert original.calls == [("Reply",), ("Close", mapi.OL_DISCARD)]
+    assert ("Save",) in reply.calls
+
+
+def test_an_inbox_original_is_never_closed(monkeypatch):
+    original = _FakeOriginal(_FakeReplyItem())
+    client, *_ = _reply_client(monkeypatch, original)
+
+    _reply(client)
+
+    assert ("Close", mapi.OL_DISCARD) not in original.calls
+
+
+def test_a_reply_that_is_not_threaded_says_so(monkeypatch):
+    client, *_ = _reply_client(monkeypatch, _FakeOriginal(_FakeReplyItem(in_reply_to="")))
+
+    created = _reply(client)
+
+    assert created.thread_header == "not_set"
+    assert "no In-Reply-To" in created.thread_header_reason
+
+
+def test_an_unknown_message_id_creates_nothing(monkeypatch):
+    client, app, _, _ = _reply_client(monkeypatch, None)
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client)
+
+    assert caught.value.code == "reply_source_not_found"
+    assert app.created == [] and app.mail.calls == []
+
+
+def test_an_unopenable_msg_file_creates_nothing(monkeypatch, tmp_path):
+    client, app, _, _ = _reply_client(monkeypatch, None)
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client, reply_to=ReplyTarget(REPLY_BY_MSG_PATH, str(_msg_file(tmp_path))))
+
+    assert caught.value.code == "reply_source_not_found"
+    assert "Cannot open the file" in str(caught.value)
+    assert app.created == [] and app.mail.calls == []
+
+
+def test_an_original_that_is_not_a_mail_is_not_replied_to(monkeypatch, tmp_path):
+    original = _FakeOriginal(_FakeReplyItem())
+    original.Class = 26  # a calendar item
+    client, *_ = _reply_client(monkeypatch, original)
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client, reply_to=ReplyTarget(REPLY_BY_MSG_PATH, str(_msg_file(tmp_path))))
+
+    assert caught.value.code == "reply_source_not_found"
+    assert original.calls == [("Close", mapi.OL_DISCARD)]
+
+
+def test_outlook_refusing_to_reply_is_its_own_error_and_saves_nothing(monkeypatch, tmp_path):
+    reply = _FakeReplyItem()
+    original = _FakeOriginal(reply, refuse_reply=True)
+    client, *_ = _reply_client(monkeypatch, original)
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client, reply_to=ReplyTarget(REPLY_BY_MSG_PATH, str(_msg_file(tmp_path))))
+
+    assert caught.value.code == "reply_unavailable"
+    assert "no account to reply from" in str(caught.value)
+    assert original.calls[-1] == ("Close", mapi.OL_DISCARD)
+    assert reply.calls == []
+
+
+def test_a_reply_with_no_readable_body_is_refused_rather_than_losing_the_quote(monkeypatch):
+    reply = _FakeReplyItem(quote_html="")
+    client, *_ = _reply_client(monkeypatch, _FakeOriginal(reply))
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client, display=False)
+
+    assert caught.value.code == "reply_unavailable"
+    assert ("Save",) not in reply.calls and reply.calls[-1] == ("Close", mapi.OL_DISCARD)
+
+
+def test_an_undisplayed_reply_still_keeps_the_quote(monkeypatch):
+    reply = _FakeReplyItem()
+    client, *_ = _reply_client(monkeypatch, _FakeOriginal(reply))
+
+    created = _reply(client, display=False)
+
+    assert created.displayed is False
+    assert reply.HTMLBody == f"<html><body>{mark_body_html('<p>My answer</p>')}{QUOTE}</body></html>"
+
+
+# -- document, update, fingerprint, process --
+
+def test_the_reply_document_reports_what_was_replied_to():
+    class _Client(FakeDraftClient):
+        def create_draft(self, **kwargs) -> CreatedDraft:
+            self.drafts.append(kwargs)
+            return CreatedDraft(
+                entry_id="draft-entry-1", displayed=True, subject="RE: Original subject",
+                to=["sender@example.invalid"], cc=["other@example.invalid"],
+                replied_to_message_id=ORIGINAL_ID, thread_header="set",
+            )
+
+    spec = draft.parse_spec({"body_text": "Hi", "reply_to": {"message_id": ORIGINAL_ID}})
+
+    doc = draft.create(_Client(), spec, SELF)
+
+    assert doc["subject"] == "RE: Original subject"
+    assert (doc["to"], doc["cc"], doc["bcc"]) == (["sender@example.invalid"], ["other@example.invalid"], [SELF])
+    assert doc["reply_to"] == {"message_id": ORIGINAL_ID, "reply_all": False}
+    assert (doc["replied_to_message_id"], doc["thread_header"], doc["thread_header_reason"]) == (
+        ORIGINAL_ID, "set", "",
+    )
+
+
+def test_a_new_mail_document_says_it_is_not_a_reply():
+    doc = draft.create(FakeDraftClient(), draft.parse_spec(_spec()), SELF)
+
+    assert (doc["reply_to"], doc["thread_header"]) == (None, "not_a_reply")
+    assert "replied_to_message_id" not in doc
+
+
+def test_updating_a_reply_keeps_its_recipients_subject_and_quote(monkeypatch):
+    mail = _FakeExistingMail(f"<html><body>{mark_body_html('<p>Old</p>')}{SIG}{QUOTE}</body></html>")
+    mail.To, mail.Subject = "sender@example.invalid", "RE: Original subject"
+
+    _update(monkeypatch, mail, to=None, cc=None, subject=None, attachments=[])
+
+    assert (mail.To, mail.Subject) == ("sender@example.invalid", "RE: Original subject")
+    assert mail.HTMLBody == f"<html><body>{mark_body_html('<p>New</p>')}{SIG}{QUOTE}</body></html>"
+
+
+def test_the_update_document_does_not_claim_recipients_it_left_alone():
+    client = FakeDraftClient()
+    spec = draft.parse_spec({"body_text": "Hi", "reply_to": {"message_id": ORIGINAL_ID}})
+
+    doc = draft.update(client, "draft-entry-1", spec, SELF)
+
+    assert (doc["to"], doc["cc"], doc["subject"]) == (None, None, None)
+    assert doc["thread_header"] == "unchanged" and doc["updated"] is True
+    assert client.updates[0]["to"] is None
+
+
+def test_the_fingerprint_binds_the_quoted_original_but_the_preview_region_does_not():
+    from email_archiver import send
+    from email_archiver.outlook.drafts import DraftSnapshot
+
+    def snapshot(quote: str) -> DraftSnapshot:
+        html = f"<html><body>{mark_body_html('<p>Answer</p>')}{quote}</body></html>"
+        return DraftSnapshot(
+            entry_id="e", subject="RE: S", to=["a@example.invalid"], cc=[], bcc=[SELF],
+            html_body=html, body_region_html=mapi.marked_body_region(html), attachments=[],
+        )
+
+    first, changed = snapshot("<blockquote>one</blockquote>"), snapshot("<blockquote>two</blockquote>")
+
+    assert send.fingerprint(first)["hash"] != send.fingerprint(changed)["hash"]
+    assert send.fingerprint(first)["parts"]["body"] != send.fingerprint(changed)["parts"]["body"]
+    assert send.read_document(first)["body"]["region_text"] == "Answer"
+    assert "one" in send.read_document(first)["body"]["html"]
+
+
+def test_a_reply_spec_on_the_command_line_creates_a_reply(batch_process):
+    code, doc, clients = batch_process({"body_text": "Hi", "reply_to": {"message_id": ORIGINAL_ID}})
+
+    assert code == main_batch.EXIT_OK
+    assert clients[0].drafts[0]["reply_to"] == ReplyTarget(REPLY_BY_MESSAGE_ID, ORIGINAL_ID)
+    assert clients[0].drafts[0]["to"] is None and clients[0].drafts[0]["subject"] is None
+    assert doc["reply_to"] == {"message_id": ORIGINAL_ID, "reply_all": False}
+
+
+@pytest.mark.parametrize("code", ["reply_source_not_found", "reply_unavailable"])
+def test_a_reply_that_cannot_start_exits_2_with_its_own_code(batch_process, code):
+    refusal = ReplySourceError(code, "synthetic reason")
+
+    exit_code, doc, _ = batch_process(
+        {"body_text": "Hi", "reply_to": {"message_id": ORIGINAL_ID}}, refuse_create=refusal,
+    )
+
+    assert exit_code == main_batch.EXIT_CANNOT_START
+    assert doc["error"] == {"code": code, "message": "synthetic reason"}
+
+
+def test_a_bad_reply_spec_exits_2_without_starting_outlook(batch_process):
+    code, doc, clients = batch_process({"body_text": "Hi", "reply_all": True})
+
+    assert code == main_batch.EXIT_CANNOT_START
+    assert doc["error"]["code"] == "bad_input" and "reply_all" in doc["error"]["message"]
+    assert clients == []
