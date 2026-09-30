@@ -26,7 +26,9 @@ Exit codes:
        still have failed, each with its own `error` inside the document
     2  the run could not start: no config, unreadable input, a folder outside
        the archive roots, Outlook unreachable, (draft) no self address to
-       blind-copy, (draft --update / read / send) a draft that is gone, sent,
+       blind-copy, (draft) a `reply_to` mail that cannot be found or replied to
+       (`reply_source_not_found` / `reply_unavailable`), (draft --update / read /
+       send) a draft that is gone, sent,
        outside Drafts or (update) has no marked body region, or (send) a draft
        that is not what was approved — `approval_mismatch`, naming the parts
        under `error.differs` — or has a recipient with no readable address.
@@ -56,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from email_archiver import batch, draft, send
 from email_archiver.config import load_config, setup_logging
 from email_archiver.outlook.client import OutlookClient
-from email_archiver.outlook.drafts import DraftUpdateError
+from email_archiver.outlook.drafts import DraftUpdateError, ReplySourceError
 from email_archiver.outlook.mapi import OutlookUnavailableError
 from email_archiver.outlook.process import DEFAULT_START_TIMEOUT_SECONDS
 from email_archiver.text import normalize_message_id
@@ -282,7 +284,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_draft.add_argument(
         "--spec", required=True,
         help="JSON file: {to, cc, bcc, subject, body_text | body_html, "
-             "attachments, ref, display}",
+             "attachments, ref, display, reply_to: {message_id | msg_path}, reply_all}",
     )
     p_draft.add_argument(
         "--update", metavar="ENTRY_ID",
@@ -444,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
         except DraftUpdateError as exc:
             # Raised before the item was changed: the caller learns which of
             # gone / not editable / unmarked it is, never a generic failure.
+            return _fail(verb, exc.code, str(exc))
+        except ReplySourceError as exc:
+            # Raised before anything was saved: the mail to reply to could not
+            # be found, or Outlook would not reply to it.
             return _fail(verb, exc.code, str(exc))
         except send.SendRefused as exc:
             # Raised before Send(): nothing went out, and the caller learns
