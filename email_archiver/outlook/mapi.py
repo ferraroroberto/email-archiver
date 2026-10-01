@@ -47,8 +47,11 @@ def safe_com(read: Any, default: Any) -> Any:
         return default
 
 
-# olFolderInbox. Batch mode reads exactly one folder and files out of it.
+# olFolderInbox. Batch mode files out of the Inbox, and (opt-in, issue #103)
+# out of Sent Items.
 OL_FOLDER_INBOX = 6
+# olFolderSentMail: where a sent mail's own copy lives, carrying its headers.
+OL_FOLDER_SENT_MAIL = 5
 # MailItem. Anything else in the Inbox (meeting requests, reports) is skipped.
 OL_CLASS_MAIL_ITEM = 43
 # DASL name for MAPI PR_INTERNET_MESSAGE_ID (0x1035001F), used both to read the
@@ -89,6 +92,10 @@ DASL_TRANSPORT_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
 DASL_IN_REPLY_TO_ID = "http://schemas.microsoft.com/mapi/proptag/0x1042001F"
 # DASL name for the received time, used by the `plan --since` Restrict filter.
 DASL_DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
+# MAPI PR_CLIENT_SUBMIT_TIME (0x00390040), the time a mail was sent, for the
+# `plan --folder sent --since` Restrict filter. A Sent Items mail has no
+# meaningful received time, so the received-date literal would match nothing.
+DASL_DATE_SENT = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
 
 
 # MAPI_E_OBJECT_CHANGED. Outlook raises it from MailItem.Move (and Delete, and
@@ -184,6 +191,15 @@ def received_since_filter(since: datetime) -> str:
     """
     utc = since.astimezone(timezone.utc)
     return f"@SQL=\"{DASL_DATE_RECEIVED}\" >= '{utc:%Y-%m-%d %H:%M}'"
+
+
+def sent_since_filter(since: datetime) -> str:
+    """The ``Items.Restrict`` DASL filter for mail sent at/after ``since``.
+
+    Same UTC-literal rule as :func:`received_since_filter`.
+    """
+    utc = since.astimezone(timezone.utc)
+    return f"@SQL=\"{DASL_DATE_SENT}\" >= '{utc:%Y-%m-%d %H:%M}'"
 
 
 _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)

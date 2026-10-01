@@ -315,8 +315,22 @@ A caller that already knows which mail it wants to file, and where, doesn't need
 | `--search <text>` | Mail whose subject, sender, recipients or body preview contains the text, case-insensitively. Repeatable: every term must match. |
 | `--ref <token>` | Mail whose `X-Archive-Ref` header equals the token, the one `draft` stamps. Headers are read only for mail that passed the cheaper filters. The header survives sending on an IMAP mailbox (verified), but that depends on the account, so a caller keeps a fallback match (`--search` on the subject, `--since` the send time). |
 | `--candidates 0` | No folder ranking: each mail comes back with `candidates: []`, for a caller that already knows the destination. |
+| `--folder inbox\|sent` | Where to read from; `inbox` is the default. See [Filing from Sent Items](#filing-from-sent-items). Any other value is `bad_input`. |
 
 A filtered document adds `filters: {message_ids, since, search, ref}` (what was applied), and `counts.inbox` counts the Inbox mails that matched. Each mail has the same shape as in a full plan.
+
+#### Filing from Sent Items
+
+A sent mail's self-BCC copy does not always reach the Inbox (a large attachment, a suppressed self-copy), and the sent mail itself, carrying the same `X-Archive-Ref`, sits in Sent Items. A caller that wants that copy asks for it explicitly:
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py plan --folder sent --ref <token> --since 2026-09-30T11:13 --candidates 0
+# decisions.json: [{"message_id": "<from the plan>", "folder_path": "<a folder under an archive root>", "date_prefix": "auto", "source": "sent"}]
+```
+
+- `plan --folder sent` reads Sent Items; `--since` compares the **sent** time (`PR_CLIENT_SUBMIT_TIME`), and `--message-id` is looked up in Sent Items (an id not found is skipped with `reason: "not_in_sent"`). The document's `filters` gains `folder: "sent"`, `counts` carries `sent` where an Inbox plan carries `inbox`, and each mail reports `in_inbox: false`. An Inbox plan's document is unchanged.
+- An `apply` decision with `"source": "sent"` looks the mail up in Sent Items (`not_in_sent` when it is not there), archives and tags it as usual, and does **not** move it: Sent Items is the record of what went out. The result reports `moved: false` and `move_via: "kept_in_sent"`. Once the scan has indexed the file, `plan` marks the mail `already_archived` and a second apply reuses it (`reused: true`) instead of filing a second copy; until then the mail, still in Sent Items, would be filed again, so a caller records the filing and rescans. A `source` other than `inbox` / `sent` is a per-mail `bad_decision`, never read as the Inbox.
+- `revert` does not undo a Sent Items filing's move, because there was none: it deletes the listed files and reports the mail `not_in_archive_folder`.
 
 Two `apply` / `revert` additions serve the same caller:
 

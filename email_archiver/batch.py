@@ -99,9 +99,18 @@ DEFAULT_CANDIDATES = 10
 # Why a mail got no plan entry.
 SKIP_NO_MESSAGE_ID = "no_message_id"
 SKIP_NOT_IN_INBOX = "not_in_inbox"  # a --message-id that matched nothing
+SKIP_NOT_IN_SENT = "not_in_sent"    # the same, under `--folder sent`
+
+# Where a plan reads from and an apply decision files from (issue #103).
+# The Inbox is the default and the only source that moves the mail out; Sent
+# Items is opt-in, for a sent mail whose self-BCC copy never reached the Inbox.
+SOURCE_INBOX = "inbox"
+SOURCE_SENT = "sent"
+SOURCES = (SOURCE_INBOX, SOURCE_SENT)
 
 # `error.code` values, and the reason each one is worth telling apart.
 ERROR_NOT_IN_INBOX = "not_in_inbox"            # already moved, or never there
+ERROR_NOT_IN_SENT = "not_in_sent"              # a `source: sent` mail not in Sent Items
 ERROR_NOT_IN_ARCHIVE = "not_in_archive_folder"  # revert cannot find it back
 ERROR_BAD_DECISION = "bad_decision"             # caller sent an unusable entry
 ERROR_ARCHIVE_FAILED = "archive_failed"         # disk write / Outlook SaveAs
@@ -130,6 +139,9 @@ ERROR_CATEGORY_FAILED = "category_failed"
 MOVE_VIA_REFETCHED = "refetched"     # a reference read back out of the store
 MOVE_VIA_ORIGINAL = "original"       # the re-acquire failed; the original moved
 MOVE_VIA_SAVED_RETRY = "saved_retry"  # refused with 0x80040109, saved, retried
+# A `source: sent` mail is archived and tagged but never moved: Sent Items is
+# the user's record of what went out, so the mail stays where it is.
+MOVE_VIA_KEPT_IN_SENT = "kept_in_sent"
 
 
 # ---------------------------------------------------------------- helpers ---
@@ -184,7 +196,7 @@ def _candidate_dict(
     }
 
 
-def _mail_dict(mail: Any) -> dict[str, Any]:
+def _mail_dict(mail: Any, *, in_inbox: bool = True) -> dict[str, Any]:
     """The fields of a live mail every verb reports, in one shape."""
     return {
         "message_id": mail.message_id,
@@ -196,13 +208,14 @@ def _mail_dict(mail: Any) -> dict[str, Any]:
         "body_preview": mail.body_preview,
         "attachment_count": mail.attachment_count,
         "flag_status": mail.flag_status,
-        # Always true today — ``plan`` enumerates the Inbox, so a mail it
-        # reports is in it by construction. Stated anyway because it is the
+        # True for every Inbox plan — it enumerates the Inbox, so a mail it
+        # reports is in it by construction (false only under `--folder sent`,
+        # where the mail is in Sent Items). Stated anyway because it is the
         # fact that makes an ``already_archived`` mail *retryable*: its files
         # are on disk but it never left the Inbox, and a consumer reading only
         # ``already_archived`` cannot tell that from a mail that is properly
         # filed and gone (issue #59).
-        "in_inbox": True,
+        "in_inbox": in_inbox,
     }
 
 
@@ -305,18 +318,27 @@ class PlanFilters:
     since: datetime | None = None
     search: tuple[str, ...] = ()
     ref: str | None = None
+    folder: str = SOURCE_INBOX
 
     @property
     def active(self) -> bool:
-        return bool(self.message_ids or self.since or self.search or self.ref)
+        return bool(
+            self.message_ids or self.since or self.search or self.ref
+            or self.folder != SOURCE_INBOX
+        )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        doc = {
             "message_ids": list(self.message_ids),
             "since": self.since.isoformat(timespec="minutes") if self.since else None,
             "search": list(self.search),
             "ref": self.ref,
         }
+        # Only when it is not the default, so an Inbox plan's document stays
+        # exactly what it always was.
+        if self.folder != SOURCE_INBOX:
+            doc["folder"] = self.folder
+        return doc
 
 
 def _plan_source(
@@ -325,15 +347,24 @@ def _plan_source(
     """The mails a plan looks at: looked up by id, restricted by date, or the
     whole Inbox — cheapest first. A ``--message-id`` matching nothing is
     appended to ``not_found``."""
+    sent = filters.folder == SOURCE_SENT
     if filters.message_ids:
         for message_id in filters.message_ids:
-            item = client.find_by_message_id(message_id, None)
+            item = (
+                client.find_sent_by_message_id(message_id) if sent
+                else client.find_by_message_id(message_id, None)
+            )
             if item is None:
                 not_found.append(message_id)
                 continue
             yield client.read_mail(item, preview_len)
     elif filters.since is not None:
-        yield from client.iter_inbox_received_since(filters.since, preview_len)
+        if sent:
+            yield from client.iter_sent_since(filters.since, preview_len)
+        else:
+            yield from client.iter_inbox_received_since(filters.since, preview_len)
+    elif sent:
+        yield from client.iter_sent(preview_len)
     else:
         yield from client.iter_inbox(preview_len)
 
@@ -343,7 +374,13 @@ def _matches(client: Any, mail: Any, filters: PlanFilters) -> bool:
     header read. ``since`` is checked here even after a server-side Restrict:
     this is the exact comparison, the Restrict only narrows the walk."""
     if filters.since is not None:
-        when = mail.date_received or mail.date_sent
+        # A Sent Items mail's own clock is when it was sent; its received time
+        # is whatever the store stamped and means nothing here.
+        when = (
+            (mail.date_sent or mail.date_received)
+            if filters.folder == SOURCE_SENT
+            else (mail.date_received or mail.date_sent)
+        )
         if when is None or when < filters.since:
             return False
     if filters.search:
@@ -406,7 +443,7 @@ def plan(
                 })
                 continue
 
-            entry = _mail_dict(mail)
+            entry = _mail_dict(mail, in_inbox=filters.folder == SOURCE_INBOX)
             archived_as = repo.find_path_by_message_id(mail.message_id)
             entry["already_archived"] = archived_as
             if archived_as:
@@ -428,9 +465,10 @@ def plan(
     finally:
         conn.close()
 
-    in_inbox = len(mails) + len(skipped)
+    listed = len(mails) + len(skipped)
+    not_found_reason = SKIP_NOT_IN_SENT if filters.folder == SOURCE_SENT else SKIP_NOT_IN_INBOX
     skipped.extend(
-        {"entry_id": "", "subject": "", "reason": SKIP_NOT_IN_INBOX, "message_id": mid}
+        {"entry_id": "", "subject": "", "reason": not_found_reason, "message_id": mid}
         for mid in not_found
     )
 
@@ -438,7 +476,9 @@ def plan(
     if filters.active:
         doc["filters"] = filters.as_dict()
     doc["counts"] = {
-        "inbox": in_inbox,
+        # The mails the plan read: "inbox" as it always was, "sent" under
+        # `--folder sent` so the key never says Inbox about Sent Items.
+        filters.folder: listed,
         "planned": len(mails) - already,
         "already_archived": already,
         "skipped": len(skipped),
@@ -446,8 +486,9 @@ def plan(
     doc["mails"] = mails
     doc["skipped"] = skipped
     logger.info(
-        "Plan: %d mail(s) in the Inbox%s, %d already archived, %d skipped.",
-        in_inbox, f" matching {filters.as_dict()}" if filters.active else "",
+        "Plan: %d mail(s) in %s%s, %d already archived, %d skipped.",
+        listed, "Sent Items" if filters.folder == SOURCE_SENT else "the Inbox",
+        f" matching {filters.as_dict()}" if filters.active else "",
         already, len(skipped),
     )
     return doc
@@ -499,6 +540,13 @@ def apply(
 
     ``category`` overrides ``outlook.category`` for this run; the document's
     ``category`` reports the one used.
+
+    A decision may carry ``"source": "sent"`` (default ``"inbox"``, anything
+    else is a ``bad_decision``): the mail is then looked up in Sent Items,
+    archived and tagged like any other, but **not moved** — ``moved`` stays
+    false and ``move_via`` is ``kept_in_sent`` (issue #103). ``revert`` does not
+    undo that move, since there was none: it deletes the files and reports the
+    mail ``not_in_archive_folder``.
 
     A decision for a mail the index already holds — the one ``plan`` reported
     ``already_archived``, still sitting in the Inbox because an earlier run
@@ -593,6 +641,17 @@ def _apply_one(
         }
         return result
 
+    # An unknown source is refused, never read as the Inbox: filing the wrong
+    # copy of a mail is not recoverable the way not filing one is.
+    source = raw.get("source", SOURCE_INBOX)
+    if source not in SOURCES:
+        result["error"] = {
+            "code": ERROR_BAD_DECISION,
+            "message": f"source {source!r} is not one of {', '.join(SOURCES)}",
+        }
+        return result
+    from_sent = source == SOURCE_SENT
+
     # Before Outlook is asked anything: the archiver creates a missing folder,
     # so an unchecked path is a write anywhere on the disk.
     _, refusal = _resolve_under_roots(folder_path, roots)
@@ -607,19 +666,24 @@ def _apply_one(
         }
         return result
 
+    where = "Sent Items" if from_sent else "the Inbox"
+    not_found_code = ERROR_NOT_IN_SENT if from_sent else ERROR_NOT_IN_INBOX
     try:
-        item = client.find_by_message_id(message_id, None)
+        item = (
+            client.find_sent_by_message_id(message_id) if from_sent
+            else client.find_by_message_id(message_id, None)
+        )
     except Exception as exc:  # a COM failure on one lookup, not the run
         result["error"] = {
-            "code": ERROR_NOT_IN_INBOX,
-            "message": f"Inbox lookup failed: {type(exc).__name__}: {exc}",
+            "code": not_found_code,
+            "message": f"{where} lookup failed: {type(exc).__name__}: {exc}",
         }
         return result
 
     if item is None:
         result["error"] = {
-            "code": ERROR_NOT_IN_INBOX,
-            "message": "no mail with this Message-ID is in the Inbox",
+            "code": not_found_code,
+            "message": f"no mail with this Message-ID is in {where}",
         }
         return result
 
@@ -655,8 +719,13 @@ def _apply_one(
         result["files"] = [archived.email_path, *archived.attachment_paths]
 
     try:
-        moved, via = _move_out_of_inbox(client, item, archive_folder, message_id)
-        result["moved"] = True
+        if from_sent:
+            # Filed from Sent Items: the files are written, the mail stays.
+            moved, via = item, MOVE_VIA_KEPT_IN_SENT
+            logger.info("Archived %s from Sent Items; leaving it there.", message_id)
+        else:
+            moved, via = _move_out_of_inbox(client, item, archive_folder, message_id)
+            result["moved"] = True
         result["move_via"] = via
         result["entry_id"] = client.entry_id(moved)
     except Exception as exc:
@@ -674,7 +743,7 @@ def _apply_one(
         logger.exception("Tagging %s with %r failed", message_id, category)
         result["error"] = {
             "code": ERROR_CATEGORY_FAILED,
-            "message": f"the mail was filed and moved, but not tagged: "
+            "message": f"the mail was filed{'' if from_sent else ' and moved'}, but not tagged: "
                        f"{type(exc).__name__}: {exc}",
         }
         return result

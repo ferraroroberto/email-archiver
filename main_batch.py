@@ -12,6 +12,7 @@ one the caller approved (`read` reports it).
     python main_batch.py plan --since 2026-09-15 --search invoice --candidates 0
     python main_batch.py plan --message-id <id> [--message-id <id> ...]
     python main_batch.py plan --ref <token> --candidates 0
+    python main_batch.py plan --folder sent --ref <token> --since 2026-09-15T10:00 --candidates 0
     python main_batch.py apply --decisions decisions.json [--renumber] [--category <name>]
     python main_batch.py revert --items revert.json [--renumber] [--category <name>]
     python main_batch.py renumber --folder "<a folder>" [--dry-run]
@@ -157,8 +158,15 @@ def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
     if ref == "":
         raise ValueError("--ref must not be blank")
 
+    folder = args.folder.strip().casefold()
+    if folder not in batch.SOURCES:
+        raise ValueError(
+            f"--folder {args.folder!r} is not one of {', '.join(batch.SOURCES)}"
+        )
+
     return batch.PlanFilters(
-        message_ids=tuple(message_ids), since=since, search=tuple(search), ref=ref
+        message_ids=tuple(message_ids), since=since, search=tuple(search), ref=ref,
+        folder=folder,
     )
 
 
@@ -233,10 +241,17 @@ def _build_parser() -> argparse.ArgumentParser:
              "this token.",
     )
 
+    p_plan.add_argument(
+        "--folder", default=batch.SOURCE_INBOX,
+        help="Where to read mail from: 'inbox' (default) or 'sent' (Sent Items; "
+             "--since then compares the sent time).",
+    )
+
     p_apply = sub.add_parser("apply", help="Archive, move and tag decided mails.")
     p_apply.add_argument(
         "--decisions", required=True,
-        help='JSON file: [{message_id, folder_path, date_prefix: true|false|"auto"}, ...]',
+        help='JSON file: [{message_id, folder_path, date_prefix: true|false|"auto", '
+             'source: "inbox"|"sent" (optional)}, ...]',
     )
     p_apply.add_argument(
         "--renumber", action="store_true",

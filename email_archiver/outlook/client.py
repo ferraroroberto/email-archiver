@@ -38,11 +38,13 @@ from email_archiver.outlook.mapi import (
     DASL_X_ARCHIVE_REF,
     OL_CLASS_MAIL_ITEM,
     OL_FOLDER_INBOX,
+    OL_FOLDER_SENT_MAIL,
     OutlookUnavailableError,
     SelectedEmailError,
     header_value,
     received_since_filter,
     safe_com,
+    sent_since_filter,
     with_category,
     without_category,
 )
@@ -318,6 +320,9 @@ class OutlookClient(DraftSurface):
     def _inbox(self) -> Any:
         return self._namespace().GetDefaultFolder(OL_FOLDER_INBOX)
 
+    def _sent_items(self) -> Any:
+        return self._namespace().GetDefaultFolder(OL_FOLDER_SENT_MAIL)
+
     def _named_folder(self, name: str, *, create: bool = True) -> Any:
         """Return the folder ``name`` directly under the mailbox root.
 
@@ -376,6 +381,34 @@ class OutlookClient(DraftSurface):
             yield from self._iter_items(items, preview_len)
             return
         logger.info("Received-date filter applied server-side: %s", flt)
+        yield from self._iter_items(restricted, preview_len)
+
+    def iter_sent(self, preview_len: int = 500) -> Iterator[InboxMail]:
+        """Yield every MailItem in Sent Items (issue #103)."""
+        yield from self._iter_items(self._sent_items().Items, preview_len)
+
+    def iter_sent_since(
+        self, since: datetime, preview_len: int = 500
+    ) -> Iterator[InboxMail]:
+        """Yield the Sent Items mails sent at or after ``since``.
+
+        The same server-side narrowing and whole-folder fallback as
+        :meth:`iter_inbox_received_since`, on the sent time; ``batch.plan``
+        still applies the exact check to every mail.
+        """
+        items = self._sent_items().Items
+        flt = sent_since_filter(since)
+        try:
+            restricted = items.Restrict(flt)
+        except Exception as exc:
+            logger.warning(
+                "The store rejected the sent-date filter (%s: %s); walking "
+                "all of Sent Items and checking each mail's date instead.",
+                type(exc).__name__, exc,
+            )
+            yield from self._iter_items(items, preview_len)
+            return
+        logger.info("Sent-date filter applied server-side: %s", flt)
         yield from self._iter_items(restricted, preview_len)
 
     def _iter_items(self, items: Any, preview_len: int) -> Iterator[InboxMail]:
@@ -459,7 +492,17 @@ class OutlookClient(DraftSurface):
         """
         if not message_id:
             return None
-        folder = self._resolve_folder(folder_name)
+        return self._find_in_folder(self._resolve_folder(folder_name), message_id)
+
+    def find_sent_by_message_id(self, message_id: str) -> Any | None:
+        """Return the Sent Items MailItem with this Message-ID, or ``None``
+        (issue #103). Same lookup, same empty-id rule, as
+        :meth:`find_by_message_id`."""
+        if not message_id:
+            return None
+        return self._find_in_folder(self._sent_items(), message_id)
+
+    def _find_in_folder(self, folder: Any, message_id: str) -> Any | None:
         if folder is None:
             return None
 
