@@ -539,6 +539,51 @@ def test_the_marker_is_found_after_outlook_requotes_it():
     assert replace_marked_body_html(existing, "<p>new</p>") == f"<body>{mark_body_html('<p>new</p>')}sig</body>"
 
 
+# What Outlook's editor stores for a reply drafted with the compose window open
+# (issue #105, read back live): the opening div survives, unquoted, the closing
+# comment does not, and each paragraph is padded with an empty <o:p>.
+WORD_REPLY = (
+    "<html><body lang=EN><div class=WordSection1>"
+    "<div id=archive-draft-body><p>New<o:p></o:p></p></div>"
+    '<p class=MsoNormal><o:p>&nbsp;</o:p></p><div id="_MailAutoSig">-- sig</div>'
+    '<div id="quote">On a day, they wrote:<blockquote>original text</blockquote></div>'
+    "</div></body></html>"
+)
+
+
+def test_a_region_whose_closing_comment_outlook_dropped_is_still_found():
+    assert mapi.marked_body_region(WORD_REPLY) == "<p>New<o:p></o:p></p>"
+    after = mapi.html_after_marked_region(WORD_REPLY)
+    assert after is not None
+    assert after.startswith('<p class=MsoNormal>') and "original text" in after and "archive-draft-body" not in after
+
+
+def test_a_commentless_region_with_its_own_nested_divs_ends_at_its_own_div():
+    existing = (
+        "<body><div id=archive-draft-body><div><div>deep</div></div><p>tail</p></div>"
+        f"{SIG}{QUOTE}</body>"
+    )
+
+    assert mapi.marked_body_region(existing) == "<div><div>deep</div></div><p>tail</p>"
+    assert mapi.html_after_marked_region(existing) == f"{SIG}{QUOTE}</body>"
+
+
+def test_the_body_of_a_commentless_reply_is_replaced_and_the_quote_kept():
+    updated = replace_marked_body_html(WORD_REPLY, "<p>Newer</p>")
+
+    assert updated is not None
+    assert mapi.marked_body_region(updated) == "<p>Newer</p>"
+    assert updated.endswith(WORD_REPLY[WORD_REPLY.index('<p class=MsoNormal>'):])
+    assert updated.count("original text") == 1
+
+
+def test_the_text_after_a_region_with_its_comment_is_the_same_text():
+    existing = f"<body>{mark_body_html('<p>x</p>')}{SIG}{QUOTE}</body>"
+
+    assert mapi.html_after_marked_region(existing) == f"{SIG}{QUOTE}</body>"
+    assert mapi.html_after_marked_region("<body>no markers</body>") is None
+
+
 @pytest.mark.parametrize("existing", [
     "", None, f"<html><body><p>no marker</p>{SIG}</body></html>",
     '<html><body><div id="archive-draft-body"><p>opened, never closed</p></body></html>',
@@ -1125,6 +1170,15 @@ def test_the_update_document_does_not_claim_recipients_it_left_alone():
     assert (doc["to"], doc["cc"], doc["subject"]) == (None, None, None)
     assert doc["thread_header"] == "unchanged" and doc["updated"] is True
     assert client.updates[0]["to"] is None
+
+
+def test_updating_a_reply_whose_comment_outlook_dropped_replaces_the_text_and_keeps_the_quote(monkeypatch):
+    mail = _FakeExistingMail(WORD_REPLY)
+
+    _update(monkeypatch, mail, to=None, cc=None, subject=None, attachments=[])
+
+    assert mapi.marked_body_region(mail.HTMLBody) == "<p>New</p>"
+    assert mail.HTMLBody.count("original text") == 1 and '<div id="quote">' in mail.HTMLBody
 
 
 def test_the_fingerprint_binds_the_quoted_original_but_the_preview_region_does_not():

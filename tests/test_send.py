@@ -148,6 +148,7 @@ def test_read_reports_the_item_as_stored_and_changes_nothing(monkeypatch):
     assert (doc["to"], doc["cc"], doc["bcc"], doc["unreadable_recipients"]) == ([OTHER], [], [SELF], 0)
     assert doc["body"] == {
         "html": HTML, "region_html": REGION, "region_text": "Hello,\n\nSecond paragraph & more.",
+        "after_region_html": '<div id="_MailAutoSig">-- sig</div></body></html>',
     }
     assert doc["attachments"] == [{
         "name": "note.txt", "size_bytes": len(b"synthetic bytes"),
@@ -155,6 +156,35 @@ def test_read_reports_the_item_as_stored_and_changes_nothing(monkeypatch):
     }]
     assert set(doc["fingerprint"]["parts"]) == set(send.PARTS)
     assert mail.calls == [] and mail.HTMLBody == HTML
+
+
+QUOTED_ORIGINAL = '<div id="quote">On a day, they wrote:<blockquote>original text</blockquote></div>'
+
+
+def test_a_reply_as_outlook_re_serialized_it_still_reads_back_its_text_and_its_quote(monkeypatch):
+    # Issue #105: with the compose window open Outlook drops the region's closing
+    # comment and pads each paragraph with an empty <o:p>. The read-back used to
+    # find no region, so a caller could neither show the quote nor approve.
+    mail = _FakeDraft()
+    mail.HTMLBody = (
+        "<html><body><div class=WordSection1>"
+        "<div id=archive-draft-body><p>Hello,<o:p></o:p></p><p>Second paragraph &amp; more.<o:p></o:p></p></div>"
+        f'<div id="_MailAutoSig">-- sig</div>{QUOTED_ORIGINAL}</div></body></html>'
+    )
+
+    body = send.read_document(_client(monkeypatch, mail).read_draft("draft-1"))["body"]
+
+    assert body["region_text"] == "Hello,\n\nSecond paragraph & more."
+    assert body["after_region_html"].startswith('<div id="_MailAutoSig">') and "original text" in body["after_region_html"]
+
+
+def test_a_body_without_the_region_reports_nothing_after_it(monkeypatch):
+    mail = _FakeDraft()
+    mail.HTMLBody = f"<html><body><p>typed over</p>{QUOTED_ORIGINAL}</body></html>"
+
+    body = send.read_document(_client(monkeypatch, mail).read_draft("draft-1"))["body"]
+
+    assert (body["region_html"], body["region_text"], body["after_region_html"]) == (None, None, None)
 
 
 def test_the_fingerprint_is_stable_while_nothing_changes(monkeypatch):

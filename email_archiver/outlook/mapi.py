@@ -209,10 +209,20 @@ _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 # exactly what `create_draft` wrote and leave everything after it — the
 # signature Outlook inserted — alone. The closing comment, not the bare
 # `</div>`, is what ends the region: a caller's own HTML may nest divs.
+#
+# Outlook's editor drops that comment: with the compose window open it
+# re-serializes the HTML as it is set, and on a reply (a Word-flavoured quote)
+# the comment never survives (issue #105; an empty div, span or anchor after
+# the region does not either). What does survive is the opening
+# `<div id=...>` and the div nesting, so a region whose comment is gone ends at
+# the `</div>` that closes its own opening tag.
 DRAFT_BODY_OPEN = '<div id="archive-draft-body">'
 DRAFT_BODY_CLOSE = "</div><!--/archive-draft-body-->"
 _DRAFT_BODY_OPEN_TAG = re.compile(r"""<div\s+id=["']?archive-draft-body["']?\s*>""", re.IGNORECASE)
 _DRAFT_BODY_CLOSE_TAG = re.compile(r"</div>\s*<!--\s*/archive-draft-body\s*-->", re.IGNORECASE)
+_DIV_TAG = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
+# Word pads a paragraph it re-serialized with an empty `<o:p></o:p>`.
+_WORD_PARAGRAPH_PAD = re.compile(r"<o:p>\s*</o:p>", re.IGNORECASE)
 
 
 def mark_body_html(body_html: str) -> str:
@@ -220,13 +230,35 @@ def mark_body_html(body_html: str) -> str:
     return f"{DRAFT_BODY_OPEN}{body_html}{DRAFT_BODY_CLOSE}"
 
 
+def strip_word_padding(html_fragment: str) -> str:
+    """``html_fragment`` without the empty ``<o:p></o:p>`` Word adds to paragraphs."""
+    return _WORD_PARAGRAPH_PAD.sub("", html_fragment)
+
+
+def _matching_div_close(existing: str, start: int) -> re.Match | None:
+    """The ``</div>`` closing the div whose opening tag ends at ``start``, or ``None``."""
+    depth = 1
+    for tag in _DIV_TAG.finditer(existing, start):
+        depth += -1 if tag.group(0).startswith("</") else 1
+        if depth == 0:
+            return tag
+    return None
+
+
 def _marked_region_span(existing: str) -> tuple[re.Match, re.Match] | None:
-    """The opening and (last) closing marker of the body region, or ``None``."""
+    """The opening marker and the closing tag of the body region, or ``None``.
+
+    The closing tag is the last closing comment marker when there is one, else
+    the ``</div>`` matching the opening tag (Outlook dropped the comment).
+    """
     opened = _DRAFT_BODY_OPEN_TAG.search(existing)
     if opened is None:
         return None
     closes = list(_DRAFT_BODY_CLOSE_TAG.finditer(existing, opened.end()))
-    return (opened, closes[-1]) if closes else None
+    if closes:
+        return opened, closes[-1]
+    closed = _matching_div_close(existing, opened.end())
+    return None if closed is None else (opened, closed)
 
 
 def marked_body_region(existing_html: str | None) -> str | None:
@@ -235,6 +267,15 @@ def marked_body_region(existing_html: str | None) -> str | None:
     existing = existing_html or ""
     span = _marked_region_span(existing)
     return None if span is None else existing[span[0].end():span[1].start()]
+
+
+def html_after_marked_region(existing_html: str | None) -> str | None:
+    """What follows the marked body region — the signature and, on a reply, the
+    quoted original — or ``None`` when the region cannot be found, since what
+    follows an unfound marker is not known."""
+    existing = existing_html or ""
+    span = _marked_region_span(existing)
+    return None if span is None else existing[span[1].end():]
 
 
 def recipient_address(recipient: Any) -> str:
@@ -261,11 +302,12 @@ def replace_marked_body_html(existing_html: str | None, body_html: str) -> str |
     """``existing_html`` with its marked body region replaced by ``body_html``.
 
     ``None`` when the region cannot be found — a draft created before the
-    markers existed, or one whose HTML Outlook rewrote. The caller refuses
-    then: replacing a guessed region could eat the signature or text the user
-    typed. The last closing marker is used, so a body that itself quotes the
-    marker text still ends where the tool's own region ends. Pure, like
-    ``insert_body_html``.
+    markers existed, or one whose opening marker Outlook rewrote away. The
+    caller refuses then: replacing a guessed region could eat the signature or
+    text the user typed. The last closing marker is used, so a body that itself
+    quotes the marker text still ends where the tool's own region ends; without
+    one (Outlook drops it) the region ends at the div its opening tag opened.
+    Pure, like ``insert_body_html``.
     """
     existing = existing_html or ""
     span = _marked_region_span(existing)
