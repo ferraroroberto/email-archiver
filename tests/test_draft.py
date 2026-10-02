@@ -1021,6 +1021,89 @@ def test_given_recipients_and_subject_override_outlooks(monkeypatch):
     assert (reply.To, reply.CC, reply.Subject) == ("x@example.invalid", "", "Own subject")
 
 
+def _sent_by_me(*, to=("them@example.invalid",), cc=(), unreadable=0, reply_all=False):
+    """An original the user sent: Outlook's reply to it is addressed to the user
+    (it answers the sender), while the original's own recipients are the people
+    the user wrote to (issue #105)."""
+    reply = _FakeReplyItem()
+    reply.Recipients = _FakeRecipients([_FakeRecipient(SELF.upper(), mapi.OL_TO)])
+    original = _FakeOriginal(reply)
+    original.Recipients = _FakeRecipients([
+        *(_FakeRecipient(a, mapi.OL_TO) for a in to),
+        *(_FakeRecipient(a, mapi.OL_CC) for a in cc),
+        *(_FakeRecipient("", mapi.OL_TO) for _ in range(unreadable)),
+        _FakeRecipient(SELF, mapi.OL_BCC),
+    ])
+    return reply, original
+
+
+def test_a_reply_to_a_mail_the_user_sent_is_addressed_to_its_recipients_not_to_the_user(monkeypatch):
+    reply, original = _sent_by_me(to=("them@example.invalid", "too@example.invalid"), cc=("cc@example.invalid",))
+    client, *_ = _reply_client(monkeypatch, original)
+
+    created = _reply(client, self_address=SELF)
+
+    assert (reply.To, reply.CC) == ("them@example.invalid; too@example.invalid", "")
+    assert created.recipients_from == "original_recipients"
+    assert ("Send",) not in reply.calls
+
+
+def test_reply_all_to_a_mail_the_user_sent_keeps_the_original_cc(monkeypatch):
+    reply, original = _sent_by_me(cc=("cc@example.invalid",))
+    client, *_ = _reply_client(monkeypatch, original)
+
+    _reply(client, self_address=SELF, reply_to=ReplyTarget(REPLY_BY_MESSAGE_ID, ORIGINAL_ID, reply_all=True))
+
+    assert (reply.To, reply.CC) == ("them@example.invalid", "cc@example.invalid")
+
+
+def test_a_reply_to_a_mail_the_user_sent_whose_recipients_cannot_be_read_is_refused(monkeypatch):
+    reply, original = _sent_by_me(unreadable=1)
+    client, *_ = _reply_client(monkeypatch, original)
+
+    with pytest.raises(ReplySourceError) as caught:
+        _reply(client, self_address=SELF)
+
+    assert caught.value.code == "reply_unavailable" and "give `to` explicitly" in str(caught.value)
+    assert ("Save",) not in reply.calls and reply.calls[-1] == ("Close", mapi.OL_DISCARD)
+
+
+def test_a_given_to_overrides_the_original_recipients_of_a_mail_the_user_sent(monkeypatch):
+    reply, original = _sent_by_me(unreadable=1)  # unreadable, but the caller named the recipient
+    client, *_ = _reply_client(monkeypatch, original)
+
+    created = _reply(client, self_address=SELF, to=["x@example.invalid"], cc=[])
+
+    assert (reply.To, reply.CC) == ("x@example.invalid", "")
+    assert created.recipients_from == "caller"
+
+
+def test_a_reply_to_incoming_mail_is_left_with_outlooks_recipients(monkeypatch):
+    reply = _FakeReplyItem()
+    client, *_ = _reply_client(monkeypatch, _FakeOriginal(reply))
+
+    created = _reply(client, self_address=SELF)
+
+    assert (reply.To, reply.CC) == ("", "")
+    assert created.recipients_from == "sender"
+
+
+def test_the_reply_document_says_who_the_reply_was_addressed_from():
+    class _Client(FakeDraftClient):
+        def create_draft(self, **kwargs) -> CreatedDraft:
+            self.drafts.append(kwargs)
+            return CreatedDraft(entry_id="e", to=["them@example.invalid"], recipients_from="original_recipients",
+                                thread_header="set")
+
+    client = _Client()
+    spec = draft.parse_spec({"body_text": "Hi", "reply_to": {"message_id": ORIGINAL_ID}})
+
+    doc = draft.create(client, spec, SELF)
+
+    assert doc["recipients_from"] == "original_recipients" and doc["to"] == ["them@example.invalid"]
+    assert client.drafts[0]["self_address"] == SELF
+
+
 def test_a_reply_by_msg_path_opens_the_file_and_closes_it_again_discarding(monkeypatch, tmp_path):
     reply = _FakeReplyItem()
     original = _FakeOriginal(reply)
