@@ -34,6 +34,7 @@ from typing import Any
 from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.draft import html_to_text
 from email_archiver.outlook.drafts import DraftSnapshot
+from email_archiver.outlook.mapi import html_after_marked_region, strip_word_padding
 from email_archiver.outlook.sending import send_if_approved
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,14 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
         "body": {
             "html": snapshot.html_body,
             "region_html": region,
-            "region_text": None if region is None else html_to_text(region),
+            # Word pads the paragraphs of a reply it re-serialized; that is not
+            # the caller's text, so it is not held against it.
+            "region_text": None if region is None else html_to_text(strip_word_padding(region)),
+            # The signature and, on a reply, the quoted original: what the
+            # caller's text sits above. Outlook drops the region's closing
+            # comment, so a caller cannot find the end of the region in
+            # `html` itself; `None` when the region is not there.
+            "after_region_html": html_after_marked_region(snapshot.html_body),
         },
         "attachments": [
             {"name": a.name, "size_bytes": a.size_bytes, "sha256": a.sha256}
