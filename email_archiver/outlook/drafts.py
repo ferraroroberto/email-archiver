@@ -49,6 +49,12 @@ REPLY_BY_MSG_PATH = "msg_path"
 THREAD_SET = "set"
 THREAD_NOT_SET = "not_set"
 
+# Who a reply was addressed from. Outlook's own ``Reply()`` answers the
+# original's sender, which on a mail the user sent is the user (issue #105).
+RECIPIENTS_SENDER = "sender"                      # Outlook's reply: the original's sender
+RECIPIENTS_ORIGINAL = "original_recipients"       # the original was sent by the user: its To / CC
+RECIPIENTS_CALLER = "caller"                      # the caller gave `to`
+
 
 @dataclass
 class ReplyTarget:
@@ -71,6 +77,7 @@ class CreatedDraft:
     are what the saved draft actually carries (Outlook computed them, unless the
     caller overrode them), ``replied_to_message_id`` is the original's own id and
     ``thread_header`` says whether the draft holds it as its In-Reply-To.
+    ``recipients_from`` says who the reply was addressed from (``RECIPIENTS_*``).
     """
 
     entry_id: str = ""
@@ -83,6 +90,7 @@ class CreatedDraft:
     replied_to_message_id: str = ""
     thread_header: str = ""        # THREAD_SET / THREAD_NOT_SET; "" for a new mail
     thread_header_reason: str = ""
+    recipients_from: str = ""      # RECIPIENTS_*; "" for a new mail
 
 
 @dataclass
@@ -202,6 +210,7 @@ class DraftSurface:
         ref: str | None,
         display: bool,
         reply_to: ReplyTarget | None = None,
+        self_address: str = "",
     ) -> CreatedDraft:
         """Create, save and (optionally) show a new mail. Never sends it.
 
@@ -210,6 +219,10 @@ class DraftSurface:
         quoted original, the ``Re:`` subject and the original's recipients.
         ``to`` / ``cc`` / ``subject`` of ``None`` keep what Outlook computed;
         anything given overrides it. The caller's body goes above the quote.
+        Outlook answers the sender, so a reply to a mail ``self_address`` sent
+        would come back addressed to ``self_address``: with no ``to`` given it
+        is addressed to that mail's own recipients instead (see
+        :meth:`_start_reply`).
 
         Every step that can fail on caller data (attachments, the ref header)
         runs before ``Display``, so a failure leaves no half-filled window on
@@ -223,10 +236,13 @@ class DraftSurface:
             raise OutlookUnavailableError("Outlook is no longer reachable over COM.")
 
         replied_to_id = ""
+        recipients_from = ""
         if reply_to is None:
             mail = app.CreateItem(OL_MAIL_ITEM)
         else:
-            mail, replied_to_id = self._start_reply(reply_to)
+            mail, replied_to_id, recipients_from = self._start_reply(
+                reply_to, self_address=self_address, to_given=to is not None,
+            )
         if to is not None:
             mail.To = "; ".join(to)
         if cc is not None:
@@ -272,16 +288,28 @@ class DraftSurface:
         created.entry_id = safe_com(lambda: str(mail.EntryID), "")
         if reply_to is not None:
             self._describe_reply(mail, created, replied_to_id)
+            created.recipients_from = recipients_from
         return created
 
-    def _start_reply(self, target: ReplyTarget) -> tuple[Any, str]:
-        """Outlook's reply item to ``target``, and the original's Message-ID.
+    def _start_reply(
+        self, target: ReplyTarget, *, self_address: str = "", to_given: bool = False,
+    ) -> tuple[Any, str, str]:
+        """Outlook's reply item to ``target``, the original's Message-ID, and
+        who the reply is addressed from (``RECIPIENTS_*``).
 
         Raises :class:`ReplySourceError` when the original cannot be found or
         opened, or Outlook will not reply to it (a ``.msg`` opened outside any
         store may have nowhere to reply from). ``Reply()`` only builds an
         unsaved item, so a refusal here has left nothing behind. An original
         opened from a file is closed again, discarding, once the reply exists.
+
+        ``Reply()`` answers the original's sender. When the original was sent
+        by ``self_address`` (a saved sent mail, or one in Sent Items) that
+        addresses the reply to the user, so the To / CC are taken from the
+        original's own recipients instead — Reply All keeps its CC, a plain
+        reply does not. Unreadable original recipients refuse the reply
+        (``reply_unavailable``) rather than leave it addressed to the user; a
+        caller that gave ``to`` has overridden the recipients and is not asked.
         """
         original = self._open_reply_source(target)
         try:
@@ -295,12 +323,36 @@ class DraftSurface:
                     REPLY_UNAVAILABLE,
                     f"Outlook could not reply to the original: {type(exc).__name__}: {exc}",
                 ) from exc
+            if mail is None:
+                raise ReplySourceError(REPLY_UNAVAILABLE, "Outlook returned no reply item for the original")
+            recipients_from = RECIPIENTS_CALLER if to_given else RECIPIENTS_SENDER
+            if not to_given and self_address and _addressed_to(mail, self_address):
+                self._readdress_to_original_recipients(original, mail, target.reply_all)
+                recipients_from = RECIPIENTS_ORIGINAL
         finally:
             if target.kind == REPLY_BY_MSG_PATH:
                 safe_com(lambda: original.Close(OL_DISCARD), None)
-        if mail is None:
-            raise ReplySourceError(REPLY_UNAVAILABLE, "Outlook returned no reply item for the original")
-        return mail, replied_to_id
+        return mail, replied_to_id, recipients_from
+
+    @staticmethod
+    def _readdress_to_original_recipients(original: Any, mail: Any, reply_all: bool) -> None:
+        """Point ``mail`` (a reply addressed to the user) at the recipients of
+        ``original``, or refuse: a draft addressed to the user is never kept."""
+        lines, unreadable = _recipient_lines(original)
+        to, cc = lines[OL_TO], lines[OL_CC] if reply_all else []
+        if not to or unreadable:
+            safe_com(lambda: mail.Close(OL_DISCARD), None)
+            raise ReplySourceError(
+                REPLY_UNAVAILABLE,
+                "the original was sent by you, so Outlook would address the reply to you, and its "
+                f"own recipients cannot be read ({len(to)} readable To, {unreadable} unreadable); "
+                "give `to` explicitly. Nothing was saved",
+            )
+        mail.To = "; ".join(to)
+        mail.CC = "; ".join(cc)
+        logger.info(
+            "Reply to a mail you sent: addressed to its %d recipient(s) instead of to you.", len(to),
+        )
 
     def _open_reply_source(self, target: ReplyTarget) -> Any:
         """The original as an Outlook MailItem, or :class:`ReplySourceError`."""
@@ -496,6 +548,12 @@ class DraftSurface:
         if closed:
             logger.info("Closed %d open window(s) on the draft before updating it.", closed)
         return closed
+
+
+def _addressed_to(mail: Any, address: str) -> bool:
+    """Whether ``address`` is on ``mail``'s To line (case-insensitive)."""
+    lines, _ = _recipient_lines(mail)
+    return address.strip().casefold() in {a.casefold() for a in lines[OL_TO]}
 
 
 def _recipient_lines(mail: Any) -> tuple[dict[int, list[str]], int]:

@@ -285,6 +285,7 @@ def create(client: Any, spec: DraftSpec, self_address: str) -> dict[str, Any]:
         to=spec.to, cc=spec.cc, bcc=bcc, subject=spec.subject,
         body_html=spec.body_html, attachments=spec.attachments,
         ref=spec.ref, display=spec.display, reply_to=spec.reply_to,
+        self_address=self_address,
     )
     return _document(spec, bcc, created, updated=False)
 
@@ -315,6 +316,9 @@ def _reply_fields(spec: DraftSpec, result: Any, *, updated: bool) -> dict[str, A
     ``thread_header`` is ``set`` / ``not_set`` as read back from the saved draft,
     ``unchanged`` on an update (the link was made at creation) and
     ``not_a_reply`` for a new mail, with ``thread_header_reason`` saying why not.
+    ``recipients_from`` says who a created reply was addressed from: ``sender``
+    (Outlook's own reply), ``original_recipients`` (the original was sent by the
+    user) or ``caller`` (a ``to`` was given).
     """
     if spec.reply_to is None:
         return {"reply_to": None, "thread_header": THREAD_NOT_APPLICABLE, "thread_header_reason": ""}
@@ -331,6 +335,7 @@ def _reply_fields(spec: DraftSpec, result: Any, *, updated: bool) -> dict[str, A
         "replied_to_message_id": result.replied_to_message_id,
         "thread_header": result.thread_header,
         "thread_header_reason": result.thread_header_reason,
+        "recipients_from": result.recipients_from,
     }
 
 
