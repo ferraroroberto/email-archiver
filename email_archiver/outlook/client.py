@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import islice
 from typing import Any
 
 from email_archiver.config import Mailbox
@@ -103,6 +104,27 @@ class InboxMail:
     attachment_count: int = 0
     flag_status: int = 0
     item: Any = None
+
+
+# The folders `find` searches (issue #110), and how each one was searched.
+FIND_INBOX = "inbox"
+FIND_ARCHIVE = "archive"
+FIND_SENT = "sent"
+FIND_VIA_RESTRICT = "restrict"   # narrowed server-side
+FIND_VIA_WALK = "walk"           # the store rejected the filter; matched per mail
+FIND_VIA_ABSENT = "absent"       # the mailbox has no such folder; nothing searched
+
+
+@dataclass
+class FolderHits:
+    """What ``search_folder`` found in one folder: how many matched, and the
+    newest ``limit`` of them read into :class:`InboxMail`."""
+
+    folder: str                    # FIND_INBOX / FIND_ARCHIVE / FIND_SENT
+    name: str                      # the Outlook folder's own name
+    via: str
+    matched: int = 0
+    mails: list[InboxMail] = field(default_factory=list)
 
 
 # -------------------------------------------------------------- helpers -----
@@ -444,6 +466,58 @@ class OutlookClient(DraftSurface):
             return
         logger.info("Sent-date filter applied server-side: %s", flt)
         yield from self._iter_items(restricted, preview_len)
+
+    def search_folder(
+        self,
+        folder: str,
+        archive_folder: str,
+        dasl: str,
+        matches: Callable[[InboxMail], bool],
+        *,
+        preview_len: int,
+        limit: int,
+    ) -> FolderHits:
+        """Search one of this mailbox's folders for ``find``; read-only.
+
+        ``folder`` is ``inbox``, ``sent`` or ``archive`` (``archive_folder``
+        under the mailbox root, looked up and **never created**: a missing one
+        is reported ``absent``). Narrowed server-side with ``Items.Restrict``
+        on ``dasl`` and sorted newest first, so the ``limit`` kept are the most
+        recent. A store that rejects the filter is walked instead, keeping the
+        mails ``matches`` accepts; which path ran is logged and reported.
+        Nothing here moves, saves or deletes an item.
+        """
+        if folder == FIND_ARCHIVE:
+            target = self._named_folder(archive_folder, create=False)
+        else:
+            target = self._sent_items() if folder == FIND_SENT else self._inbox()
+        name = archive_folder if folder == FIND_ARCHIVE else folder
+        if target is None:
+            logger.info("find: no %r folder in this mailbox; nothing searched there.", name)
+            return FolderHits(folder=folder, name=name, via=FIND_VIA_ABSENT)
+        name = safe_com(lambda: str(target.Name), name)
+        items = target.Items
+        try:
+            restricted = items.Restrict(dasl)
+            matched = int(restricted.Count)
+        except Exception as exc:
+            logger.warning(
+                "find: the store rejected the search filter on %r (%s: %s); walking "
+                "the folder and matching each mail's preview instead.",
+                name, type(exc).__name__, exc,
+            )
+            hits = [mail for mail in self._iter_items(items, preview_len) if matches(mail)]
+            hits.sort(key=lambda m: m.date_sent or datetime.min, reverse=True)
+            return FolderHits(folder=folder, name=name, via=FIND_VIA_WALK,
+                              matched=len(hits), mails=hits[:limit])
+        try:
+            restricted.Sort("[SentOn]", True)
+        except Exception as exc:  # unsorted still answers; only "newest" is lost
+            logger.warning("find: could not sort the hits in %r newest first: %s", name, exc)
+        mails = list(islice(self._iter_items(restricted, preview_len), limit))
+        logger.info("find: %d match(es) in %r, %d read.", matched, name, len(mails))
+        return FolderHits(folder=folder, name=name, via=FIND_VIA_RESTRICT,
+                          matched=matched, mails=mails)
 
     def _iter_items(self, items: Any, preview_len: int) -> Iterator[InboxMail]:
         import win32com.client  # noqa: PLC0415

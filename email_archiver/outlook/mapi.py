@@ -223,6 +223,41 @@ def sent_since_filter(since: datetime) -> str:
     return f"@SQL=\"{DASL_DATE_SENT}\" >= '{utc:%Y-%m-%d %H:%M}'"
 
 
+# What a `find` word is looked for in (issue #110): subject, sender name and
+# address, the To / CC display lines, and the plain-text body — the same
+# fields the index search covers.
+DASL_FIND_FIELDS = (
+    "urn:schemas:httpmail:subject",
+    "urn:schemas:httpmail:fromname",
+    "urn:schemas:httpmail:fromemail",
+    "urn:schemas:httpmail:displayto",
+    "urn:schemas:httpmail:displaycc",
+    "urn:schemas:httpmail:textdescription",
+)
+
+
+def words_filter(words: list[str], since: datetime | None = None, *, sent: bool = False) -> str:
+    """The ``Items.Restrict`` DASL filter for ``find``: every word must appear
+    (case-insensitively, as DASL ``LIKE`` compares) in at least one of
+    :data:`DASL_FIND_FIELDS`, and the mail must be received — sent, for
+    ``sent`` — at/after ``since`` when given (the same UTC-literal rule as
+    :func:`received_since_filter`).
+
+    A quote in a word is doubled, which is how a DASL string literal holds one.
+    """
+    clauses = []
+    for word in words:
+        literal = word.replace("'", "''")
+        clauses.append(
+            "(" + " OR ".join(f"\"{field}\" LIKE '%{literal}%'" for field in DASL_FIND_FIELDS) + ")"
+        )
+    if since is not None:
+        utc = since.astimezone(timezone.utc)
+        prop = DASL_DATE_SENT if sent else DASL_DATE_RECEIVED
+        clauses.append(f"\"{prop}\" >= '{utc:%Y-%m-%d %H:%M}'")
+    return "@SQL=" + " AND ".join(clauses)
+
+
 _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 
 

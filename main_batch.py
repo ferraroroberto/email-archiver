@@ -1,6 +1,6 @@
 """
 Headless batch entry point – plan / apply / revert / renumber / draft / read / send /
-mailboxes, over JSON.
+mailboxes / find, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os, life-os),
 never used interactively: every verb prints exactly one JSON document on
@@ -24,6 +24,8 @@ one the caller approved (`read` reports it).
         [--expect-part body=<sha256> ...] [--expect-to <address> ...]
     python main_batch.py mailboxes
     python main_batch.py plan --mailbox <alias> --candidates 0
+    python main_batch.py find --mailbox <alias> --query "<words>" [--since YYYY-MM-DD] \
+        [--folders inbox,archive,sent] [--limit N]
 
 Every Outlook verb acts on one mailbox of the registry (config/mailboxes.json,
 or Outlook's default store when there is no such file): `--mailbox <alias>`
@@ -71,7 +73,7 @@ from typing import Any
 # Ensure project root is on the path regardless of cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from email_archiver import batch, draft, send
+from email_archiver import batch, draft, find, send
 from email_archiver.config import (
     Mailbox,
     MailboxRegistry,
@@ -158,6 +160,42 @@ def _load_input(path: str) -> list[dict[str, Any]]:
     return data
 
 
+def _parse_since(raw: str | None) -> datetime | None:
+    """A ``--since`` value as naive local time, or ``None`` when not given.
+
+    Raises:
+        ValueError: not ``YYYY-MM-DD`` / ``YYYY-MM-DDTHH:MM``, or it carries a
+            UTC offset.
+    """
+    if raw is None:
+        return None
+    try:
+        since = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        raise ValueError(f"--since {raw!r} is not YYYY-MM-DD or YYYY-MM-DDTHH:MM") from None
+    if since.tzinfo is not None:
+        raise ValueError("--since is local time; leave the UTC offset off")
+    return since
+
+
+def _find_args(args: argparse.Namespace) -> tuple[list[str], datetime | None, tuple[str, ...]]:
+    """``find``'s flags, validated before Outlook is touched.
+
+    Raises:
+        ValueError: a flag's value is unusable; the message names the flag.
+    """
+    words = args.query.split()
+    if not words:
+        raise ValueError("--query must hold at least one word")
+    folders = tuple(dict.fromkeys(f.strip().casefold() for f in args.folders.split(",") if f.strip()))
+    unknown = [f for f in folders if f not in find.FOLDERS]
+    if not folders or unknown:
+        raise ValueError(f"--folders must be a comma list of {', '.join(find.FOLDERS)}")
+    if args.limit <= 0:
+        raise ValueError("--limit must be positive")
+    return words, _parse_since(args.since), folders
+
+
 def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
     """``plan``'s filter flags, validated before Outlook is touched.
 
@@ -172,16 +210,7 @@ def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
         if message_id not in message_ids:
             message_ids.append(message_id)
 
-    since = None
-    if args.since is not None:
-        try:
-            since = datetime.fromisoformat(args.since.strip())
-        except ValueError:
-            raise ValueError(
-                f"--since {args.since!r} is not YYYY-MM-DD or YYYY-MM-DDTHH:MM"
-            ) from None
-        if since.tzinfo is not None:
-            raise ValueError("--since is local time; leave the UTC offset off")
+    since = _parse_since(args.since)
 
     search = [term.strip() for term in args.search]
     if not all(search):
@@ -373,7 +402,31 @@ def _build_parser() -> argparse.ArgumentParser:
              "(present / missing / unknown). Never starts Outlook.",
     )
 
-    for verb_parser in (p_plan, p_apply, p_revert, p_draft, p_read, p_send):
+    p_find = sub.add_parser(
+        "find",
+        help="Search a mailbox's live Outlook folders. Read-only: moves, saves "
+             "and sends nothing.",
+    )
+    p_find.add_argument(
+        "--query", required=True,
+        help="Words to find; every one must appear in the subject, sender, "
+             "recipients or body (case-insensitive).",
+    )
+    p_find.add_argument(
+        "--since", help="Only mail received (sent, in Sent) at or after this local "
+                        "time: YYYY-MM-DD or YYYY-MM-DDTHH:MM.",
+    )
+    p_find.add_argument(
+        "--folders", default=",".join(find.FOLDERS),
+        help="Comma list of the folders to search (default: %(default)s); "
+             "archive is the mailbox's archive folder.",
+    )
+    p_find.add_argument(
+        "--limit", type=int, default=find.DEFAULT_LIMIT,
+        help="Most hits returned, newest first (default: %(default)s).",
+    )
+
+    for verb_parser in (p_plan, p_apply, p_revert, p_draft, p_read, p_send, p_find):
         verb_parser.add_argument(
             "--mailbox", metavar="ALIAS",
             help="Act on this registry mailbox (an alias or extra alias, as "
@@ -436,6 +489,13 @@ def main(argv: list[str] | None = None) -> int:
             return _fail(verb, ERROR_BAD_INPUT, "--update must not be blank")
 
     expectations: tuple[str, dict[str, str], list[str] | None] = ("", {}, None)
+    find_args: tuple[list[str], datetime | None, tuple[str, ...]] = ([], None, ())
+    if verb == "find":
+        try:
+            find_args = _find_args(args)
+        except ValueError as exc:
+            return _fail(verb, ERROR_BAD_INPUT, str(exc))
+
     if verb in ("read", "send"):
         if not args.entry_id.strip():
             return _fail(verb, ERROR_BAD_INPUT, "--entry-id must not be blank")
@@ -541,6 +601,11 @@ def main(argv: list[str] | None = None) -> int:
                     document = draft.create(client, spec, self_address)
                 else:
                     document = draft.update(client, args.update.strip(), spec, self_address)
+            elif verb == "find":
+                words, since, folders = find_args
+                document = find.find(
+                    client, cfg, mailbox, words, since=since, folders=folders, limit=args.limit,
+                )
             elif verb == "read":
                 document = send.read_document(client.read_draft(args.entry_id.strip()))
             elif verb == "send":
