@@ -51,6 +51,20 @@ def resolve_store(namespace: Any, mailbox: Mailbox | None) -> Any:
     return store
 
 
+def find_account(namespace: Any, address: str) -> Any | None:
+    """The Outlook ``Account`` whose SMTP address is ``address``, or ``None``."""
+    target = address.strip().casefold()
+    accounts = safe_com(lambda: namespace.Accounts, None)
+    count = safe_com(lambda: int(accounts.Count), 0) if accounts is not None else 0
+    for i in range(1, count + 1):
+        account = safe_com(lambda i=i: accounts.Item(i), None)
+        if account is None:
+            continue
+        if safe_com(lambda a=account: str(a.SmtpAddress or "").strip(), "").casefold() == target:
+            return account
+    return None
+
+
 def find_store(namespace: Any, address: str) -> Any | None:
     """The store for ``address``, or ``None`` when the profile has none.
 
@@ -59,16 +73,9 @@ def find_store(namespace: Any, address: str) -> Any | None:
             store is named after it, so picking one would be a guess.
     """
     target = address.strip().casefold()
-    accounts = safe_com(lambda: namespace.Accounts, None)
-    count = safe_com(lambda: int(accounts.Count), 0) if accounts is not None else 0
-    for i in range(1, count + 1):
-        account = safe_com(lambda i=i: accounts.Item(i), None)
-        if account is None:
-            continue
-        smtp = safe_com(lambda a=account: str(a.SmtpAddress or "").strip(), "")
-        if smtp.casefold() != target:
-            continue
-        store = safe_com(lambda a=account: a.DeliveryStore, None)
+    account = find_account(namespace, address)
+    if account is not None:
+        store = safe_com(lambda: account.DeliveryStore, None)
         if store is not None:
             return store
         logger.warning("The account for %s has no readable delivery store.", address)

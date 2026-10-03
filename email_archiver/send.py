@@ -33,7 +33,7 @@ from typing import Any
 
 from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.draft import html_to_text
-from email_archiver.outlook.drafts import DraftSnapshot
+from email_archiver.outlook.drafts import SENDING_ACCOUNT_MISMATCH, DraftSnapshot
 from email_archiver.outlook.mapi import html_after_marked_region, strip_word_padding
 from email_archiver.outlook.sending import send_if_approved
 
@@ -98,6 +98,8 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
         "cc": list(snapshot.cc),
         "bcc": list(snapshot.bcc),
         "unreadable_recipients": snapshot.unreadable_recipients,
+        # The account it would send from; "" when unset or unreadable.
+        "from_address": snapshot.sending_account,
         "body": {
             "html": snapshot.html_body,
             "region_html": region,
@@ -150,28 +152,56 @@ def check_approval(
     )
 
 
+def check_sending_account(snapshot: DraftSnapshot, expect_account: str | None) -> None:
+    """Raise :class:`SendRefused` unless the draft sends as ``expect_account``.
+
+    ``None`` (the mailbox synthesized when there is no registry) checks
+    nothing, as before. A draft whose sending account is unset or unreadable
+    is refused too: which account Outlook would pick is then a guess.
+    """
+    if expect_account is None:
+        return
+    if snapshot.sending_account.casefold() == expect_account.strip().casefold():
+        return
+    raise SendRefused(
+        SENDING_ACCOUNT_MISMATCH,
+        "the draft does not send as this mailbox's account "
+        f"({'its sending account is unset' if not snapshot.sending_account else 'it was changed to another account'}). "
+        "Nothing was sent.",
+    )
+
+
 def send(
     client: Any,
     entry_id: str,
     expect_hash: str,
     expect_parts: Mapping[str, str],
     expect_to: list[str] | None,
+    *,
+    expect_account: str | None = None,
 ) -> dict[str, Any]:
     """Send the draft ``entry_id`` if it still matches; the ``send`` document.
 
+    ``expect_account`` is the registry mailbox's address the draft must send
+    from (``None`` checks nothing).
+
     Raises:
-        SendRefused: the item differs from the approval; nothing was sent.
+        SendRefused: the item differs from the approval, or sends as another
+            account; nothing was sent.
         DraftUpdateError: the item is gone, sent, or not in Drafts.
     """
-    snapshot = send_if_approved(
-        client, entry_id, lambda live: check_approval(live, expect_hash, expect_parts, expect_to),
-    )
+    def _check(live: DraftSnapshot) -> None:
+        check_sending_account(live, expect_account)
+        check_approval(live, expect_hash, expect_parts, expect_to)
+
+    snapshot = send_if_approved(client, entry_id, _check)
     logger.info("Sent draft %s: its fingerprint matched the approval.", entry_id)
     return {
         "verb": SEND_VERB,
         "schema_version": SCHEMA_VERSION,
         "generated_at": now_iso(),
         "entry_id": entry_id,
+        "from_address": snapshot.sending_account,
         "subject": snapshot.subject,
         "to": list(snapshot.to),
         "cc": list(snapshot.cc),

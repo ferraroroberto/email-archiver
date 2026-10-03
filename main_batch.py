@@ -23,10 +23,12 @@ one the caller approved (`read` reports it).
     python main_batch.py send --entry-id <entry_id> --expect-hash <sha256> \
         [--expect-part body=<sha256> ...] [--expect-to <address> ...]
     python main_batch.py mailboxes
+    python main_batch.py plan --mailbox <alias> --candidates 0
 
 Every Outlook verb acts on one mailbox of the registry (config/mailboxes.json,
-or Outlook's default store when there is no such file), and its document
-carries that mailbox's alias as `mailbox`. `mailboxes` lists the registry with
+or Outlook's default store when there is no such file): `--mailbox <alias>`
+picks it, the registry default otherwise, and its document carries that
+mailbox's alias as `mailbox`. `mailboxes` lists the registry with
 each mailbox's `outlook_status`, and never starts Outlook.
 
 Exit codes:
@@ -40,10 +42,13 @@ Exit codes:
        outside Drafts or (update) has no marked body region, or (send) a draft
        that is not what was approved — `approval_mismatch`, naming the parts
        under `error.differs` — or has a recipient with no readable address;
-       a malformed config/mailboxes.json (`mailbox_registry_invalid`), or a
-       registry mailbox with no store in the running Outlook
-       (`mailbox_not_in_outlook`), which is never answered with the default
-       store. stdout carries `{"error": {"code", "message"}}` instead
+       a malformed config/mailboxes.json (`mailbox_registry_invalid`), a
+       `--mailbox` the registry does not know (`mailbox_unknown`), a registry
+       mailbox with no store in the running Outlook (`mailbox_not_in_outlook`,
+       never answered with the default store), (draft) no Outlook account for
+       the mailbox's address (`account_not_in_outlook`), or (draft / send) a
+       draft that would not send as the mailbox (`sending_account_mismatch`).
+       stdout carries `{"error": {"code", "message"}}` instead
 
 Why a separate process rather than a library call: the Inbox verbs drive
 Outlook over COM, and a COM modal (the address-book security prompt, a profile
@@ -68,16 +73,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from email_archiver import batch, draft, send
 from email_archiver.config import (
+    Mailbox,
     MailboxRegistry,
     MailboxRegistryError,
+    MailboxUnknownError,
     load_config,
     load_mailbox_registry,
     setup_logging,
 )
 from email_archiver.outlook import process
 from email_archiver.outlook.client import OutlookClient
-from email_archiver.outlook.drafts import DraftUpdateError, ReplySourceError
-from email_archiver.outlook.mapi import MailboxNotInOutlookError, OutlookUnavailableError
+from email_archiver.outlook.drafts import DraftAccountError, DraftUpdateError, ReplySourceError
+from email_archiver.outlook.mapi import (
+    AccountNotInOutlookError,
+    MailboxNotInOutlookError,
+    OutlookUnavailableError,
+)
 from email_archiver.outlook.process import DEFAULT_START_TIMEOUT_SECONDS
 from email_archiver.text import normalize_message_id
 
@@ -93,6 +104,9 @@ ERROR_COM_UNAVAILABLE = "com_unavailable"
 ERROR_SELF_ADDRESS_UNRESOLVED = "self_address_unresolved"
 ERROR_MAILBOX_REGISTRY_INVALID = "mailbox_registry_invalid"
 ERROR_MAILBOX_NOT_IN_OUTLOOK = "mailbox_not_in_outlook"
+ERROR_MAILBOX_UNKNOWN = "mailbox_unknown"
+# The mailbox's store is there but no Outlook account sends from its address.
+ERROR_ACCOUNT_NOT_IN_OUTLOOK = "account_not_in_outlook"
 
 
 def _emit(document: dict[str, Any]) -> None:
@@ -358,6 +372,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List the mailbox registry with each mailbox's outlook_status "
              "(present / missing / unknown). Never starts Outlook.",
     )
+
+    for verb_parser in (p_plan, p_apply, p_revert, p_draft, p_read, p_send):
+        verb_parser.add_argument(
+            "--mailbox", metavar="ALIAS",
+            help="Act on this registry mailbox (an alias or extra alias, as "
+                 "`mailboxes` lists them) instead of the default one.",
+        )
     return parser
 
 
@@ -452,6 +473,13 @@ def main(argv: list[str] | None = None) -> int:
     if verb == "mailboxes":
         _emit(_mailboxes(registry))
         return EXIT_OK
+    mailbox: Mailbox | None = None
+    if verb != "renumber":
+        try:
+            mailbox = registry.select(args.mailbox)
+        except MailboxUnknownError as exc:
+            # Before Outlook: an unknown name must never reach a mailbox at all.
+            return _fail(verb, ERROR_MAILBOX_UNKNOWN, str(exc))
 
     if verb == "renumber":
         # No Outlook, no COM: this verb only reads a folder and the index.
@@ -477,7 +505,6 @@ def main(argv: list[str] | None = None) -> int:
     # call below happens here; nothing is handed to a worker.
     pythoncom.CoInitialize()
     try:
-        mailbox = registry.select(None)
         client = OutlookClient(mailbox)
         try:
             client.ensure_running(timeout=args.start_timeout)
@@ -501,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
                     mailbox=mailbox,
                 )
             elif verb == "draft":
-                self_address = draft.resolve_self_address(cfg, client)
+                self_address = draft.resolve_self_address(cfg, client, mailbox)
                 if self_address is None:
                     # Before any draft exists: one without the BCC copy would
                     # never reach the Inbox, so it could never be filed.
@@ -517,7 +544,10 @@ def main(argv: list[str] | None = None) -> int:
             elif verb == "read":
                 document = send.read_document(client.read_draft(args.entry_id.strip()))
             elif verb == "send":
-                document = send.send(client, args.entry_id.strip(), *expectations)
+                document = send.send(
+                    client, args.entry_id.strip(), *expectations,
+                    expect_account=None if mailbox.synthesized else mailbox.address,
+                )
             else:
                 document = batch.revert(
                     client, cfg, payload, renumber=args.renumber, category=category,
@@ -531,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
             # Raised before anything was saved: the mail to reply to could not
             # be found, or Outlook would not reply to it.
             return _fail(verb, exc.code, str(exc))
+        except DraftAccountError as exc:
+            # The draft would not send as the mailbox: nothing was kept.
+            return _fail(verb, exc.code, str(exc))
+        except AccountNotInOutlookError as exc:
+            return _fail(verb, ERROR_ACCOUNT_NOT_IN_OUTLOOK, str(exc))
         except send.SendRefused as exc:
             # Raised before Send(): nothing went out, and the caller learns
             # which parts no longer match what was approved.

@@ -20,6 +20,7 @@ from typing import Any
 
 from email_archiver.outlook import process
 from email_archiver.outlook.mapi import (
+    AccountNotInOutlookError,
     DASL_IN_REPLY_TO_ID,
     DASL_INTERNET_MESSAGE_ID,
     DASL_X_ARCHIVE_REF,
@@ -39,9 +40,14 @@ from email_archiver.outlook.mapi import (
     replace_marked_body_html,
     safe_com,
 )
+from email_archiver.outlook.stores import find_account
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
+
+# IDispatch::Invoke's DISPATCH_PROPERTYPUTREF: how an object-valued property
+# such as SendUsingAccount is assigned when pywin32's plain put is refused.
+_DISPATCH_PROPERTYPUTREF = 8
 
 
 REPLY_BY_MESSAGE_ID = "message_id"
@@ -92,6 +98,7 @@ class CreatedDraft:
     thread_header: str = ""        # THREAD_SET / THREAD_NOT_SET; "" for a new mail
     thread_header_reason: str = ""
     recipients_from: str = ""      # RECIPIENTS_*; "" for a new mail
+    from_address: str = ""         # the account it sends from; "" when unreadable
 
 
 @dataclass
@@ -124,6 +131,9 @@ class DraftSnapshot:
     body_region_html: str | None
     attachments: list[DraftAttachment]
     unreadable_recipients: int = 0
+    # SendUsingAccount's SMTP address; "" when unset or unreadable. Not part
+    # of the fingerprint: `send` checks it against the mailbox on its own.
+    sending_account: str = ""
 
 
 # Why `open_draft` refused. Each is its own `error.code` in `main_batch.py`,
@@ -141,6 +151,20 @@ _UNMARKED_MESSAGE = (
 # `main_batch.py`, and each is raised before anything is saved.
 REPLY_SOURCE_NOT_FOUND = "reply_source_not_found"  # the original cannot be found or opened
 REPLY_UNAVAILABLE = "reply_unavailable"            # the original opened but Outlook would not reply to it
+
+
+# The draft does not send as the mailbox it was made for: Outlook refused the
+# account, or (send) the stored draft's account is not the mailbox's. Its own
+# `error.code`; nothing is kept or sent (issue #109).
+SENDING_ACCOUNT_MISMATCH = "sending_account_mismatch"
+
+
+class DraftAccountError(Exception):
+    """A draft that would not send as its mailbox; it was discarded unsaved."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ReplySourceError(Exception):
@@ -161,7 +185,7 @@ class DraftUpdateError(Exception):
 
 class DraftSurface:
     """Draft methods ``OutlookClient`` inherits; the host supplies
-    ``_namespace()`` and ``store()``.
+    ``_namespace()``, ``store()`` and ``mailbox``.
 
     Used by email_archiver/draft.py and, for reading a draft back,
     email_archiver/send.py. Nothing here sends: a draft is saved and shown, and
@@ -200,6 +224,28 @@ class DraftSurface:
         )
         return ""
 
+    def sending_account(self) -> Any | None:
+        """The Outlook ``Account`` a draft for this client's mailbox sends from.
+
+        ``None`` for the mailbox synthesized when there is no registry: a new
+        mail keeps Outlook's own default account, exactly as before. A registry
+        mailbox always names its account explicitly, matched on
+        ``Account.SmtpAddress`` — never trusting Outlook to infer it.
+
+        Raises:
+            AccountNotInOutlookError: no account sends from the mailbox's address.
+        """
+        mailbox = getattr(self, "mailbox", None)
+        if mailbox is None or mailbox.synthesized:
+            return None
+        account = find_account(self._namespace(), mailbox.address)
+        if account is None:
+            raise AccountNotInOutlookError(
+                f"mailbox {mailbox.alias!r} is in Outlook but no account sends from its "
+                "address, so a draft cannot send as it; nothing was created"
+            )
+        return account
+
     def create_draft(
         self,
         *,
@@ -232,10 +278,19 @@ class DraftSurface:
         opening the compose window is what makes Outlook insert the account's
         default signature; the body is then put above it. ``Save`` runs last,
         so the finished draft sits in Drafts even if the window is closed.
+
+        For a registry mailbox (issue #109) the item's ``SendUsingAccount`` is
+        set to that mailbox's account right after it is created — before
+        ``Display``, so the signature is that account's — and read back; a
+        draft that would send as anyone else is discarded unsaved
+        (:class:`DraftAccountError`). After ``Save`` it is checked to be in
+        that mailbox's own Drafts, and moved there if Outlook put it elsewhere.
         """
         app = process.get_active_application()
         if app is None:
             raise OutlookUnavailableError("Outlook is no longer reachable over COM.")
+        # Before anything exists: a mailbox with no account leaves nothing behind.
+        account = self.sending_account()
 
         replied_to_id = ""
         recipients_from = ""
@@ -245,6 +300,8 @@ class DraftSurface:
             mail, replied_to_id, recipients_from = self._start_reply(
                 reply_to, self_address=self_address, to_given=to is not None,
             )
+        if account is not None:
+            _send_as(mail, account, self.mailbox.address)
         if to is not None:
             mail.To = "; ".join(to)
         if cc is not None:
@@ -287,11 +344,40 @@ class DraftSurface:
             )
         mail.HTMLBody = insert_body_html(existing_html, mark_body_html(body_html))
         mail.Save()
+        if account is not None:
+            mail = self._into_mailbox_drafts(mail, display)
         created.entry_id = safe_com(lambda: str(mail.EntryID), "")
+        # A synthesized mailbox's new mail keeps Outlook's default account,
+        # which may not read back on a fresh item: report the account owning
+        # the store instead. A registry mailbox's was proven by _send_as.
+        created.from_address = sending_address(mail) or (
+            safe_com(self.default_account_smtp, "") if account is None else ""
+        )
         if reply_to is not None:
             self._describe_reply(mail, created, replied_to_id)
             created.recipients_from = recipients_from
         return created
+
+    def _into_mailbox_drafts(self, mail: Any, display: bool) -> Any:
+        """``mail`` (just saved) in this mailbox's own Drafts.
+
+        Outlook decides where a saved draft lands; for an account other than
+        the default one that may be the default store's Drafts, where
+        ``read`` / ``send`` for this mailbox would refuse it. Moved over then,
+        closing (saving) its window first and showing it again after.
+        """
+        drafts = self.store().GetDefaultFolder(OL_FOLDER_DRAFTS)
+        drafts_id = safe_com(lambda: str(drafts.EntryID), "")
+        if drafts_id and safe_com(lambda: str(mail.Parent.EntryID), "") == drafts_id:
+            return mail
+        logger.info("Outlook saved the draft outside this mailbox's Drafts; moving it there.")
+        entry_id = safe_com(lambda: str(mail.EntryID), "")
+        if display and entry_id:
+            self.close_inspectors_of(entry_id)
+        moved = mail.Move(drafts)
+        if display:
+            moved.Display(False)
+        return moved
 
     def _start_reply(
         self, target: ReplyTarget, *, self_address: str = "", to_given: bool = False,
@@ -462,6 +548,7 @@ class DraftSurface:
             mail.Display(False)  # non-modal: this process does not wait on it
             updated.displayed = True
         updated.entry_id = safe_com(lambda: str(mail.EntryID), "") or entry_id
+        updated.from_address = sending_address(mail)
         logger.info("Draft updated in place.")
         return updated
 
@@ -527,6 +614,7 @@ class DraftSurface:
             to=lines[OL_TO], cc=lines[OL_CC], bcc=lines[OL_BCC],
             html_body=html_body, body_region_html=marked_body_region(html_body),
             attachments=attachments, unreadable_recipients=unreadable,
+            sending_account=sending_address(mail),
         )
 
     def close_inspectors_of(self, entry_id: str) -> int:
@@ -551,6 +639,43 @@ class DraftSurface:
         if closed:
             logger.info("Closed %d open window(s) on the draft before updating it.", closed)
         return closed
+
+
+def sending_address(mail: Any) -> str:
+    """The SMTP address of ``mail``'s ``SendUsingAccount``; ``""`` when unset
+    or unreadable."""
+    return safe_com(lambda: str(mail.SendUsingAccount.SmtpAddress or "").strip(), "")
+
+
+def _send_as(mail: Any, account: Any, address: str) -> None:
+    """Make ``mail`` send as ``account`` and prove it by reading it back.
+
+    pywin32's plain property put can be refused for an object-valued property,
+    or appear to work and change nothing; the PROPERTYPUTREF form is tried
+    then. Whatever the route, only a read-back equal to ``address`` is
+    accepted: otherwise the unsaved item is discarded and nothing is kept.
+
+    Raises:
+        DraftAccountError: the draft would not send as ``address``.
+    """
+    try:
+        mail.SendUsingAccount = account
+    except Exception as exc:
+        logger.info("Plain SendUsingAccount put refused (%s); trying PROPERTYPUTREF.", exc)
+    if sending_address(mail).casefold() != address.casefold():
+        try:
+            oleobj = mail._oleobj_
+            oleobj.Invoke(oleobj.GetIDsOfNames("SendUsingAccount"), 0, _DISPATCH_PROPERTYPUTREF, 0, account)
+        except Exception as exc:
+            logger.info("SendUsingAccount PROPERTYPUTREF refused too: %s", exc)
+    if sending_address(mail).casefold() != address.casefold():
+        safe_com(lambda: mail.Close(OL_DISCARD), None)
+        raise DraftAccountError(
+            SENDING_ACCOUNT_MISMATCH,
+            "Outlook would not set the draft to send as this mailbox's account; "
+            "nothing was saved",
+        )
+    logger.info("Draft set to send as this mailbox's account.")
 
 
 def _addressed_to(mail: Any, address: str) -> bool:
