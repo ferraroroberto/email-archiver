@@ -155,6 +155,17 @@ class FakeOutlookClient:
         self.inspector_check_raises = False
         self.category_should_fail = False
         self.moves: list[tuple[str, str | None]] = []
+        # The Explorer holding the item as the selected / reading-pane mail
+        # (issue #111): every Move is refused until it is released. Only a
+        # folder switch releases it — conversation view blocks the others.
+        self.selection_held = False
+        # What the real client answers when asked to switch the Explorer away
+        # and back: True (switched), False (the Explorer is not showing the
+        # mail's folder), None (could not be determined). `release_raises` is
+        # the call blowing up instead.
+        self.folder_switch_result: bool | None = False
+        self.release_raises = False
+        self.folder_switches = 0
 
     # -- the surface batch.py calls -------------------------------------------
 
@@ -199,7 +210,7 @@ class FakeOutlookClient:
     def move_to(self, item: _FakeMailItem, folder_name: str | None):
         if self.move_should_fail:
             raise RuntimeError("the store refused the move")
-        if self.move_message_changed_always:
+        if self.move_message_changed_always or self.selection_held:
             raise _message_changed_error()
         if self.move_message_changed_once:
             self.move_message_changed_once = False
@@ -227,6 +238,14 @@ class FakeOutlookClient:
 
     def entry_id(self, item: _FakeMailItem) -> str:
         return item.EntryID
+
+    def release_folder_hold(self, item: _FakeMailItem) -> bool | None:
+        self.folder_switches += 1
+        if self.release_raises:
+            raise RuntimeError("Outlook would not change folder")
+        if self.folder_switch_result:
+            self.selection_held = False
+        return self.folder_switch_result
 
     def is_open_in_inspector(self, item: _FakeMailItem) -> bool | None:
         if self.inspector_check_raises:
@@ -704,10 +723,13 @@ def test_apply_reports_a_move_that_fails_for_another_reason_unchanged(
 
 def _stuck_move(cfg, archive_root, **client_state):
     """Run an apply whose every Move is refused as 0x80040109, and return the
-    one result — the shape all four `message_changed` cases share."""
+    one result — the shape all the `message_changed` cases share. The Explorer
+    is switched away and back by default (issue #111), so a refusal here is one
+    that survived the folder switch; pass ``folder_switch_result`` to change it."""
     dest = archive_root / "Project Alpha"
     client = FakeOutlookClient([_mail("a@example.invalid", "Stuck fast")])
     client.move_message_changed_always = True
+    client.folder_switch_result = True
     for name, value in client_state.items():
         setattr(client, name, value)
 
@@ -755,6 +777,7 @@ def test_a_mail_no_window_holds_is_told_to_restart(cfg, archive_root):
     message = result["error"]["message"]
     assert "not open in any Outlook window" in message
     assert "Restart Outlook" in message
+    assert "another folder and back" in message
 
 
 def test_a_mail_no_window_holds_is_not_told_a_re_apply_will_help(cfg, archive_root):
@@ -792,6 +815,132 @@ def test_an_undetermined_window_check_says_so_and_never_claims_no_window(
     assert "not open in any Outlook window" not in message
     # Both remedies offered, cheap one first — that is all that is honest here.
     assert message.index("close any window") < message.index("restart Outlook")
+
+
+
+# ----------------------------------------------------- selection hold (#111) ---
+
+def _held_by_the_explorer(cfg, archive_root, **client_state):
+    """Run an apply whose Move is refused only while Outlook's Explorer holds
+    the mail as its selection, and return the client and the one result."""
+    dest = archive_root / "Project Alpha"
+    client = FakeOutlookClient([_mail("a@example.invalid", "Selected in the pane")])
+    client.selection_held = True
+    for name, value in client_state.items():
+        setattr(client, name, value)
+
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+    return client, doc["results"][0]
+
+
+def test_apply_frees_a_mail_held_by_the_explorer_and_moves_it(cfg, archive_root):
+    """Issue #111: the mail was selected in the reading pane, every defence was
+    refused, and selecting another folder then the mail again let the very same
+    decision file. ``apply`` does that switch itself, retries once, and reports
+    it as its own ``move_via`` — no restart, no second run."""
+    client, result = _held_by_the_explorer(cfg, archive_root, folder_switch_result=True)
+
+    assert result["ok"] is True, "a selection hold must not strand the mail"
+    assert result["moved"] is True
+    assert result["error"] is None
+    assert result["move_via"] == batch.MOVE_VIA_FOLDER_SWITCH
+    assert client.folder_switches == 1, "the switch is tried once, after the refusals"
+    assert client.folders[None] == [], "the Inbox must lose the mail"
+    assert len(client.folders["Archive"]) == 1
+
+
+def test_the_folder_switch_is_only_tried_after_the_move_was_refused(cfg, archive_root):
+    """Switching folders disturbs the user's view, so a move that goes through
+    on either earlier path must never touch the Explorer."""
+    dest = archive_root / "Project Alpha"
+    for state in ({}, {"move_message_changed_once": True}):
+        client = FakeOutlookClient([_mail("a@example.invalid", "Moves fine")])
+        for name, value in state.items():
+            setattr(client, name, value)
+        doc = batch.apply(client, cfg, [
+            {"message_id": "a@example.invalid", "folder_path": str(dest)},
+        ])
+        assert doc["results"][0]["ok"] is True
+        assert client.folder_switches == 0
+
+
+def test_a_move_refused_for_another_reason_never_switches_folders(cfg, archive_root):
+    dest = archive_root / "Project Alpha"
+    client = FakeOutlookClient([_mail("a@example.invalid", "Refused outright")])
+    client.move_should_fail = True
+
+    batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+
+    assert client.folder_switches == 0
+
+
+def test_an_explorer_on_another_folder_is_left_alone_and_told_the_remedy(
+    cfg, archive_root
+):
+    """The Explorer is not showing the mail's folder, so there is nothing for
+    ``apply`` to switch. The refusal is reported with the folder-switch remedy
+    the user can do by hand — not a restart, which nothing here justifies yet."""
+    client, result = _held_by_the_explorer(
+        cfg, archive_root, folder_switch_result=False, open_in_inspector=False
+    )
+
+    message = result["error"]["message"]
+    assert result["error"]["code"] == batch.ERROR_MESSAGE_CHANGED
+    assert "Select another folder in Outlook, then this message again" in message
+    assert "Restart Outlook" not in message
+    assert message.index("Select another folder") < message.index("restart Outlook")
+    assert client.folders[None], "the mail is still in the Inbox"
+
+
+@pytest.mark.parametrize(
+    "client_state",
+    [{"folder_switch_result": None}, {"release_raises": True}],
+    ids=["undetermined", "raised"],
+)
+def test_a_folder_switch_that_could_not_run_is_not_reported_as_tried(
+    cfg, archive_root, client_state
+):
+    """A switch that did not happen is not evidence the hold survives one:
+    claiming it did would send the user to restart Outlook for nothing. The
+    result is the manual remedy, and the run still ends cleanly."""
+    _, result = _held_by_the_explorer(
+        cfg, archive_root, open_in_inspector=False, **client_state
+    )
+
+    message = result["error"]["message"]
+    assert result["ok"] is False
+    assert result["error"]["code"] == batch.ERROR_MESSAGE_CHANGED
+    assert "Select another folder in Outlook" in message
+    assert "another folder and back" not in message
+    assert "Restart Outlook" not in message
+
+
+def test_a_refusal_that_survives_the_folder_switch_keeps_the_restart_advice(
+    cfg, archive_root
+):
+    """Restart advice is for a hold that outlasted the release too — the case
+    issue #59 and #84 saw — and it says the switch was already tried."""
+    client, result = _stuck_move(cfg, archive_root, open_in_inspector=False)
+
+    message = result["error"]["message"]
+    assert client.folder_switches == 1, "retried once after the switch, never again"
+    assert "Restart Outlook" in message
+    assert "another folder and back" in message
+    assert "did not free it" in message
+
+
+def test_a_mail_open_in_a_window_is_still_told_to_close_it_after_a_switch(
+    cfg, archive_root
+):
+    _, result = _stuck_move(cfg, archive_root, open_in_inspector=True)
+
+    message = result["error"]["message"]
+    assert "Close that window" in message
+    assert "Restart Outlook" not in message
 
 
 def test_apply_finishes_an_already_archived_mail_without_writing_files(

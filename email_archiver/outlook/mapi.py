@@ -52,6 +52,9 @@ def safe_com(read: Any, default: Any) -> Any:
 OL_FOLDER_INBOX = 6
 # olFolderSentMail: where a sent mail's own copy lives, carrying its headers.
 OL_FOLDER_SENT_MAIL = 5
+# olFolderOutbox: the folder `release_folder_hold` parks the Explorer in for a
+# moment (issue #111) — almost always empty, so nothing is selected or rendered.
+OL_FOLDER_OUTBOX = 4
 # MailItem. Anything else in the Inbox (meeting requests, reports) is skipped.
 OL_CLASS_MAIL_ITEM = 43
 # DASL name for MAPI PR_INTERNET_MESSAGE_ID (0x1035001F), used both to read the
