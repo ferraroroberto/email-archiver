@@ -94,7 +94,7 @@ flowchart TB
   end
   CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
-  MAINBATCH -->|OutlookClient bound to one mailbox ·\nmailboxes verb: present / missing / unknown| OUTLOOK
+  MAINBATCH -->|--mailbox alias → OutlookClient bound to one mailbox ·\nmailboxes verb: present / missing / unknown| OUTLOOK
   BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\niter_sent · iter_sent_since · find_sent_by_message_id ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category ·\nis_open_in_inspector| OUTLOOK
   PROCESS -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER
@@ -116,10 +116,10 @@ flowchart TB
   DRAFTCALLER["another local app (life-os)\nwrites a spec, spawns the process,\nthe user reviews and sends"] -->|subprocess: draft --spec| MAINBATCH
   MAINBATCH -->|draft verb| DRAFT
   DRAFT -->|outlook.self_address| CONFIG
-  DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save.\nWith reply_to: Reply / ReplyAll of an Inbox item or an\nOpenSharedItem .msg instead of CreateItem, quote kept| OUTLOOK
+  DRAFT -->|default_account_smtp · create_draft:\nCreateItem, BCC self, X-Archive-Ref header,\nDisplay then body above the signature, Save.\nWith reply_to: Reply / ReplyAll of an Inbox item or an\nOpenSharedItem .msg instead of CreateItem, quote kept.\nRegistry mailbox: SendUsingAccount set + read back before Display,\nBCC = its address, saved draft kept in its own Drafts| OUTLOOK
 
   subgraph sendflow["Guarded send (headless, spawned by another app after the user approved)"]
-    SEND["send.py\nread_document · fingerprint (sha256 per part + one hash) ·\ncheck_approval — refuses naming the parts. No COM"]
+    SEND["send.py\nread_document · fingerprint (sha256 per part + one hash) ·\ncheck_sending_account — the mailbox's account or refuse ·\ncheck_approval — refuses naming the parts. No COM"]
     SENDING["outlook/sending.py\nsend_if_approved — close windows (save), re-read,\ncheck, then the app's only Send() on that item"]
   end
   MAINBATCH -->|read verb · send verb| SEND

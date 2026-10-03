@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from email_archiver.batch import SCHEMA_VERSION, now_iso
-from email_archiver.config import get_outlook_self_address
+from email_archiver.config import Mailbox, get_outlook_self_address
 from email_archiver.outlook.drafts import (
     REPLY_BY_MESSAGE_ID,
     REPLY_BY_MSG_PATH,
@@ -240,15 +240,21 @@ def load_spec(path: str) -> DraftSpec:
 
 # ---------------------------------------------------------- self address ---
 
-def resolve_self_address(cfg: dict[str, Any], client: Any) -> str | None:
+def resolve_self_address(
+    cfg: dict[str, Any], client: Any, mailbox: Mailbox | None = None,
+) -> str | None:
     """The address every draft blind-copies, or ``None`` when it cannot be known.
 
+    A registry ``mailbox`` blind-copies its own address: that copy lands in
+    its Inbox, which is where it is filed from (issue #109). With no registry,
     ``outlook.self_address`` wins when set; otherwise the default sending
     account's SMTP address as Outlook reports it
     (``OutlookClient.default_account_smtp``, which never goes through
     ``GetExchangeUser``). Anything without an ``@`` is not an address and
     resolves to ``None`` — the caller must then refuse to create the draft.
     """
+    if mailbox is not None and not mailbox.synthesized:
+        return mailbox.address
     address = get_outlook_self_address(cfg) or (client.default_account_smtp() or "").strip()
     return address if "@" in address else None
 
@@ -359,6 +365,9 @@ def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) ->
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
         "entry_id": result.entry_id,
+        # The account the draft sends from, for the caller's preview; "" when
+        # Outlook would not say.
+        "from_address": result.from_address,
         # A reply's own subject and recipients are what Outlook saved; ``None``
         # is an update that left them as the draft has them.
         "subject": result.subject if replying and spec.subject is None else spec.subject,
