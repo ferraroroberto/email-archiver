@@ -8,6 +8,17 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+import pytest
+
+from email_archiver import config
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_local_mailbox_registry(tmp_path, monkeypatch):
+    """Every test sees no config/mailboxes.json unless it writes its own:
+    the live file is machine-local and must not change what a test does."""
+    monkeypatch.setattr(config, "MAILBOXES_FILE", tmp_path / "no-mailboxes.json")
+
 
 class _FakeAttachment:
     """A real (non-inline) attachment: no MAPI properties, so the archiver's

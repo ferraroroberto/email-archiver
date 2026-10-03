@@ -13,11 +13,11 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send, one JSON document on stdout"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send / mailboxes, one JSON document on stdout;\nevery Outlook verb acts on one registry mailbox"]
     NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
   end
 
-  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nget_outlook_self_address · setup_logging"]
+  CONFIG["email_archiver/config.py\nload_config · get_archive_roots ·\nget_max_path_length · get_date_prefix_mode/_enabled ·\nget_outlook_archive_folder · get_outlook_category ·\nget_outlook_self_address · setup_logging ·\nload_mailbox_registry: config/mailboxes.json (machine-local)\nor one synthesized mailbox on the default store ·\nget_mailbox_archive_folder"]
   TEXT["email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping ·\nnormalize_message_id — one spelling of the\nMessage-ID for the scanner and the Outlook client"]
   PATHS["email_archiver/paths.py\nis_within · resolve_under_roots · archive_roots —\nthe one archive.root_paths guard, shared by\nrevert's deletes and renumber's renames"]
 
@@ -64,7 +64,8 @@ flowchart TB
     OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback), batch surface"]
     PROCESS["outlook/process.py\nis_running tasklist fallback,\nensure_running: start, poll, tear down what it started"]
     DRAFTS["outlook/drafts.py: DraftSurface\ndraft methods OutlookClient inherits"]
-    MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError, SelectedEmailError,\nCOM-free helpers (categories, headers, body markers)"]
+    STORES["outlook/stores.py: resolve_store\nthe mailbox's Store by address (account, else store name);\nDefaultStore only for the synthesized mailbox;\nno match: MailboxNotInOutlookError"]
+    MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError, MailboxNotInOutlookError, SelectedEmailError,\nCOM-free helpers (categories, headers, body markers)"]
     SUGGESTER["engine/suggester.py: SuggestionEngine\n3-stage blend: 0.45 FTS + 0.30 subject-thread\n+ 0.25 folder-name (rapidfuzz)"]
     ARCHIVER["archiver/archiver.py: EmailArchiver\nNNN - sequencing, YYYY-MM-DD prefix\n(forced or auto-inferred per folder),\npath-length fit, SaveAs .msg + SaveAsFile attachments"]
   end
@@ -74,6 +75,8 @@ flowchart TB
   OUTLOOK -->|inherits| DRAFTS
   OUTLOOK --> PROCESS
   OUTLOOK --> MAPI
+  OUTLOOK -->|every folder from store()| STORES
+  STORES --> MAPI
   DRAFTS --> MAPI
   PROCESS --> MAPI
   OUTLOOK -->|EmailData| ARCHIVEDIALOG
@@ -91,6 +94,7 @@ flowchart TB
   end
   CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
   MAINBATCH --> BATCH
+  MAINBATCH -->|OutlookClient bound to one mailbox ·\nmailboxes verb: present / missing / unknown| OUTLOOK
   BATCH -->|ensure_running · iter_inbox · iter_inbox_received_since ·\niter_sent · iter_sent_since · find_sent_by_message_id ·\nfind_by_message_id · archive_ref ·\nrefetch · save_item · move_to · set_category ·\nis_open_in_inspector| OUTLOOK
   PROCESS -->|starts if closed, polls GetActiveObject| OUTLOOKCOM
   BATCH -->|plan: rank folders per mail| SUGGESTER

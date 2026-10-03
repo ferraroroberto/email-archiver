@@ -98,7 +98,9 @@ archiver/
 │
 ├── config/
 │   ├── config.example.yaml     ← Template: copy to config.yaml
-│   └── config.yaml             ← Your local config (git-ignored)
+│   ├── config.yaml             ← Your local config (git-ignored)
+│   ├── mailboxes.sample.json   ← Template: copy to mailboxes.json
+│   └── mailboxes.json          ← Your mailbox registry (git-ignored, optional)
 │
 ├── data/
 │   └── emails.db                ← SQLite database (auto-created on first scan)
@@ -107,7 +109,7 @@ archiver/
 │   └── archiver.log             ← Log file (plain FileHandler, not rotated)
 │
 ├── email_archiver/              ← Main package
-│   ├── config.py                ← YAML loader, path resolution, logging setup
+│   ├── config.py                ← YAML loader, path resolution, logging setup, mailbox registry
 │   ├── text.py                  ← Shared subject + Message-ID normalisation
 │   ├── paths.py                 ← Archive-root guard shared by revert and renumber
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
@@ -128,6 +130,7 @@ archiver/
 │   │   ├── drafts.py           ← Draft surface OutlookClient inherits (DraftSurface)
 │   │   ├── process.py          ← Outlook process: is_running / ensure_running
 │   │   ├── mapi.py             ← Shared constants and COM-free helpers
+│   │   ├── stores.py           ← Which Outlook store a mailbox lives in (by address)
 │   │   └── sending.py          ← The one COM Send call (send verb only)
 │   │
 │   ├── archiver/
@@ -147,7 +150,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
@@ -279,7 +282,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: seven verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, and two that read a draft back and send it only while it is still what was approved — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: eight verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, and one that lists the mailboxes it can act on — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
@@ -290,6 +293,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 & .\.venv\Scripts\python.exe main_batch.py draft --spec spec.json
 & .\.venv\Scripts\python.exe main_batch.py read --entry-id <entry_id>
 & .\.venv\Scripts\python.exe main_batch.py send --entry-id <entry_id> --expect-hash <sha256>
+& .\.venv\Scripts\python.exe main_batch.py mailboxes
 ```
 
 | Verb | Reads | Does |
@@ -301,6 +305,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display, reply_to, reply_all}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review; with `reply_to`, a real threaded reply. **Never sends.** See [Drafting a mail](#drafting-a-mail). |
 | `read` | nothing | Reads one unsent draft back as it is stored, with its fingerprint. Writes nothing, shows nothing. See [Sending an approved draft](#sending-an-approved-draft). |
 | `send` | `--expect-hash` (and optionally `--expect-part`, `--expect-to`) | Sends that one draft, only if its live fingerprint still matches. Refused with `approval_mismatch` naming what differs otherwise. |
+| `mailboxes` | nothing | Lists the mailbox registry with each mailbox's `outlook_status`. Never starts Outlook. See [Mailboxes](#mailboxes). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -353,7 +358,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
-| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` (`draft --update`, `read`, `send`), `draft_body_unmarked` (`draft --update` only), `approval_mismatch` / `recipient_unreadable` (`send` only; `approval_mismatch` names the parts under `error.differs`). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
+| `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` (`draft --update`, `read`, `send`), `draft_body_unmarked` (`draft --update` only), `approval_mismatch` / `recipient_unreadable` (`send` only; `approval_mismatch` names the parts under `error.differs`), `mailbox_registry_invalid` (`config/mailboxes.json` is present but malformed), `mailbox_not_in_outlook` (a registry mailbox has no store in the running Outlook — never answered with the default store). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `message_changed`, `category_failed`. The last three are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook, and a [`message_changed`](#retrying-a-mail-that-was-written-but-never-moved) is a `move_failed` that an operator clears in seconds — usually by closing an open mail window.
 
@@ -557,7 +562,35 @@ outlook:
   self_address: "you@example.com"     # draft: blind-copied on every draft
 ```
 
-All three keys are optional. `archive_folder` and `category` fall back to the values above; `self_address` falls back to the default sending account's SMTP address. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated.
+All three keys are optional. `archive_folder` and `category` fall back to the values above; `self_address` falls back to the default sending account's SMTP address. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated. A registry mailbox's own `archive_folder` overrides `outlook.archive_folder` (see [Mailboxes](#mailboxes)).
+
+### Mailboxes
+
+Every Outlook verb acts on **one mailbox**, and every folder it touches (Inbox, Sent, Drafts, the archive folder) is taken from that mailbox's own Outlook store, never from Outlook's default folders. So a profile holding several mailboxes cannot be acted on in the wrong one, even if its default data file changes.
+
+The mailboxes are declared in `config/mailboxes.json`. It is **machine-local and gitignored**, because it holds personal addresses and this repo is public. Copy the tracked template to start one:
+
+```powershell
+copy config\mailboxes.sample.json config\mailboxes.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "default": "owner",
+  "mailboxes": {
+    "owner":  {"address": "owner@example.com",  "display_name": "Owner Name",  "aliases": ["me"], "archive_folder": "Archive"},
+    "second": {"address": "second@example.com", "display_name": "Second Name", "aliases": [],     "archive_folder": "Archive"}
+  }
+}
+```
+
+- Each key is the mailbox's alias. `aliases` are extra names for it. Every name is matched case-insensitively and must pick exactly one mailbox. `default` is the one a verb uses when it is not told otherwise. `display_name`, `aliases` and `archive_folder` are optional. An unknown key is refused rather than ignored, so a misspelt `archive_folder` cannot silently file into `Archive`.
+- A mailbox is found by its `address`: first through the Outlook account whose SMTP address it is (that account's delivery store), else through the one store named after it, which is how Outlook names an IMAP store. No match exits 2 with `mailbox_not_in_outlook`, and so do two stores with that name and no account to tell them apart. There is no fall back to the default store.
+- **No file is not an error.** The registry is then one mailbox, `default`, on Outlook's default store. That is exactly what every verb did before the registry existed, and the log says so at info. A file that is present but malformed exits 2 with `mailbox_registry_invalid` before Outlook is touched.
+- Every result document carries `"mailbox": "<alias>"`, and each run logs `ℹ️ Resolved mailbox <alias> → store <name>`.
+
+`main_batch.py mailboxes` is how a consumer (task-os, life-os) learns the mailbox list. It never reads the file. It prints the registry with each mailbox's `outlook_status`: `present` (its store is in the running Outlook), `missing` (Outlook answered and the mailbox is not in it) or `unknown` (Outlook is not running, or the check could not run). It only attaches to a running Outlook and never starts one, so with Outlook closed every status is `unknown`, never `present`. A non-`present` entry says why in `outlook_status_reason`. With no registry file, `registry` is `"synthesized"` and the one entry's `address` is the default store's account, read from Outlook.
 
 ---
 

@@ -4,7 +4,8 @@ The draft surface of :class:`~email_archiver.outlook.client.OutlookClient`.
 ``DraftSurface`` is a mixin: ``OutlookClient`` inherits these methods, so
 email_archiver/draft.py and email_archiver/send.py keep calling them on the
 client, and a fake client in the tests still stands in for the whole thing. It
-relies on the host class for ``_namespace()``. No code path in this module
+relies on the host class for ``_namespace()`` and ``store()`` (the resolved
+mailbox's store, which every folder here is taken from). No code path in this module
 sends mail: the one ``Send`` call lives in email_archiver/outlook/sending.py,
 reached only by the ``send`` verb.
 """
@@ -159,7 +160,8 @@ class DraftUpdateError(Exception):
 
 
 class DraftSurface:
-    """Draft methods ``OutlookClient`` inherits; the host supplies ``_namespace()``.
+    """Draft methods ``OutlookClient`` inherits; the host supplies
+    ``_namespace()`` and ``store()``.
 
     Used by email_archiver/draft.py and, for reading a draft back,
     email_archiver/send.py. Nothing here sends: a draft is saved and shown, and
@@ -167,19 +169,19 @@ class DraftSurface:
     """
 
     def default_account_smtp(self) -> str:
-        """The default sending account's SMTP address, or ``""`` when unknown.
+        """The SMTP address of the account delivering to this client's store,
+        or ``""`` when unknown.
 
-        The account whose delivery store is the profile's default store is the
-        one a new mail sends from; a profile with a single account needs no
-        match. Read from ``Account.SmtpAddress`` and never through
+        With no registry the store is the profile's default one, whose account
+        is the one a new mail sends from; a profile with a single account needs
+        no match. Read from ``Account.SmtpAddress`` and never through
         ``GetExchangeUser``, which can raise the address-book security modal.
         ``""`` (never a guess) when several accounts exist and none owns the
-        default store, or the address read back is not an SMTP address.
+        store, or the address read back is not an SMTP address.
         """
-        namespace = self._namespace()
-        accounts = namespace.Accounts
+        accounts = self._namespace().Accounts
         count = safe_com(lambda: int(accounts.Count), 0)
-        default_store_id = safe_com(lambda: str(namespace.DefaultStore.StoreID), "")
+        mailbox_store_id = safe_com(lambda: str(self.store().StoreID), "")
         candidates: list[str] = []
         for i in range(1, count + 1):
             account = safe_com(lambda i=i: accounts.Item(i), None)
@@ -188,7 +190,7 @@ class DraftSurface:
             smtp = safe_com(lambda a=account: str(a.SmtpAddress or "").strip(), "")
             candidates.append(smtp)
             store_id = safe_com(lambda a=account: str(a.DeliveryStore.StoreID), "")
-            if default_store_id and store_id == default_store_id:
+            if mailbox_store_id and store_id == mailbox_store_id:
                 return smtp if "@" in smtp else ""
         if len(candidates) == 1 and "@" in candidates[0]:
             return candidates[0]
@@ -464,7 +466,8 @@ class DraftSurface:
         return updated
 
     def open_draft(self, entry_id: str) -> Any:
-        """The unsent mail ``entry_id`` in Drafts, or :class:`DraftUpdateError`.
+        """The unsent mail ``entry_id`` in this mailbox's Drafts, or
+        :class:`DraftUpdateError`.
 
         The one lookup behind ``update_draft``, ``read_draft`` and the ``send``
         verb: by EntryID only, never by subject or search.
@@ -480,7 +483,7 @@ class DraftSurface:
             raise DraftUpdateError(DRAFT_NOT_FOUND, f"no Outlook item for EntryID {entry_id}")
         if safe_com(lambda: bool(mail.Sent), True):
             raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item has been sent; only an unsent draft is used")
-        drafts_id = safe_com(lambda: str(namespace.GetDefaultFolder(OL_FOLDER_DRAFTS).EntryID), "")
+        drafts_id = safe_com(lambda: str(self.store().GetDefaultFolder(OL_FOLDER_DRAFTS).EntryID), "")
         parent_id = safe_com(lambda: str(mail.Parent.EntryID), "")
         if not drafts_id or parent_id != drafts_id:
             raise DraftUpdateError(DRAFT_NOT_EDITABLE, "the item is not in the Drafts folder")

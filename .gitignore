@@ -1,5 +1,7 @@
 # Local config (copy from config.example.yaml)
 config/config.yaml
+# Machine-local mailbox registry: personal addresses (copy from mailboxes.sample.json)
+config/mailboxes.json
 
 # Database and logs
 data/*.db

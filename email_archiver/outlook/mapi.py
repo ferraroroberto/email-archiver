@@ -3,7 +3,7 @@ Outlook vocabulary shared by every COM surface, and the helpers that need no COM
 
 Constants (folder, class and recipient-type numbers, DASL property names, the
 MAPI error code batch mode retries on), ``OutlookUnavailableError``,
-``SelectedEmailError``, and the
+``MailboxNotInOutlookError``, ``SelectedEmailError``, and the
 pure string/HTML helpers the batch and draft surfaces build on: category
 arithmetic, header parsing, the ``--since`` filter and the marked draft-body
 region. Nothing here imports win32com, so all of it tests without Outlook.
@@ -21,6 +21,15 @@ class OutlookUnavailableError(RuntimeError):
     Distinct from "there is nothing to do": this means the COM object model
     never answered, so the caller must exit non-zero rather than report an
     empty Inbox it never actually read.
+    """
+
+
+class MailboxNotInOutlookError(RuntimeError):
+    """A registry mailbox has no store in the running Outlook profile.
+
+    Distinct from ``OutlookUnavailableError``: Outlook answered, but the
+    mailbox is not in it (or is not in it unambiguously). Never answered by
+    falling back to the default store, which would act on the wrong mailbox.
     """
 
 
