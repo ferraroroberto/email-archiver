@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,14 +71,16 @@ from typing import Any
 from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
 from email_archiver.config import (
     DATE_PREFIX_AUTO,
-    get_outlook_archive_folder,
+    Mailbox,
+    MailboxRegistry,
+    get_mailbox_archive_folder,
     get_outlook_category,
 )
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
 from email_archiver.outlook.client import EmailData
-from email_archiver.outlook.mapi import is_message_changed_error
+from email_archiver.outlook.mapi import MailboxNotInOutlookError, is_message_changed_error
 from email_archiver.paths import (
     REFUSED_OUTSIDE_ROOTS,
     REFUSED_UNRESOLVABLE,
@@ -150,6 +152,11 @@ MOVE_VIA_FOLDER_SWITCH = "folder_switch"
 # A `source: sent` mail is archived and tagged but never moved: Sent Items is
 # the user's record of what went out, so the mail stays where it is.
 MOVE_VIA_KEPT_IN_SENT = "kept_in_sent"
+
+# A mailbox's `outlook_status` in the `mailboxes` document (issue #108).
+MAILBOX_PRESENT = "present"   # its store is in the running Outlook
+MAILBOX_MISSING = "missing"   # Outlook answered; the mailbox is not in it
+MAILBOX_UNKNOWN = "unknown"   # Outlook not running, or the check could not run
 
 
 # ---------------------------------------------------------------- helpers ---
@@ -228,15 +235,18 @@ def _mail_dict(mail: Any, *, in_inbox: bool = True) -> dict[str, Any]:
 
 
 def _envelope(
-    verb: str, cfg: dict[str, Any], category: str | None = None
+    verb: str, cfg: dict[str, Any], category: str | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict[str, Any]:
     """The fields every verb's document opens with. ``category`` is the one
-    this run actually used, when the caller overrode the config's."""
+    this run actually used, when the caller overrode the config's;
+    ``archive_folder`` is the one of ``mailbox`` (``main_batch`` adds the
+    ``mailbox`` key itself, to every Outlook verb's document)."""
     return {
         "verb": verb,
         "schema_version": SCHEMA_VERSION,
         "generated_at": now_iso(),
-        "archive_folder": get_outlook_archive_folder(cfg),
+        "archive_folder": get_mailbox_archive_folder(cfg, mailbox),
         "category": category or get_outlook_category(cfg),
     }
 
@@ -408,6 +418,7 @@ def plan(
     *,
     candidates: int = DEFAULT_CANDIDATES,
     filters: PlanFilters | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict[str, Any]:
     """Rank archive folders for every Inbox mail, or for the ones ``filters``
     select.
@@ -480,7 +491,7 @@ def plan(
         for mid in not_found
     )
 
-    doc = _envelope("plan", cfg)
+    doc = _envelope("plan", cfg, mailbox=mailbox)
     if filters.active:
         doc["filters"] = filters.as_dict()
     doc["counts"] = {
@@ -531,6 +542,7 @@ def apply(
     *,
     renumber: bool = False,
     category: str | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict[str, Any]:
     """Archive each decided mail, move it out of the Inbox and tag it.
 
@@ -547,7 +559,9 @@ def apply(
     the next decision is still attempted.
 
     ``category`` overrides ``outlook.category`` for this run; the document's
-    ``category`` reports the one used.
+    ``category`` reports the one used. ``mailbox`` supplies the archive
+    folder (its own, else ``outlook.archive_folder``); the client it came with
+    is already bound to that mailbox's store.
 
     A decision may carry ``"source": "sent"`` (default ``"inbox"``, anything
     else is a ``bad_decision``): the mail is then looked up in Sent Items,
@@ -574,7 +588,7 @@ def apply(
     ``renumbered``. Off (the default), the verb behaves exactly as before and
     neither key appears.
     """
-    archive_folder = get_outlook_archive_folder(cfg)
+    archive_folder = get_mailbox_archive_folder(cfg, mailbox)
     category = category or get_outlook_category(cfg)
     roots = _archive_roots(cfg)
     results: list[dict[str, Any]] = []
@@ -586,7 +600,7 @@ def apply(
             results.append(
                 _apply_one(client, cfg, repo, raw, archive_folder, category, roots)
             )
-        doc = _envelope("apply", cfg, category)
+        doc = _envelope("apply", cfg, category, mailbox)
         if renumber:
             # Only a folder this run actually wrote into, and only once each.
             doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
@@ -1057,6 +1071,7 @@ def revert(
     *,
     renumber: bool = False,
     category: str | None = None,
+    mailbox: Mailbox | None = None,
 ) -> dict[str, Any]:
     """Delete the listed archive files and put each mail back in the Inbox.
 
@@ -1086,7 +1101,7 @@ def revert(
     document carries the old → new map per folder under ``renumbered``. Off
     (the default), the verb behaves exactly as before and neither key appears.
     """
-    archive_folder = get_outlook_archive_folder(cfg)
+    archive_folder = get_mailbox_archive_folder(cfg, mailbox)
     category = category or get_outlook_category(cfg)
     roots = _archive_roots(cfg)
     results: list[dict[str, Any]] = []
@@ -1118,7 +1133,7 @@ def revert(
             conn.commit()
 
             results.append(_finish_revert_item(client, archive_folder, category, result, message_id))
-        doc = _envelope("revert", cfg, category)
+        doc = _envelope("revert", cfg, category, mailbox)
         if renumber:
             # The source folders: a gap only exists where a file really went.
             doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
@@ -1189,6 +1204,58 @@ def _finish_revert_item(
 
     result["ok"] = not result["refused"] and not result["file_errors"]
     return result
+
+
+# -------------------------------------------------------------- mailboxes ---
+
+def mailboxes(
+    registry: MailboxRegistry, client_for: Callable[[Mailbox], Any] | None
+) -> dict[str, Any]:
+    """The registry as a document, with each mailbox's ``outlook_status``.
+
+    ``client_for`` builds a client bound to one mailbox; ``None`` means
+    Outlook is not running or cannot be reached, which makes every status
+    ``unknown`` — never ``present``, which would claim a check that did not
+    run. ``missing`` means Outlook answered and the mailbox has no store in it;
+    any other failure of the check is ``unknown`` too, with its reason. This is
+    how a consumer learns the mailbox list: it never reads the file.
+    """
+    entries: list[dict[str, Any]] = []
+    for mailbox in registry.mailboxes.values():
+        address = mailbox.address
+        status, reason = MAILBOX_UNKNOWN, "Outlook is not running"
+        if client_for is not None:
+            client = client_for(mailbox)
+            try:
+                client.store()
+                status, reason = MAILBOX_PRESENT, ""
+                if mailbox.synthesized:
+                    address = client.default_account_smtp()
+            except MailboxNotInOutlookError as exc:
+                status, reason = MAILBOX_MISSING, str(exc)
+            except Exception as exc:  # a check that could not run is not "missing"
+                status, reason = MAILBOX_UNKNOWN, f"{type(exc).__name__}: {exc}"
+        entries.append({
+            "alias": mailbox.alias,
+            "address": address,
+            "display_name": mailbox.display_name,
+            "aliases": list(mailbox.aliases),
+            "archive_folder": mailbox.archive_folder,
+            "default": mailbox.alias == registry.default,
+            "outlook_status": status,
+            "outlook_status_reason": reason,
+        })
+    logger.info(
+        "Mailboxes: %s.", ", ".join(f"{e['alias']} {e['outlook_status']}" for e in entries)
+    )
+    return {
+        "verb": "mailboxes",
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": now_iso(),
+        "registry": "synthesized" if registry.synthesized else "file",
+        "default": registry.default,
+        "mailboxes": entries,
+    }
 
 
 # --------------------------------------------------------------- renumber ---

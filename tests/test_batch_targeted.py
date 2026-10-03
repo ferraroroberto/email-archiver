@@ -428,7 +428,7 @@ def plan_process(cfg, monkeypatch, capsys):
     clients: list[TargetedFakeClient] = []
 
     def run(argv: list[str], inbox=()) -> tuple[int, dict, list[TargetedFakeClient]]:
-        def _factory() -> TargetedFakeClient:
+        def _factory(mailbox=None) -> TargetedFakeClient:
             fake = TargetedFakeClient(list(inbox))
             clients.append(fake)
             return fake

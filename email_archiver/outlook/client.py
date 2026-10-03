@@ -16,6 +16,10 @@ Design decisions:
   set_category / clear_category / is_open_in_inspector / release_folder_hold) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
+- Every folder (Inbox, Sent, the archive folder, Drafts) comes from
+  ``store()``: the store of the mailbox the client was built for, resolved by
+  address in outlook/stores.py — never from the namespace's default folders
+  (issue #108).
 - The draft surface (default_account_smtp / create_draft / update_draft /
   open_draft / read_draft / snapshot_draft / close_inspectors_of) is inherited
   from outlook/drafts.py, for email_archiver/draft.py and email_archiver/send.py.
@@ -29,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from email_archiver.config import Mailbox
 from email_archiver.outlook import process
 from email_archiver.outlook.drafts import DraftSurface
 from email_archiver.outlook.mapi import (
@@ -52,6 +57,7 @@ from email_archiver.outlook.mapi import (
     without_category,
 )
 from email_archiver.outlook.process import DEFAULT_START_TIMEOUT_SECONDS
+from email_archiver.outlook.stores import resolve_store
 from email_archiver.text import clean_subject as _clean_subject
 from email_archiver.text import normalize_message_id
 
@@ -216,7 +222,15 @@ class OutlookClient(DraftSurface):
 
     Lazy-initialised: COM objects are created only when needed, so importing
     this module is free (important for the fast-startup requirement).
+
+    ``mailbox`` is the registry mailbox every folder lookup is taken from
+    (issue #108); ``None`` is the profile's default store, as before the
+    registry existed. Its store is resolved once, on first use.
     """
+
+    def __init__(self, mailbox: Mailbox | None = None) -> None:
+        self.mailbox = mailbox
+        self._resolved_store: Any = None
 
     def is_running(self) -> bool:
         """
@@ -326,11 +340,22 @@ class OutlookClient(DraftSurface):
             )
         return app.GetNamespace("MAPI")
 
+    def store(self) -> Any:
+        """The ``Store`` of this client's mailbox, resolved once.
+
+        Raises:
+            MailboxNotInOutlookError: a registry mailbox with no store in the
+                running profile — never answered with the default store.
+        """
+        if self._resolved_store is None:
+            self._resolved_store = resolve_store(self._namespace(), self.mailbox)
+        return self._resolved_store
+
     def _inbox(self) -> Any:
-        return self._namespace().GetDefaultFolder(OL_FOLDER_INBOX)
+        return self.store().GetDefaultFolder(OL_FOLDER_INBOX)
 
     def _sent_items(self) -> Any:
-        return self._namespace().GetDefaultFolder(OL_FOLDER_SENT_MAIL)
+        return self.store().GetDefaultFolder(OL_FOLDER_SENT_MAIL)
 
     def _named_folder(self, name: str, *, create: bool = True) -> Any:
         """Return the folder ``name`` directly under the mailbox root.
@@ -340,7 +365,7 @@ class OutlookClient(DraftSurface):
         and ``create`` is set, because ``apply`` must have somewhere to move a
         mail it has already written to disk.
         """
-        root = self._inbox().Parent
+        root = self.store().GetRootFolder()
         folders = root.Folders
         for i in range(1, folders.Count + 1):
             folder = folders.Item(i)
@@ -672,13 +697,21 @@ class OutlookClient(DraftSurface):
         if current_id != parent_id:
             return False
 
+        # The mailbox's own Outbox, else its Drafts: an IMAP store other than
+        # the default one may have no Outbox of its own.
+        away = None
         try:
-            namespace = app.GetNamespace("MAPI")
-            away = namespace.GetDefaultFolder(OL_FOLDER_OUTBOX)
-            if safe_com(lambda: str(away.EntryID), "") == current_id:
-                away = namespace.GetDefaultFolder(OL_FOLDER_DRAFTS)
+            store = self.store()
         except Exception as exc:
             logger.warning("Could not pick a folder to switch Outlook to: %s", exc)
+            return None
+        for kind in (OL_FOLDER_OUTBOX, OL_FOLDER_DRAFTS):
+            candidate = safe_com(lambda k=kind: store.GetDefaultFolder(k), None)
+            if candidate is not None and safe_com(lambda c=candidate: str(c.EntryID), "") != current_id:
+                away = candidate
+                break
+        if away is None:
+            logger.warning("Could not pick a folder to switch Outlook to: no Outbox or Drafts to use.")
             return None
 
         switched = False

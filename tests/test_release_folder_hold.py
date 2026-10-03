@@ -54,6 +54,11 @@ class _Namespace:
     def __init__(self, defaults: dict[int, _Folder]) -> None:
         self._defaults = defaults
 
+    @property
+    def DefaultStore(self):  # noqa: N802
+        # The default store's folders are this namespace's (issue #108).
+        return self
+
     def GetDefaultFolder(self, which: int) -> _Folder:  # noqa: N802
         return self._defaults[which]
 

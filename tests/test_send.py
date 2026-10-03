@@ -100,6 +100,11 @@ class _FakeNamespace:
             raise RuntimeError("The operation failed. An object could not be found.")
         return self.items[entry_id]
 
+    @property
+    def DefaultStore(self):  # noqa: N802 - COM's spelling
+        # The default store's folders are this namespace's (issue #108).
+        return self
+
     def GetDefaultFolder(self, kind: int):  # noqa: N802 - COM's spelling
         assert kind == mapi.OL_FOLDER_DRAFTS
         return types.SimpleNamespace(EntryID="drafts")
@@ -392,7 +397,7 @@ def batch_process(monkeypatch, capsys):
         client = _client(monkeypatch, *items)
         monkeypatch.setattr(client, "ensure_running", lambda timeout: None)
 
-        def _factory() -> OutlookClient:
+        def _factory(mailbox=None) -> OutlookClient:
             started.append(client)
             return client
 

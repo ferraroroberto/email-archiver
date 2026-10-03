@@ -1,5 +1,6 @@
 """
-Headless batch entry point – plan / apply / revert / renumber / draft / read / send, over JSON.
+Headless batch entry point – plan / apply / revert / renumber / draft / read / send /
+mailboxes, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os, life-os),
 never used interactively: every verb prints exactly one JSON document on
@@ -21,6 +22,12 @@ one the caller approved (`read` reports it).
     python main_batch.py read --entry-id <entry_id>
     python main_batch.py send --entry-id <entry_id> --expect-hash <sha256> \
         [--expect-part body=<sha256> ...] [--expect-to <address> ...]
+    python main_batch.py mailboxes
+
+Every Outlook verb acts on one mailbox of the registry (config/mailboxes.json,
+or Outlook's default store when there is no such file), and its document
+carries that mailbox's alias as `mailbox`. `mailboxes` lists the registry with
+each mailbox's `outlook_status`, and never starts Outlook.
 
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
@@ -32,8 +39,11 @@ Exit codes:
        send) a draft that is gone, sent,
        outside Drafts or (update) has no marked body region, or (send) a draft
        that is not what was approved — `approval_mismatch`, naming the parts
-       under `error.differs` — or has a recipient with no readable address.
-       stdout carries `{"error": {"code", "message"}}` instead
+       under `error.differs` — or has a recipient with no readable address;
+       a malformed config/mailboxes.json (`mailbox_registry_invalid`), or a
+       registry mailbox with no store in the running Outlook
+       (`mailbox_not_in_outlook`), which is never answered with the default
+       store. stdout carries `{"error": {"code", "message"}}` instead
 
 Why a separate process rather than a library call: the Inbox verbs drive
 Outlook over COM, and a COM modal (the address-book security prompt, a profile
@@ -57,10 +67,17 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from email_archiver import batch, draft, send
-from email_archiver.config import load_config, setup_logging
+from email_archiver.config import (
+    MailboxRegistry,
+    MailboxRegistryError,
+    load_config,
+    load_mailbox_registry,
+    setup_logging,
+)
+from email_archiver.outlook import process
 from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.drafts import DraftUpdateError, ReplySourceError
-from email_archiver.outlook.mapi import OutlookUnavailableError
+from email_archiver.outlook.mapi import MailboxNotInOutlookError, OutlookUnavailableError
 from email_archiver.outlook.process import DEFAULT_START_TIMEOUT_SECONDS
 from email_archiver.text import normalize_message_id
 
@@ -74,6 +91,8 @@ ERROR_BAD_INPUT = "bad_input"
 ERROR_OUTLOOK_UNAVAILABLE = "outlook_unavailable"
 ERROR_COM_UNAVAILABLE = "com_unavailable"
 ERROR_SELF_ADDRESS_UNRESOLVED = "self_address_unresolved"
+ERROR_MAILBOX_REGISTRY_INVALID = "mailbox_registry_invalid"
+ERROR_MAILBOX_NOT_IN_OUTLOOK = "mailbox_not_in_outlook"
 
 
 def _emit(document: dict[str, Any]) -> None:
@@ -333,7 +352,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="An address the To line must hold; given at all, the To line must be "
              "exactly these. Repeatable.",
     )
+
+    sub.add_parser(
+        "mailboxes",
+        help="List the mailbox registry with each mailbox's outlook_status "
+             "(present / missing / unknown). Never starts Outlook.",
+    )
     return parser
+
+
+def _mailboxes(registry: MailboxRegistry) -> dict[str, Any]:
+    """The ``mailboxes`` document. Attaches to a running Outlook only: one that
+    is not running, or cannot be reached, makes every status ``unknown``."""
+    try:
+        import pythoncom  # noqa: PLC0415
+    except ImportError:
+        logger.warning("pywin32 is not available; every mailbox status is unknown.")
+        return batch.mailboxes(registry, None)
+    pythoncom.CoInitialize()
+    try:
+        running = process.get_active_application() is not None
+        if not running:
+            logger.info("Outlook is not running; every mailbox status is unknown.")
+        return batch.mailboxes(registry, OutlookClient if running else None)
+    finally:
+        pythoncom.CoUninitialize()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -397,6 +440,19 @@ def main(argv: list[str] | None = None) -> int:
         if not category:
             return _fail(verb, ERROR_BAD_INPUT, "--category must not be blank")
 
+    # Every verb but renumber is about a mailbox. The registry is read here,
+    # before Outlook: a malformed file must stop the run, never fall back to
+    # the default store.
+    registry: MailboxRegistry | None = None
+    if verb != "renumber":
+        try:
+            registry = load_mailbox_registry()
+        except MailboxRegistryError as exc:
+            return _fail(verb, ERROR_MAILBOX_REGISTRY_INVALID, str(exc))
+    if verb == "mailboxes":
+        _emit(_mailboxes(registry))
+        return EXIT_OK
+
     if verb == "renumber":
         # No Outlook, no COM: this verb only reads a folder and the index.
         document = batch.renumber(cfg, args.folder, dry_run=args.dry_run)
@@ -421,20 +477,28 @@ def main(argv: list[str] | None = None) -> int:
     # call below happens here; nothing is handed to a worker.
     pythoncom.CoInitialize()
     try:
-        client = OutlookClient()
+        mailbox = registry.select(None)
+        client = OutlookClient(mailbox)
         try:
             client.ensure_running(timeout=args.start_timeout)
+            # Resolved up front, so a mailbox with no store stops the run
+            # before any lookup instead of failing every mail one by one.
+            client.store()
+        except MailboxNotInOutlookError as exc:
+            return _fail(verb, ERROR_MAILBOX_NOT_IN_OUTLOOK, str(exc))
         except OutlookUnavailableError as exc:
             return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
 
         try:
             if verb == "plan":
                 document = batch.plan(
-                    client, cfg, candidates=args.candidates, filters=filters
+                    client, cfg, candidates=args.candidates, filters=filters,
+                    mailbox=mailbox,
                 )
             elif verb == "apply":
                 document = batch.apply(
-                    client, cfg, payload, renumber=args.renumber, category=category
+                    client, cfg, payload, renumber=args.renumber, category=category,
+                    mailbox=mailbox,
                 )
             elif verb == "draft":
                 self_address = draft.resolve_self_address(cfg, client)
@@ -456,7 +520,8 @@ def main(argv: list[str] | None = None) -> int:
                 document = send.send(client, args.entry_id.strip(), *expectations)
             else:
                 document = batch.revert(
-                    client, cfg, payload, renumber=args.renumber, category=category
+                    client, cfg, payload, renumber=args.renumber, category=category,
+                    mailbox=mailbox,
                 )
         except DraftUpdateError as exc:
             # Raised before the item was changed: the caller learns which of
@@ -470,6 +535,8 @@ def main(argv: list[str] | None = None) -> int:
             # Raised before Send(): nothing went out, and the caller learns
             # which parts no longer match what was approved.
             return _fail(verb, exc.code, str(exc), differs=exc.differs)
+        except MailboxNotInOutlookError as exc:
+            return _fail(verb, ERROR_MAILBOX_NOT_IN_OUTLOOK, str(exc))
         except OutlookUnavailableError as exc:
             # Outlook was up when ensure_running() checked but quit or went
             # unreachable partway through the walk (client._namespace()).
@@ -486,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         pythoncom.CoUninitialize()
 
+    document["mailbox"] = mailbox.alias
     _emit(document)
     return EXIT_OK
 

@@ -150,6 +150,10 @@ class FakeDraftClient:
     def ensure_running(self, timeout: float = 60.0) -> None:
         return None
 
+    def store(self):
+        # The real client resolves its mailbox's store; nothing to resolve here.
+        return self
+
     def default_account_smtp(self) -> str:
         self.account_lookups += 1
         return self.account_smtp
@@ -465,7 +469,7 @@ def batch_process(tmp_path, monkeypatch, capsys):
         refuse_update: DraftUpdateError | None = None,
         refuse_create: ReplySourceError | None = None,
     ) -> tuple[int, dict, list[FakeDraftClient]]:
-        def _factory() -> FakeDraftClient:
+        def _factory(mailbox=None) -> FakeDraftClient:
             fake = FakeDraftClient(account_smtp=account_smtp)
             fake.refuse_update = refuse_update
             fake.refuse_create = refuse_create
@@ -620,6 +624,11 @@ class _FakeNamespace:
         if self.mail is None or entry_id != self.mail.EntryID:
             raise RuntimeError("The operation failed. An object could not be found.")
         return self.mail
+
+    @property
+    def DefaultStore(self):  # noqa: N802 - COM's spelling
+        # The default store's folders are this namespace's (issue #108).
+        return self
 
     def GetDefaultFolder(self, kind: int) -> _FakeFolder:  # noqa: N802 - COM's spelling
         assert kind == mapi.OL_FOLDER_DRAFTS

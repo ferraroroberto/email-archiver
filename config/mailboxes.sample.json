@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "default": "owner",
+  "mailboxes": {
+    "owner": {
+      "address": "owner@example.com",
+      "display_name": "Owner Name",
+      "aliases": ["me"],
+      "archive_folder": "Archive"
+    },
+    "second": {
+      "address": "second@example.com",
+      "display_name": "Second Name",
+      "aliases": [],
+      "archive_folder": "Archive"
+    }
+  }
+}

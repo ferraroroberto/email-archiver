@@ -167,6 +167,10 @@ class FakeOutlookClient:
         self.release_raises = False
         self.folder_switches = 0
 
+    def store(self):
+        # The real client resolves its mailbox's store; nothing to resolve here.
+        return self
+
     # -- the surface batch.py calls -------------------------------------------
 
     def iter_inbox(self, preview_len: int = 500):
