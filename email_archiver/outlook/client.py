@@ -13,7 +13,7 @@ Design decisions:
   vocabulary and COM-free helpers they share in outlook/mapi.py.
 - The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
   find_by_message_id / archive_ref / refetch / save_item / move_to /
-  set_category / clear_category / is_open_in_inspector) lives here
+  set_category / clear_category / is_open_in_inspector / release_folder_hold) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
 - The draft surface (default_account_smtp / create_draft / update_draft /
@@ -23,6 +23,7 @@ Design decisions:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,7 +38,9 @@ from email_archiver.outlook.mapi import (
     DASL_TRANSPORT_HEADERS,
     DASL_X_ARCHIVE_REF,
     OL_CLASS_MAIL_ITEM,
+    OL_FOLDER_DRAFTS,
     OL_FOLDER_INBOX,
+    OL_FOLDER_OUTBOX,
     OL_FOLDER_SENT_MAIL,
     OutlookUnavailableError,
     SelectedEmailError,
@@ -53,6 +56,12 @@ from email_archiver.text import clean_subject as _clean_subject
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
+
+# How long the Explorer stays on the other folder before it is put back, so
+# Outlook has let go of the reading-pane item. Unmeasured (issue #111): the
+# manual workaround this automates takes seconds, and half a second costs
+# nothing on a path only a refused move reaches.
+EXPLORER_SETTLE_SECONDS = 0.5
 
 
 # ----------------------------------------------------------------- types ----
@@ -626,6 +635,68 @@ class OutlookClient(DraftSurface):
     def entry_id(self, item: Any) -> str:
         """The mail's current EntryID (valid only for its current folder)."""
         return safe_com(lambda: str(item.EntryID), "")
+
+    def release_folder_hold(self, item: Any) -> bool | None:
+        """Switch the Explorer away from the mail's folder and back, to free it.
+
+        An item the Explorer shows as its selected / reading-pane mail can keep
+        a reference that refuses every write, a ``Move`` included — the hold
+        issue #111 hit, which selecting another folder and then the message
+        again cleared with no restart. ``ClearSelection`` and
+        ``AddToSelection`` are no use: they raise ``0x80004005`` in
+        conversation view, which is Outlook's default. Setting
+        ``CurrentFolder`` works in every view.
+
+        Only done when the active Explorer is showing *this mail's own folder*:
+        any other folder is not holding it, and moving the user's view for
+        nothing is a cost. The original folder is always put back, and the
+        user's global Outlook settings are never touched. Three answers:
+
+        ``True``   the Explorer was switched away and back — retry the move;
+        ``False``  there is no Explorer, or it is not on the mail's folder, so
+                   nothing was done;
+        ``None``   the question could not be answered or the switch failed —
+                   not evidence that the hold survives a switch.
+        """
+        app = process.get_active_application()
+        if app is None:
+            return None
+        explorer = safe_com(lambda: app.ActiveExplorer(), None)
+        if explorer is None:
+            return False
+        current = safe_com(lambda: explorer.CurrentFolder, None)
+        current_id = safe_com(lambda: str(current.EntryID), "")
+        parent_id = safe_com(lambda: str(item.Parent.EntryID), "")
+        if not current_id or not parent_id:
+            return None
+        if current_id != parent_id:
+            return False
+
+        try:
+            namespace = app.GetNamespace("MAPI")
+            away = namespace.GetDefaultFolder(OL_FOLDER_OUTBOX)
+            if safe_com(lambda: str(away.EntryID), "") == current_id:
+                away = namespace.GetDefaultFolder(OL_FOLDER_DRAFTS)
+        except Exception as exc:
+            logger.warning("Could not pick a folder to switch Outlook to: %s", exc)
+            return None
+
+        switched = False
+        try:
+            explorer.CurrentFolder = away
+            switched = True
+            time.sleep(EXPLORER_SETTLE_SECONDS)
+        except Exception as exc:
+            logger.warning("Could not switch Outlook to another folder: %s", exc)
+        finally:
+            try:
+                explorer.CurrentFolder = current
+            except Exception as exc:
+                logger.error(
+                    "Could not put Outlook back on the folder it was showing: "
+                    "%s: %s", type(exc).__name__, exc,
+                )
+        return True if switched else None
 
     def is_open_in_inspector(self, item: Any) -> bool | None:
         """Whether this mail is open in an Outlook window. ``None`` = unknown.

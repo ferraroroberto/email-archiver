@@ -35,8 +35,12 @@ Design decisions:
   files written and its place in the Inbox kept. ``apply`` moves a reference
   re-acquired by EntryID, and on that refusal saves and retries once; which
   path finished it is logged and reported as ``move_via``. A refusal that
-  survives both is reported as ``message_changed`` rather than ``move_failed``
-  — usually a mail left open in an Outlook window, and the message says so.
+  survives both gets one more defence: when Outlook's Explorer is showing the
+  mail's own folder, it holds the mail as its selected / reading-pane item, so
+  the Explorer is switched away and back and the move retried once (issue #111).
+  A refusal that survives all of that is reported as ``message_changed`` rather
+  than ``move_failed`` — usually a mail left open in an Outlook window, and the
+  message says so.
 - **Nothing is written outside the archive roots.** ``revert`` refuses per
   file, and ``apply`` refuses per decision, any path that does not resolve
   inside ``archive.root_paths`` — so a malformed, hostile or LLM-invented
@@ -139,6 +143,10 @@ ERROR_CATEGORY_FAILED = "category_failed"
 MOVE_VIA_REFETCHED = "refetched"     # a reference read back out of the store
 MOVE_VIA_ORIGINAL = "original"       # the re-acquire failed; the original moved
 MOVE_VIA_SAVED_RETRY = "saved_retry"  # refused with 0x80040109, saved, retried
+# Still refused after the save: Outlook's Explorer was showing the mail's folder
+# and holding the mail as its selection, so it was switched away and back and
+# the move retried (issue #111). The one path that disturbs the user's view.
+MOVE_VIA_FOLDER_SWITCH = "folder_switch"
 # A `source: sent` mail is archived and tagged but never moved: Sent Items is
 # the user's record of what went out, so the mail stays where it is.
 MOVE_VIA_KEPT_IN_SENT = "kept_in_sent"
@@ -809,12 +817,22 @@ def _move_failure_error(
     mail is actually open. A check that could not be completed is reported as
     *not determined* and never as "no window", because pointing an operator at
     a restart they do not need is exactly the failure this replaces.
+
+    Issue #111 found a third holder: the Explorer showing the mail as its
+    selected / reading-pane item, freed by selecting another folder and the
+    message again with no restart. ``_move_out_of_inbox`` does that switch
+    itself, and a refusal it wraps in ``_MoveRefused`` says whether it ran. The
+    restart advice is kept only for one that ran and did not help; otherwise
+    the message gives the by-hand switch as the remedy.
     """
-    if not is_message_changed_error(exc):
+    if not is_message_changed_error(getattr(exc, "cause", exc)):
         return {
             "code": ERROR_MOVE_FAILED,
             "message": f"{type(exc).__name__}: {exc}",
         }
+
+    folder_switched = getattr(exc, "folder_switched", None)
+    exc = getattr(exc, "cause", exc)
 
     try:
         open_in_window = client.is_open_in_inspector(item)
@@ -825,32 +843,59 @@ def _move_failure_error(
         )
         open_in_window = None
     logger.info(
-        "Move of %s was refused as a changed message; open in a window: %s.",
+        "Move of %s was refused as a changed message; open in a window: %s; "
+        "Outlook switched to another folder and back: %s.",
         message_id, {True: "yes", False: "no", None: "not determined"}[open_in_window],
+        {True: "yes", False: "not applicable", None: "not determined"}[folder_switched],
     )
 
+    # Only a switch that actually happened and did not help is evidence the
+    # hold outlasts one. One that was not applicable or could not run says
+    # nothing, so it points the user at the same switch by hand, not a restart.
+    tried_switch = (
+        "Outlook was switched to another folder and back automatically, and "
+        "that did not free it. "
+    )
+    by_hand = (
+        "Select another folder in Outlook, then this message again, and apply "
+        "this same decision again; restart Outlook only if that does not clear it."
+    )
     if open_in_window is True:
         cause = (
             "This mail is open in an Outlook window, which holds it and "
             "refuses every write to it. Close that window and apply this same "
             "decision again."
         )
-    elif open_in_window is False:
+    elif open_in_window is False and folder_switched is True:
         cause = (
             "This mail is not open in any Outlook window, so something else "
-            "in the running Outlook is holding it. That hold outlasts "
-            "re-applies, so applying again before a restart is not expected "
-            "to help. Restart Outlook, then apply this same decision again. "
-            "Deleting the mail from the Inbox by hand instead leaves the "
-            "files already written as its only copy, with nothing in "
+            f"in the running Outlook is holding it. {tried_switch}"
+            "That hold outlasts re-applies, so applying again before a restart "
+            "is not expected to help. Restart Outlook, then apply this same "
+            "decision again. Deleting the mail from the Inbox by hand instead "
+            "leaves the files already written as its only copy, with nothing in "
             "Outlook pointing at them."
+        )
+    elif open_in_window is False:
+        cause = (
+            "This mail is not open in any Outlook window, but Outlook may "
+            f"still be holding it as the message selected in its folder view. {by_hand}"
+        )
+    elif folder_switched is True:
+        cause = (
+            "Whether this mail is open in an Outlook window could not be "
+            f"determined. {tried_switch}A mail left open is the usual cause, so "
+            "close any window showing it and apply this same decision again; "
+            "restart Outlook if that does not clear it."
         )
     else:
         cause = (
             "Whether this mail is open in an Outlook window could not be "
             "determined. A mail left open is the usual cause, so close any "
-            "window showing it and apply this same decision again; restart "
-            "Outlook if that does not clear it."
+            "window showing it and apply this same decision again. Failing "
+            "that, Outlook may be holding it as the message selected in its "
+            "folder view: select another folder in Outlook, then this message "
+            "again, and apply again; restart Outlook if that does not clear it."
         )
 
     return {
@@ -862,6 +907,23 @@ def _move_failure_error(
             f"in the Inbox, so re-applying writes nothing."
         ),
     }
+
+
+class _MoveRefused(Exception):
+    """A move still refused as a changed message after the folder switch.
+
+    Carries the refusal itself (``cause``) and what the switch did, so
+    ``_move_failure_error`` can report the right remedy: a switch that happened
+    and did not help is the only evidence a restart is what is left.
+    ``folder_switched`` is ``True`` (it ran and did not help), ``False`` (the
+    Explorer was not on the mail's folder, nothing to switch) or ``None`` (it
+    could not be determined or could not run).
+    """
+
+    def __init__(self, cause: Exception, folder_switched: bool | None) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.folder_switched = folder_switched
 
 
 def _move_out_of_inbox(
@@ -878,13 +940,18 @@ def _move_out_of_inbox(
     1. move a reference re-acquired from the store by EntryID, which carries
        none of the original's modified state;
     2. on a 0x80040109 anyway, ``Save()`` that reference — which is what clears
-       the flag — and retry the move exactly once.
+       the flag — and retry the move exactly once;
+    3. on a 0x80040109 still, free a mail the Explorer is holding as its
+       selected / reading-pane item by switching the Explorer away and back,
+       then retry exactly once (issue #111).
 
     Any other failure is raised untouched: a store that refuses a move for a
     different reason is a different problem, and retrying it would only hide
-    it. Which of the three paths ran is logged and reported as ``move_via``,
-    because "the re-acquire was enough" and "it took a save and a retry" are
-    the two facts that say whether this fix is holding on a real mailbox.
+    it. Which of the paths ran is logged and reported as ``move_via``, because
+    "the re-acquire was enough", "it took a save and a retry" and "the view had
+    to be switched" are the facts that say whether this fix is holding on a
+    real mailbox. A 0x80040109 that survives step 3 is raised as
+    ``_MoveRefused`` so the message can say the switch was already tried.
     """
     target, via = item, MOVE_VIA_ORIGINAL
     try:
@@ -910,12 +977,59 @@ def _move_out_of_inbox(
             "Outlook refused to move %s (the message has been changed) on the "
             "%s reference; saving it and retrying once.", message_id, via,
         )
-        client.save_item(target)
-        moved = client.move_to(target, archive_folder)
-        via = MOVE_VIA_SAVED_RETRY
+        try:
+            client.save_item(target)
+            moved = client.move_to(target, archive_folder)
+            via = MOVE_VIA_SAVED_RETRY
+        except Exception as retry_exc:
+            if not is_message_changed_error(retry_exc):
+                raise
+            moved = _retry_after_folder_switch(
+                client, target, archive_folder, message_id, retry_exc
+            )
+            via = MOVE_VIA_FOLDER_SWITCH
 
     logger.info("Moved %s to %r via the %s reference.", message_id, archive_folder, via)
     return moved, via
+
+
+def _retry_after_folder_switch(
+    client: Any, target: Any, archive_folder: str, message_id: str, refusal: Exception
+) -> Any:
+    """Step 3 of ``_move_out_of_inbox``: switch the Explorer, retry once.
+
+    Raises ``_MoveRefused`` — never a bare refusal — when the move is still
+    refused, so the failure message knows whether the switch ran. A switch that
+    raised is reported as *not determined*, never as tried.
+    """
+    try:
+        switched = client.release_folder_hold(target)
+    except Exception as exc:  # a courtesy step, never the run
+        logger.warning(
+            "Could not switch Outlook's folder for %s: %s: %s",
+            message_id, type(exc).__name__, exc,
+        )
+        switched = None
+    if switched is not True:
+        logger.info(
+            "Not switching Outlook's folder for %s: %s.", message_id,
+            "the Explorer is not showing the mail's folder" if switched is False
+            else "the switch could not be done",
+        )
+        raise _MoveRefused(refusal, switched) from refusal
+
+    logger.info(
+        "Move of %s was still refused after the save; Outlook was showing its "
+        "folder, so it was switched to another folder and back. Retrying once.",
+        message_id,
+    )
+    try:
+        client.save_item(target)
+        return client.move_to(target, archive_folder)
+    except Exception as exc:
+        if is_message_changed_error(exc):
+            raise _MoveRefused(exc, True) from exc
+        raise
 
 
 # ----------------------------------------------------------------- revert ---
