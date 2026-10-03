@@ -114,6 +114,7 @@ archiver/
 │   ├── paths.py                 ← Archive-root guard shared by revert and renumber
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
+│   ├── find.py                  ← Headless read-only live search over a mailbox's Outlook folders (no COM)
 │   ├── send.py                  ← Headless read-back + guarded send: fingerprint, approval check (no COM)
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
@@ -150,7 +151,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes / find (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
@@ -282,7 +283,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: eight verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, and one that lists the mailboxes it can act on — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: nine verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, one that lists the mailboxes it can act on, and one that searches a mailbox's live folders — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
@@ -294,6 +295,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 & .\.venv\Scripts\python.exe main_batch.py read --entry-id <entry_id>
 & .\.venv\Scripts\python.exe main_batch.py send --entry-id <entry_id> --expect-hash <sha256>
 & .\.venv\Scripts\python.exe main_batch.py mailboxes
+& .\.venv\Scripts\python.exe main_batch.py find --mailbox <alias> --query "<words>"
 ```
 
 | Verb | Reads | Does |
@@ -306,6 +308,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `read` | nothing | Reads one unsent draft back as it is stored, with its fingerprint. Writes nothing, shows nothing. See [Sending an approved draft](#sending-an-approved-draft). |
 | `send` | `--expect-hash` (and optionally `--expect-part`, `--expect-to`) | Sends that one draft, only if its live fingerprint still matches. Refused with `approval_mismatch` naming what differs otherwise. |
 | `mailboxes` | nothing | Lists the mailbox registry with each mailbox's `outlook_status`. Never starts Outlook. See [Mailboxes](#mailboxes). |
+| `find` | `--query` (and optionally `--since`, `--folders`, `--limit`) | Searches one mailbox's live Outlook folders (Inbox, archive folder, Sent). **Read-only.** See [Searching live mail](#searching-live-mail). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -606,6 +609,20 @@ copy config\mailboxes.sample.json config\mailboxes.json
 - **Drafting as X.** The draft's `SendUsingAccount` is set to the Outlook account whose SMTP address is X's, right after the item is created (before it is displayed, so the signature is that account's). The account is then read back. If the draft would send as anyone else, it is discarded unsaved (`sending_account_mismatch`). A reply sets the account the same way rather than trusting Outlook to infer it. The BCC copy goes to X's own address, so it lands in X's Inbox to be filed. After saving, the draft is checked to be in X's Drafts and moved there if Outlook put it elsewhere. With no account for X's address, the run exits 2 with `account_not_in_outlook` and nothing is created. The `draft` document reports `from_address`, so the caller's preview can show it.
 - **Reading and sending as X.** `read --mailbox X` and `send --mailbox X` accept only a draft in X's Drafts. `send` also requires the draft's sending account to be X's. A draft whose account was changed by hand, or is unset, is refused with `sending_account_mismatch` and nothing is sent. The account is not part of the fingerprint, so an approval taken before this check existed still matches. `read` and `send` report `from_address`.
 - The From display name is the account's *Your name* field in Outlook. Set it in Outlook before the first real send from a newly added account.
+
+### Searching live mail
+
+The index (`data/emails.db`) knows only mail already archived to disk, and `plan --search` reads only the Inbox or Sent. A mailbox's history lives in its Outlook folders, so `find` searches them live:
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py find --mailbox second --query "<words>" [--since 2026-01-01] [--folders inbox,archive,sent] [--limit 25]
+```
+
+- **Read-only.** It moves, saves, deletes, drafts and sends nothing. A mailbox with no archive folder is reported with `via: "absent"` for that folder. The folder is never created.
+- **Every word must match**, case-insensitively, in the subject, sender (name or address), To / CC, or body: the same semantics as the index search. Each folder is narrowed server-side with `Items.Restrict` (a DASL `LIKE` filter, synchronous, no `AdvancedSearch` callback) and sorted newest first. A store that rejects the filter is walked instead, matching each mail's subject, sender, recipients and body preview, and that folder reports `via: "walk"`.
+- **Folders.** The default is the Inbox, the mailbox's `archive_folder` and Sent. `--folders` narrows them. `--since` compares the received time (the sent time in Sent). `--limit` (default 25) caps the hits, newest first across all folders.
+- **Each hit** carries `message_id`, `subject`, `sender`, `recipients`, `date` (sent time), `folder` (the Outlook folder's name), `entry_id`, `body_preview` and `already_archived` (the `.msg` path when its Message-ID is in the index, else `null`). The document adds per-folder `matched` counts under `folders`, `counts.matched` / `counts.returned`, and `truncated` when more matched than were returned.
+- **Coverage limit.** The document says `coverage: "outlook_folders"` and gives a `coverage_note`, rather than implying completeness. With Gmail over IMAP (root folder path `[Gmail]`, All Mail not synced), mail archived from Gmail web or phone without the `[Gmail]/Archive` label lives only in All Mail, which is invisible to Outlook, so `find` cannot see it. A complete search would need the Gmail API, which is out of scope here.
 
 ---
 
