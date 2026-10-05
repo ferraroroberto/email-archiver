@@ -104,11 +104,16 @@ def _address_list(data: dict[str, Any], key: str, *, required: bool = False) -> 
 
 
 def text_to_html(text: str) -> str:
-    """Minimal HTML for a plain-text body: escaped, paragraphs and line breaks kept."""
+    """Minimal HTML for a plain-text body: escaped, paragraphs and line breaks kept.
+
+    Quotes stay literal (``quote=False``): element content doesn't need them
+    escaped, and Outlook stores ``&#x27;`` back as ``'``, which would leave
+    ``html_to_text`` unable to read the saved draft.
+    """
     normalised = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
     paragraphs = [p for p in _BLANK_LINES.split(normalised) if p.strip()]
     return "".join(
-        "<p>" + "<br>".join(html.escape(line) for line in p.split("\n")) + "</p>"
+        "<p>" + "<br>".join(html.escape(line, quote=False) for line in p.split("\n")) + "</p>"
         for p in paragraphs
     )
 

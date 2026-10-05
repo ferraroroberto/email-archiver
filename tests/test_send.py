@@ -222,6 +222,13 @@ def test_the_region_text_is_only_given_for_a_body_text_to_html_wrote():
     assert marked_body_region("<body>no markers</body>") is None
 
 
+def test_quotes_are_written_literally_so_outlook_has_nothing_to_rewrite():
+    text = "I'll say \"yes\" & <go>"
+    body_html = draft.text_to_html(text)
+    assert body_html == "<p>I'll say \"yes\" &amp; &lt;go&gt;</p>"
+    assert draft.html_to_text(body_html) == text
+
+
 # ------------------------------------------------------------ send: match ---
 
 def test_a_matching_draft_is_sent_exactly_once(monkeypatch):
