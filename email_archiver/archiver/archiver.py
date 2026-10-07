@@ -194,10 +194,14 @@ def _scan_folder(folder_path: str) -> _FolderScan:
     the per-folder date-prefix inference from that single pass.
 
     This is the one place that actually calls ``os.listdir`` on a
-    destination folder — ``get_next_sequence_number`` and
-    ``infer_date_prefix`` are thin, independently-testable wrappers around
-    it, but ``EmailArchiver.archive`` calls this directly so a real archive
+    destination folder — ``infer_date_prefix`` is a thin wrapper around it,
+    but ``EmailArchiver.archive`` calls this directly so a real archive
     never lists a OneDrive-backed folder twice.
+
+    Both forms are always recognised, independently of which form this run
+    writes, so a folder holding a mix never gets a colliding number. The
+    next sequence is ``'001'`` if the folder is empty or has no numbered
+    files.
     """
     try:
         files = os.listdir(folder_path)
@@ -230,21 +234,10 @@ def _scan_folder(folder_path: str) -> _FolderScan:
     return _FolderScan(next_sequence=next_sequence, inferred_date_prefix=inferred)
 
 
-def get_next_sequence_number(folder_path: str) -> str:
-    """
-    Scan the folder for files starting with either the undated ``NNN - `` or
-    the dated ``YYYY-MM-DD - NNN - `` prefix and return (max + 1).
-    Both forms are always recognised, independently of which form this run
-    writes, so a folder holding a mix never gets a colliding number.
-    Returns '001' if the folder is empty or has no numbered files.
-    """
-    return _scan_folder(folder_path).next_sequence
-
-
 def infer_date_prefix(folder_path: str) -> bool | None:
     """
     Infer which filename form ``folder_path`` already uses, from the same
-    dated-vs-undated counts ``get_next_sequence_number`` derives.
+    dated-vs-undated counts ``_scan_folder`` derives the next sequence from.
 
     Majority wins: ``True`` when more of the folder's existing numbered
     files use the dated ``YYYY-MM-DD - NNN - `` form than the undated
