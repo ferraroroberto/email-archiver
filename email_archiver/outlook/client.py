@@ -424,20 +424,10 @@ class OutlookClient(DraftSurface):
         falls back to the whole Inbox for that same check; which path ran is
         logged.
         """
-        items = self._inbox().Items
-        flt = received_since_filter(since)
-        try:
-            restricted = items.Restrict(flt)
-        except Exception as exc:
-            logger.warning(
-                "The store rejected the received-date filter (%s: %s); walking "
-                "the whole Inbox and checking each mail's date instead.",
-                type(exc).__name__, exc,
-            )
-            yield from self._iter_items(items, preview_len)
-            return
-        logger.info("Received-date filter applied server-side: %s", flt)
-        yield from self._iter_items(restricted, preview_len)
+        yield from self._iter_restricted(
+            self._inbox().Items, received_since_filter(since), "received",
+            "the whole Inbox", preview_len,
+        )
 
     def iter_sent(self, preview_len: int = 500) -> Iterator[InboxMail]:
         """Yield every MailItem in Sent Items (issue #103)."""
@@ -452,19 +442,29 @@ class OutlookClient(DraftSurface):
         :meth:`iter_inbox_received_since`, on the sent time; ``batch.plan``
         still applies the exact check to every mail.
         """
-        items = self._sent_items().Items
-        flt = sent_since_filter(since)
+        yield from self._iter_restricted(
+            self._sent_items().Items, sent_since_filter(since), "sent",
+            "all of Sent Items", preview_len,
+        )
+
+    def _iter_restricted(
+        self, items: Any, flt: str, kind: str, walk_desc: str, preview_len: int
+    ) -> Iterator[InboxMail]:
+        """Yield ``items`` narrowed by ``Items.Restrict(flt)``; a store that
+        rejects the filter is walked whole instead, for the caller's exact
+        per-mail check. ``kind`` (``received``/``sent``) and ``walk_desc`` only
+        word the log lines saying which path ran."""
         try:
             restricted = items.Restrict(flt)
         except Exception as exc:
             logger.warning(
-                "The store rejected the sent-date filter (%s: %s); walking "
-                "all of Sent Items and checking each mail's date instead.",
-                type(exc).__name__, exc,
+                "The store rejected the %s-date filter (%s: %s); walking "
+                "%s and checking each mail's date instead.",
+                kind, type(exc).__name__, exc, walk_desc,
             )
             yield from self._iter_items(items, preview_len)
             return
-        logger.info("Sent-date filter applied server-side: %s", flt)
+        logger.info("%s-date filter applied server-side: %s", kind.capitalize(), flt)
         yield from self._iter_items(restricted, preview_len)
 
     def search_folder(

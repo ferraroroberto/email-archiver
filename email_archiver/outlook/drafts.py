@@ -302,24 +302,7 @@ class DraftSurface:
             )
         if account is not None:
             _send_as(mail, account, self.mailbox.address)
-        if to is not None:
-            mail.To = "; ".join(to)
-        if cc is not None:
-            mail.CC = "; ".join(cc)
-        mail.BCC = "; ".join(bcc)
-        if subject is not None:
-            mail.Subject = subject
-        for path in attachments:
-            mail.Attachments.Add(path)
-
-        created = CreatedDraft()
-        if ref:
-            try:
-                mail.PropertyAccessor.SetProperty(DASL_X_ARCHIVE_REF, ref)
-                created.ref_stamped = True
-            except Exception as exc:
-                created.ref_reason = f"SetProperty refused: {type(exc).__name__}: {exc}"
-                logger.warning("Could not stamp X-Archive-Ref: %s", exc)
+        created = _fill_draft(mail, to, cc, bcc, subject, attachments, ref)
 
         existing_html = ""
         if display:
@@ -521,26 +504,9 @@ class DraftSurface:
         if new_html is None:
             raise DraftUpdateError(DRAFT_BODY_UNMARKED, _UNMARKED_MESSAGE)
 
-        if to is not None:
-            mail.To = "; ".join(to)
-        if cc is not None:
-            mail.CC = "; ".join(cc)
-        mail.BCC = "; ".join(bcc)
-        if subject is not None:
-            mail.Subject = subject
-        while int(mail.Attachments.Count):
-            mail.Attachments.Remove(1)
-        for path in attachments:
-            mail.Attachments.Add(path)
-
-        updated = CreatedDraft()
-        if ref:
-            try:
-                mail.PropertyAccessor.SetProperty(DASL_X_ARCHIVE_REF, ref)
-                updated.ref_stamped = True
-            except Exception as exc:
-                updated.ref_reason = f"SetProperty refused: {type(exc).__name__}: {exc}"
-                logger.warning("Could not stamp X-Archive-Ref: %s", exc)
+        updated = _fill_draft(
+            mail, to, cc, bcc, subject, attachments, ref, replace_attachments=True,
+        )
 
         mail.HTMLBody = new_html
         mail.Save()
@@ -676,6 +642,49 @@ def _send_as(mail: Any, account: Any, address: str) -> None:
             "nothing was saved",
         )
     logger.info("Draft set to send as this mailbox's account.")
+
+
+def _fill_draft(
+    mail: Any,
+    to: list[str] | None,
+    cc: list[str] | None,
+    bcc: list[str],
+    subject: str | None,
+    attachments: list[str],
+    ref: str | None,
+    *,
+    replace_attachments: bool = False,
+) -> CreatedDraft:
+    """Write the caller's fields onto ``mail``: the one fill both
+    ``create_draft`` and ``update_draft`` run.
+
+    ``to`` / ``cc`` / ``subject`` of ``None`` keep what the item has. With
+    ``replace_attachments`` the item's existing attachments are removed first.
+    A refused ``X-Archive-Ref`` stamp is recorded on the returned
+    :class:`CreatedDraft` (``ref_reason``), never raised.
+    """
+    if to is not None:
+        mail.To = "; ".join(to)
+    if cc is not None:
+        mail.CC = "; ".join(cc)
+    mail.BCC = "; ".join(bcc)
+    if subject is not None:
+        mail.Subject = subject
+    if replace_attachments:
+        while int(mail.Attachments.Count):
+            mail.Attachments.Remove(1)
+    for path in attachments:
+        mail.Attachments.Add(path)
+
+    result = CreatedDraft()
+    if ref:
+        try:
+            mail.PropertyAccessor.SetProperty(DASL_X_ARCHIVE_REF, ref)
+            result.ref_stamped = True
+        except Exception as exc:
+            result.ref_reason = f"SetProperty refused: {type(exc).__name__}: {exc}"
+            logger.warning("Could not stamp X-Archive-Ref: %s", exc)
+    return result
 
 
 def _addressed_to(mail: Any, address: str) -> bool:
