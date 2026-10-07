@@ -70,14 +70,14 @@ The email's sent date can be prefixed to every name in the bundle, for folders s
 2026-03-14 - 023 - signed_contract.docx
 ```
 
-`naming.date_prefix` in `config/config.yaml` controls the default form:
+`naming.date_prefix` in `config/config.yaml` controls the default form. The shipped `config.example.yaml` sets it to `auto`; omitting the key entirely (or a `config.yaml` that predates this toggle) falls back to `false` — never dated:
 
 ```yaml
 naming:
-  date_prefix: auto   # default; true → always dated, false → never dated
+  date_prefix: auto   # shipped example's setting; true → always dated, false → never dated (also the fallback when the key is absent)
 ```
 
-- **`auto` (default)** — infer the form per destination folder from what it already holds: majority of existing numbered files wins (dated vs. undated), falling back to the undated form when the folder is empty, has no numbered files, or ties. This is what makes an unattended batch run (see [Batch mode](#batch-mode-headless), which has no checkbox) file into a mixed archive correctly without any per-mail configuration — a folder that already files everything as `YYYY-MM-DD - NNN - <name>` (for instance a tree shared with a dated document archive) keeps getting the dated form, the rest keep the undated form.
+- **`auto` (the shipped example's setting)** — infer the form per destination folder from what it already holds: majority of existing numbered files wins (dated vs. undated), falling back to the undated form when the folder is empty, has no numbered files, or ties. This is what makes an unattended batch run (see [Batch mode](#batch-mode-headless), which has no checkbox) file into a mixed archive correctly without any per-mail configuration — a folder that already files everything as `YYYY-MM-DD - NNN - <name>` (for instance a tree shared with a dated document archive) keeps getting the dated form, the rest keep the undated form.
 - **`true` / `false`** — force that form for every folder, ignoring its contents.
 - **Per archive** — the **Date prefix (YYYY-MM-DD)** checkbox in the archive dialog's bottom bar starts pre-ticked to whatever the highlighted suggestion's own folder would get (inferred when the config is `auto`, the fixed config value otherwise), and can still be flipped by hand before clicking `Archive`, `Browse folder…` or `Explorer folder`; nothing is written to the config either way. Until you flip it, that tick is only a preview: `Browse folder…` and `Explorer folder` resolve the form for the folder you actually pick, never for the card you last hovered.
 
@@ -207,7 +207,7 @@ archive:
     - "C:/Users/YourName/OneDrive/Archive/"
 ```
 
-All other defaults are sensible out of the box. The one knob worth knowing about is `naming.date_prefix` (default `auto`) — see [File naming convention](#file-naming-convention).
+All other defaults are sensible out of the box. The one knob worth knowing about is `naming.date_prefix` — the shipped example sets `auto`, but an omitted key falls back to `false` (never dated) — see [File naming convention](#file-naming-convention).
 
 ### First scan
 
