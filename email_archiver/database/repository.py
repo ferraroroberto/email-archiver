@@ -16,6 +16,15 @@ from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
+# Ceilings on one ``suggest_folders`` call. Neither was measured; they bound
+# the work a single suggestion does.
+# - FTS_ROW_CAP: best-scoring FTS rows read before they are grouped by folder.
+# - FOLDER_POOL_CAP: best-scoring folders kept after grouping, each costing one
+#   sample-subjects query. This is also the most folders any caller can get
+#   back: ``max_results`` above it (e.g. ``plan --candidates 25``) is clamped.
+FTS_ROW_CAP = 1000
+FOLDER_POOL_CAP = 20
+
 
 # ----------------------------------------------------------------- types ----
 
@@ -277,6 +286,9 @@ class EmailRepository:
         """
         Return ranked folder suggestions for an incoming email.
 
+        At most ``FOLDER_POOL_CAP`` folders come back however large
+        ``max_results`` is.
+
         Why two steps instead of a JOIN:
         SQLite's bm25() auxiliary function and the FTS5 `rank` column can only
         be resolved when the FTS5 virtual table is the *outermost* primary table
@@ -310,9 +322,9 @@ class EmailRepository:
                 FROM   emails_fts
                 WHERE  emails_fts MATCH ?
                 ORDER  BY rank
-                LIMIT  1000
+                LIMIT  ?
                 """,
-                (fts_query,),
+                (fts_query, FTS_ROW_CAP),
             ).fetchall()
         except sqlite3.OperationalError as exc:
             logger.warning("FTS query failed (%s) for query %r", exc, fts_query)
@@ -343,7 +355,7 @@ class EmailRepository:
         max_raw = max(folder_scores.values()) or 1.0
         sorted_folders = sorted(
             folder_scores.items(), key=lambda x: x[1], reverse=True
-        )[:20]
+        )[:FOLDER_POOL_CAP]
 
         suggestions: list[FolderSuggestion] = []
         for fp, raw_score in sorted_folders:
