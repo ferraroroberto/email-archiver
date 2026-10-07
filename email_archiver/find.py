@@ -27,7 +27,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION, now_iso
+from email_archiver.batch import SCHEMA_VERSION, mail_matches, now_iso
 from email_archiver.config import Mailbox, get_mailbox_archive_folder
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
@@ -51,25 +51,6 @@ def _iso_or_empty(value: datetime | None) -> str:
     return value.isoformat() if value is not None else ""
 
 
-def _matcher(words: list[str], since: datetime | None, sent: bool):
-    """The per-mail check a folder walk uses when the store rejects the
-    filter: the same all-words rule, over the fields the walk has read."""
-    needles = [w.casefold() for w in words]
-
-    def matches(mail: Any) -> bool:
-        haystack = "\n".join(
-            (mail.subject, mail.sender, mail.recipients, mail.body_preview)
-        ).casefold()
-        if not all(n in haystack for n in needles):
-            return False
-        if since is None:
-            return True
-        when = (mail.date_sent or mail.date_received) if sent else (mail.date_received or mail.date_sent)
-        return when is not None and when >= since
-
-    return matches
-
-
 def find(
     client: Any,
     cfg: dict[str, Any],
@@ -91,7 +72,8 @@ def find(
         sent = folder == FIND_SENT
         result = client.search_folder(
             folder, archive_folder, words_filter(words, since, sent=sent),
-            _matcher(words, since, sent), preview_len=preview_len, limit=limit,
+            lambda mail, sent=sent: mail_matches(mail, words, since, sent),
+            preview_len=preview_len, limit=limit,
         )
         searched.append({
             "folder": result.folder, "name": result.name,

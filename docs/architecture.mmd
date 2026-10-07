@@ -124,6 +124,7 @@ flowchart TB
   MAINBATCH -->|find verb| FIND
   FIND -->|search_folder: Items.Restrict DASL words_filter,\nSort SentOn desc; archive folder never created| OUTLOOK
   FIND -->|already archived?| REPO
+  FIND -->|mail_matches: the plan filter's per-mail rule,\nfor the folder-walk fallback| BATCH
 
   subgraph sendflow["Guarded send (headless, spawned by another app after the user approved)"]
     SEND["send.py\nread_document · fingerprint (sha256 per part + one hash) ·\ncheck_sending_account — the mailbox's account or refuse ·\ncheck_approval — refuses naming the parts. No COM"]

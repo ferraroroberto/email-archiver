@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -387,26 +387,40 @@ def _plan_source(
         yield from client.iter_inbox(preview_len)
 
 
-def _matches(client: Any, mail: Any, filters: PlanFilters) -> bool:
-    """Whether one mail passes every filter, the cheap checks before the
-    header read. ``since`` is checked here even after a server-side Restrict:
-    this is the exact comparison, the Restrict only narrows the walk."""
-    if filters.since is not None:
+def mail_matches(
+    mail: Any, terms: Sequence[str], since: datetime | None, sent: bool
+) -> bool:
+    """Whether ``mail`` carries every term (casefolded, in the subject, sender,
+    recipients or body preview) and is dated at or after ``since``.
+
+    The one per-mail rule shared by ``plan --search``/``--since`` and the
+    ``find`` folder-walk fallback. ``since`` is checked here even after a
+    server-side Restrict: this is the exact comparison, the Restrict only
+    narrows the walk."""
+    if since is not None:
         # A Sent Items mail's own clock is when it was sent; its received time
         # is whatever the store stamped and means nothing here.
         when = (
             (mail.date_sent or mail.date_received)
-            if filters.folder == SOURCE_SENT
+            if sent
             else (mail.date_received or mail.date_sent)
         )
-        if when is None or when < filters.since:
+        if when is None or when < since:
             return False
-    if filters.search:
+    if terms:
         haystack = "\n".join(
             (mail.subject, mail.sender, mail.recipients, mail.body_preview)
         ).casefold()
-        if not all(term.casefold() in haystack for term in filters.search):
+        if not all(term.casefold() in haystack for term in terms):
             return False
+    return True
+
+
+def _matches(client: Any, mail: Any, filters: PlanFilters) -> bool:
+    """Whether one mail passes every filter, the cheap checks before the
+    header read."""
+    if not mail_matches(mail, filters.search, filters.since, filters.folder == SOURCE_SENT):
+        return False
     if filters.ref is not None and client.archive_ref(mail.item) != filters.ref:
         return False
     return True
