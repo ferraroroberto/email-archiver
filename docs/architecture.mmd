@@ -62,7 +62,7 @@ flowchart TB
 
   subgraph archive["Archive Email data flow"]
     OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback), batch surface"]
-    PROCESS["outlook/process.py\nis_running tasklist fallback,\nensure_running: start, poll, tear down what it started"]
+    PROCESS["outlook/process.py\nensure_running: start, poll, tear down what it started"]
     DRAFTS["outlook/drafts.py: DraftSurface\ndraft methods OutlookClient inherits"]
     STORES["outlook/stores.py: resolve_store\nthe mailbox's Store by address (account, else store name);\nDefaultStore only for the synthesized mailbox;\nno match: MailboxNotInOutlookError"]
     MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError, MailboxNotInOutlookError, SelectedEmailError,\nCOM-free helpers (categories, headers, body markers)"]

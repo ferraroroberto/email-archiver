@@ -79,13 +79,10 @@ def _fuzzy_folder_score(subject: str, folder_path: str) -> float:
     """
     if not subject:
         return 0.0
-    try:
-        from rapidfuzz import fuzz  # type: ignore
-        folder_name = Path(folder_path).name
-        return fuzz.token_set_ratio(subject, folder_name) / 100.0
-    except ImportError:
-        # rapidfuzz not installed — skip the name boost
-        return 0.0
+    from rapidfuzz import fuzz  # noqa: PLC0415
+
+    folder_name = Path(folder_path).name
+    return fuzz.token_set_ratio(subject, folder_name) / 100.0
 
 
 def _subject_thread_score(incoming_subject: str, sample_subjects: list[str]) -> float:
@@ -100,15 +97,12 @@ def _subject_thread_score(incoming_subject: str, sample_subjects: list[str]) -> 
     """
     if not incoming_subject or not sample_subjects:
         return 0.0
-    try:
-        from rapidfuzz import fuzz  # type: ignore
-        best = max(
-            fuzz.token_set_ratio(incoming_subject, s) / 100.0
-            for s in sample_subjects if s
-        )
-        return best
-    except ImportError:
-        return 0.0
+    from rapidfuzz import fuzz  # noqa: PLC0415
+
+    return max(
+        fuzz.token_set_ratio(incoming_subject, s) / 100.0
+        for s in sample_subjects if s
+    )
 
 
 class SuggestionEngine:

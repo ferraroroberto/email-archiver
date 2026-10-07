@@ -129,7 +129,7 @@ archiver/
 │   ├── outlook/
 │   │   ├── client.py           ← Outlook COM isolation (OutlookClient): read path + batch surface
 │   │   ├── drafts.py           ← Draft surface OutlookClient inherits (DraftSurface)
-│   │   ├── process.py          ← Outlook process: is_running / ensure_running
+│   │   ├── process.py          ← Outlook process: ensure_running
 │   │   ├── mapi.py             ← Shared constants and COM-free helpers
 │   │   ├── stores.py           ← Which Outlook store a mailbox lives in (by address)
 │   │   └── sending.py          ← The one COM Send call (send verb only)
@@ -144,7 +144,7 @@ archiver/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Native folder-picker wrapper
 │
-├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, is_running regression, Message-ID, batch verbs)
+├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, Message-ID, batch verbs)
 ├── docs/
 │   └── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure
 │
@@ -271,7 +271,7 @@ The Stream Deck `launch_scan.bat` is unchanged and still opens the progress wind
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the `is_running()` regression, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read` and `send`) end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read` and `send`) end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/

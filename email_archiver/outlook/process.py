@@ -27,56 +27,6 @@ _POLL_INTERVAL_SECONDS = 1.0
 _TERMINATE_WAIT_SECONDS = 10.0
 
 
-def tasklist_has_image(image_name: str) -> bool:
-    """
-    Return True if `image_name` (e.g. "OUTLOOK.EXE") appears in the Windows
-    process list, using the `tasklist` console tool.
-
-    A failed query is *not* the same fact as "the process is not running", so
-    every failure is logged before falling back to False — otherwise a broken
-    query is indistinguishable from a quiet machine.
-    """
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    is_windows = sys.platform == "win32"
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/NH"],
-            capture_output=True, timeout=5,
-            # tasklist writes the OEM code page, not the parent's locale.
-            # text=True decodes with the ambient locale, which under
-            # PYTHONUTF8=1 is UTF-8: the OEM bytes then fail to decode, stdout
-            # comes back None, and the result silently reads as "not running".
-            encoding="oem" if is_windows else "utf-8",
-            errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if is_windows else 0,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning(
-            "Could not run tasklist to check for %s (%s: %s) - "
-            "treating as not running.", image_name, type(exc).__name__, exc,
-        )
-        return False
-
-    if result.returncode != 0:
-        logger.warning(
-            "tasklist exited %s while checking for %s (%s) - "
-            "treating as not running.",
-            result.returncode, image_name, (result.stderr or "").strip(),
-        )
-        return False
-
-    if not (result.stdout or "").strip():
-        logger.warning(
-            "tasklist returned no output while checking for %s - cannot tell "
-            "whether it is running; treating as not running.", image_name,
-        )
-        return False
-
-    return image_name.upper() in result.stdout.upper()
-
-
 def _outlook_executable() -> str | None:
     """Path to the registered outlook.exe, or None when it cannot be found.
 

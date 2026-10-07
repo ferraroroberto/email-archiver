@@ -207,9 +207,9 @@ def test_the_client_never_kills_outlook_by_image_name():
     """A regression guard with teeth, against the tempting wrong fix.
 
     Ending outlook.exe by image name — taskkill /IM, or any process-list sweep
-    — would take the user's own Outlook down with the orphan. The module reads
-    the process list (is_running's tasklist fallback) and must never do more
-    than read it.
+    — would take the user's own Outlook down with the orphan. The client reads
+    the process list (is_running, via psutil) and must never do more than read
+    it.
     """
     source = "".join(
         Path(mod.__file__).read_text(encoding="utf-8")

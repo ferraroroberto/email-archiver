@@ -255,21 +255,13 @@ class OutlookClient(DraftSurface):
         self._resolved_store: Any = None
 
     def is_running(self) -> bool:
-        """
-        Check if Outlook.exe is in the process list without starting it.
-        Uses psutil for reliability; falls back to a tasklist call.
-        """
-        try:
-            import psutil
-            return any(
-                p.name().lower() == "outlook.exe"
-                for p in psutil.process_iter(["name"])
-            )
-        except ImportError:
-            pass
+        """Check if Outlook.exe is in the process list without starting it."""
+        import psutil  # noqa: PLC0415
 
-        # Fallback: subprocess tasklist (slower but no extra dep)
-        return process.tasklist_has_image("OUTLOOK.EXE")
+        return any(
+            p.name().lower() == "outlook.exe"
+            for p in psutil.process_iter(["name"])
+        )
 
     def get_selected_email(self) -> EmailData | None:
         """
