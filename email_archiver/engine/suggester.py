@@ -131,7 +131,7 @@ class SuggestionEngine:
                 subject=email.subject,
                 sender=email.sender,
                 recipients=email.recipients,
-                max_results=self._max * 3,   # extra candidates for re-ranking (repository clamps to FOLDER_POOL_CAP)
+                max_results=self._max * 3,   # extra candidates for re-ranking (the repository pool grows to fit)
                 min_score=0.0,               # we apply min_score after blending
             )
         finally:
