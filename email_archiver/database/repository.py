@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 # Ceilings on one ``suggest_folders`` call. Neither was measured; they bound
 # the work a single suggestion does.
 # - FTS_ROW_CAP: best-scoring FTS rows read before they are grouped by folder.
-# - FOLDER_POOL_CAP: best-scoring folders kept after grouping, each costing one
-#   sample-subjects query. This is also the most folders any caller can get
-#   back: ``max_results`` above it (e.g. ``plan --candidates 25``) is clamped.
+# - FOLDER_POOL_CAP: floor on the best-scoring folders kept after grouping, each
+#   costing one sample-subjects query. The pool grows past it to ``max_results``
+#   (e.g. ``plan --candidates 25``), so a caller gets as many folders as it asked
+#   for, up to the folders the FTS rows touched.
 FTS_ROW_CAP = 1000
 FOLDER_POOL_CAP = 20
 
@@ -286,8 +287,10 @@ class EmailRepository:
         """
         Return ranked folder suggestions for an incoming email.
 
-        At most ``FOLDER_POOL_CAP`` folders come back however large
-        ``max_results`` is.
+        The folder pool is ``max(FOLDER_POOL_CAP, max_results)``, so it grows
+        with the request: a ``max_results`` above ``FOLDER_POOL_CAP`` is
+        honoured. Fewer come back only when the FTS rows touch fewer folders
+        or ``min_score`` drops some.
 
         Why two steps instead of a JOIN:
         SQLite's bm25() auxiliary function and the FTS5 `rank` column can only
@@ -355,7 +358,7 @@ class EmailRepository:
         max_raw = max(folder_scores.values()) or 1.0
         sorted_folders = sorted(
             folder_scores.items(), key=lambda x: x[1], reverse=True
-        )[:FOLDER_POOL_CAP]
+        )[:max(FOLDER_POOL_CAP, max_results)]
 
         suggestions: list[FolderSuggestion] = []
         for fp, raw_score in sorted_folders:
