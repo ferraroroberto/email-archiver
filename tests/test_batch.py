@@ -20,6 +20,8 @@ Everything on screen here is synthetic: no real folder name, address or subject.
 from __future__ import annotations
 
 import os
+import weakref
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -147,7 +149,8 @@ class FakeOutlookClient:
         # in until Outlook itself was restarted (issue #59).
         self.move_message_changed_always = False
         self.refetch_should_fail = False
-        self.refetched: list[str] = []
+        # Every (EntryID, StoreID) the mail was fetched again by.
+        self.refetched: list[tuple[str, str]] = []
         # What Outlook answers when asked whether the mail is open in a window:
         # True, False, or None for "the check could not be completed" — the
         # three states `message_changed` reports separately (issue #76).
@@ -156,16 +159,16 @@ class FakeOutlookClient:
         self.category_should_fail = False
         self.moves: list[tuple[str, str | None]] = []
         # The Explorer holding the item as the selected / reading-pane mail
-        # (issue #111): every Move is refused until it is released. Only a
-        # folder switch releases it — conversation view blocks the others.
+        # (issue #111): every Move is refused while the view is on the Inbox.
+        # Coming back to the Inbox selects it again (issue #130), so only a
+        # move made while the view is parked elsewhere gets through.
         self.selection_held = False
-        # What the real client answers when asked to switch the Explorer away
-        # and back: True (switched), False (the Explorer is not showing the
-        # mail's folder), None (could not be determined). `release_raises` is
-        # the call blowing up instead.
+        # What the real client tells the block when asked to park the Explorer
+        # off the Inbox: True (parked), False (the Explorer is not showing the
+        # Inbox), None (could not be determined).
         self.folder_switch_result: bool | None = False
-        self.release_raises = False
         self.folder_switches = 0
+        self.view_away = False
 
     def store(self):
         # The real client resolves its mailbox's store; nothing to resolve here.
@@ -199,22 +202,29 @@ class FakeOutlookClient:
                 return item
         return None
 
-    def refetch(self, item: _FakeMailItem) -> _FakeMailItem | None:
+    def item_ids(self, item: _FakeMailItem) -> tuple[str, str]:
+        return item.EntryID, FAKE_STORE_ID
+
+    def refetch(self, entry_id: str, store_id: str) -> _FakeMailItem | None:
         """Stand-in for ``Session.GetItemFromID`` — a reference straight from
         the store, which on a real mailbox is a *different* COM object carrying
         none of the modified state ``SaveAs`` left on the original."""
         if self.refetch_should_fail:
             raise _FakeComError(-2147221233, "The item could not be found.", None, None)
-        self.refetched.append(item.EntryID)
-        return item
+        self.refetched.append((entry_id, store_id))
+        for items in self.folders.values():
+            for item in items:
+                if item.EntryID == entry_id:
+                    return item
+        return None
 
-    def save_item(self, item: _FakeMailItem) -> None:
-        item.Save()
+    def is_same_object(self, first, second) -> bool | None:
+        return first is second
 
     def move_to(self, item: _FakeMailItem, folder_name: str | None):
         if self.move_should_fail:
             raise RuntimeError("the store refused the move")
-        if self.move_message_changed_always or self.selection_held:
+        if self.move_message_changed_always or (self.selection_held and not self.view_away):
             raise _message_changed_error()
         if self.move_message_changed_once:
             self.move_message_changed_once = False
@@ -243,21 +253,85 @@ class FakeOutlookClient:
     def entry_id(self, item: _FakeMailItem) -> str:
         return item.EntryID
 
-    def release_folder_hold(self, item: _FakeMailItem) -> bool | None:
+    @contextmanager
+    def view_away_from_inbox(self):
         self.folder_switches += 1
-        if self.release_raises:
-            raise RuntimeError("Outlook would not change folder")
-        if self.folder_switch_result:
-            self.selection_held = False
-        return self.folder_switch_result
+        self.view_away = self.folder_switch_result is True
+        try:
+            yield self.folder_switch_result
+        finally:
+            self.view_away = False
 
-    def is_open_in_inspector(self, item: _FakeMailItem) -> bool | None:
+    def is_open_in_inspector(self, entry_id: str) -> bool | None:
         if self.inspector_check_raises:
             raise RuntimeError("Outlook would not list its windows")
         return self.open_in_inspector
 
 
+class _Ref:
+    """One COM reference to a stored mail. ``GetItemFromID`` hands out a new
+    object on every call, never the one already held (the issue #130 probe),
+    so each lookup here is a new ``_Ref`` over the same ``_FakeMailItem``."""
+
+    def __init__(self, mail: _FakeMailItem) -> None:
+        self.mail = mail
+
+    def __getattr__(self, name: str):
+        return getattr(self.mail, name)
+
+
+class HeldByReferenceClient(FakeOutlookClient):
+    """Outlook refusing a move with 0x80040109 while the mail is still
+    referenced anywhere else, or while the Explorer shows the Inbox and so
+    holds it as its selection — the refusal issue #130 found surviving a
+    save, a re-fetch, and a switch away and back. It clears only for a fresh
+    reference that is the sole one alive, moved while the view is away."""
+
+    def __init__(self, inbox: list[_FakeMailItem]) -> None:
+        super().__init__(inbox)
+        self.selection_held = True
+        self.folder_switch_result = True
+        self.refusals = 0
+        self._refs: weakref.WeakSet[_Ref] = weakref.WeakSet()
+
+    def _ref(self, mail: _FakeMailItem | None) -> _Ref | None:
+        if mail is None:
+            return None
+        ref = _Ref(mail)
+        self._refs.add(ref)
+        return ref
+
+    def find_by_message_id(self, message_id: str, folder_name: str | None = None):
+        return self._ref(super().find_by_message_id(message_id, folder_name))
+
+    def refetch(self, entry_id: str, store_id: str) -> _Ref | None:
+        return self._ref(super().refetch(entry_id, store_id))
+
+    def item_ids(self, item: _Ref) -> tuple[str, str]:
+        return super().item_ids(item.mail)
+
+    def is_same_object(self, first: _Ref, second: _Ref) -> bool | None:
+        return first is second
+
+    def move_to(self, item: _Ref, folder_name: str | None):
+        if self._others_alive(item) or (self.selection_held and not self.view_away):
+            self.refusals += 1
+            raise _message_changed_error()
+        return super().move_to(item.mail, folder_name)
+
+    def _others_alive(self, item: _Ref) -> bool:
+        return any(ref is not item and ref.mail is item.mail for ref in self._refs)
+
+
 # --------------------------------------------------------------- fixtures ---
+
+FAKE_STORE_ID = "store-0001"
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_pauses(monkeypatch):
+    """The real pauses between move retries are seconds of a test run each."""
+    monkeypatch.setattr(batch, "MOVE_RETRY_DELAYS_SECONDS", (0.0, 0.0))
 
 @pytest.fixture
 def archive_root(tmp_path) -> Path:
@@ -655,16 +729,20 @@ def test_apply_moves_a_reference_re_acquired_from_the_store(cfg, archive_root):
     result = doc["results"][0]
     assert result["ok"] is True
     assert result["move_via"] == batch.MOVE_VIA_REFETCHED
-    assert client.refetched == ["entry-a@example.invalid"]
+    assert client.refetched == [("entry-a@example.invalid", FAKE_STORE_ID)], (
+        "the re-fetch must name the store the mail came from (issue #130)"
+    )
 
 
-def test_apply_saves_and_retries_once_when_the_message_has_been_changed(
+def test_apply_retries_on_a_fresh_reference_without_saving_when_refused(
     cfg, archive_root
 ):
     """The reported failure: the first Move is refused with 0x80040109.
 
-    A store that refuses the fresh reference too gets one ``Save()``-then-Move
-    before ``apply`` gives up, and the result says which path finished it.
+    A store that refuses the fresh reference too gets the mail fetched again
+    once every reference is let go, and moved — never ``Save()``d, since a
+    save on a refused mail is refused as well (issue #130) — and the result
+    says which path finished it.
     """
     dest = archive_root / "Project Alpha"
     item = _mail("a@example.invalid", "Changed underfoot")
@@ -680,8 +758,11 @@ def test_apply_saves_and_retries_once_when_the_message_has_been_changed(
     assert result["ok"] is True, "a changed message must not strand the mail"
     assert result["moved"] is True
     assert result["error"] is None
-    assert result["move_via"] == batch.MOVE_VIA_SAVED_RETRY
-    assert item.save_calls > saves_before, "the retry must Save() first"
+    assert result["move_via"] == batch.MOVE_VIA_RELEASED_RETRY
+    # The one save is the category's, on the mail already moved; the refused
+    # reference itself is never saved (issue #130).
+    assert item.save_calls == saves_before + 1, "a refused mail is never saved"
+    assert client.refetched == [("entry-a@example.invalid", FAKE_STORE_ID)] * 2
     assert client.folders[None] == [], "the Inbox must lose the mail"
     assert client.folders["Archive"] == [item]
     assert result["entry_id"] == "entry-a@example.invalid-in-Archive"
@@ -781,7 +862,7 @@ def test_a_mail_no_window_holds_is_told_to_restart(cfg, archive_root):
     message = result["error"]["message"]
     assert "not open in any Outlook window" in message
     assert "Restart Outlook" in message
-    assert "another folder and back" in message
+    assert "moved to another folder automatically" in message
 
 
 def test_a_mail_no_window_holds_is_not_told_a_re_apply_will_help(cfg, archive_root):
@@ -842,32 +923,30 @@ def _held_by_the_explorer(cfg, archive_root, **client_state):
 def test_apply_frees_a_mail_held_by_the_explorer_and_moves_it(cfg, archive_root):
     """Issue #111: the mail was selected in the reading pane, every defence was
     refused, and selecting another folder then the mail again let the very same
-    decision file. ``apply`` does that switch itself, retries once, and reports
-    it as its own ``move_via`` — no restart, no second run."""
+    decision file. ``apply`` parks the view itself, moves the mail while it is
+    away, and reports it as its own ``move_via`` — no restart, no second run."""
     client, result = _held_by_the_explorer(cfg, archive_root, folder_switch_result=True)
 
     assert result["ok"] is True, "a selection hold must not strand the mail"
     assert result["moved"] is True
     assert result["error"] is None
     assert result["move_via"] == batch.MOVE_VIA_FOLDER_SWITCH
-    assert client.folder_switches == 1, "the switch is tried once, after the refusals"
+    assert client.folder_switches == 1, "the switch is tried once, after the refusal"
+    assert client.view_away is False, "the view is put back afterwards"
     assert client.folders[None] == [], "the Inbox must lose the mail"
     assert len(client.folders["Archive"]) == 1
 
 
 def test_the_folder_switch_is_only_tried_after_the_move_was_refused(cfg, archive_root):
     """Switching folders disturbs the user's view, so a move that goes through
-    on either earlier path must never touch the Explorer."""
+    on its first attempt must never touch the Explorer."""
     dest = archive_root / "Project Alpha"
-    for state in ({}, {"move_message_changed_once": True}):
-        client = FakeOutlookClient([_mail("a@example.invalid", "Moves fine")])
-        for name, value in state.items():
-            setattr(client, name, value)
-        doc = batch.apply(client, cfg, [
-            {"message_id": "a@example.invalid", "folder_path": str(dest)},
-        ])
-        assert doc["results"][0]["ok"] is True
-        assert client.folder_switches == 0
+    client = FakeOutlookClient([_mail("a@example.invalid", "Moves fine")])
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+    assert doc["results"][0]["ok"] is True
+    assert client.folder_switches == 0
 
 
 def test_a_move_refused_for_another_reason_never_switches_folders(cfg, archive_root):
@@ -900,26 +979,21 @@ def test_an_explorer_on_another_folder_is_left_alone_and_told_the_remedy(
     assert client.folders[None], "the mail is still in the Inbox"
 
 
-@pytest.mark.parametrize(
-    "client_state",
-    [{"folder_switch_result": None}, {"release_raises": True}],
-    ids=["undetermined", "raised"],
-)
 def test_a_folder_switch_that_could_not_run_is_not_reported_as_tried(
-    cfg, archive_root, client_state
+    cfg, archive_root
 ):
     """A switch that did not happen is not evidence the hold survives one:
     claiming it did would send the user to restart Outlook for nothing. The
     result is the manual remedy, and the run still ends cleanly."""
     _, result = _held_by_the_explorer(
-        cfg, archive_root, open_in_inspector=False, **client_state
+        cfg, archive_root, open_in_inspector=False, folder_switch_result=None
     )
 
     message = result["error"]["message"]
     assert result["ok"] is False
     assert result["error"]["code"] == batch.ERROR_MESSAGE_CHANGED
     assert "Select another folder in Outlook" in message
-    assert "another folder and back" not in message
+    assert "moved to another folder automatically" not in message
     assert "Restart Outlook" not in message
 
 
@@ -931,9 +1005,9 @@ def test_a_refusal_that_survives_the_folder_switch_keeps_the_restart_advice(
     client, result = _stuck_move(cfg, archive_root, open_in_inspector=False)
 
     message = result["error"]["message"]
-    assert client.folder_switches == 1, "retried once after the switch, never again"
+    assert client.folder_switches == 1, "the view is parked once, never again"
     assert "Restart Outlook" in message
-    assert "another folder and back" in message
+    assert "moved to another folder automatically" in message
     assert "did not free it" in message
 
 
@@ -945,6 +1019,70 @@ def test_a_mail_open_in_a_window_is_still_told_to_close_it_after_a_switch(
     message = result["error"]["message"]
     assert "Close that window" in message
     assert "Restart Outlook" not in message
+
+
+# ------------------------------------------------- stale reference (#130) ---
+
+def _apply_held_by_reference(cfg, archive_root, **client_state):
+    dest = archive_root / "Project Alpha"
+    item = _mail("a@example.invalid", "Held twice over")
+    client = HeldByReferenceClient([item])
+    for name, value in client_state.items():
+        setattr(client, name, value)
+    doc = batch.apply(client, cfg, [
+        {"message_id": "a@example.invalid", "folder_path": str(dest)},
+    ])
+    return client, item, doc["results"][0]
+
+
+def test_a_refusal_held_by_a_reference_and_the_selection_clears_once_both_let_go(
+    cfg, archive_root
+):
+    """Issue #130: the folder switch kept failing because the retry worked on
+    the same stale object — the reference ``apply`` still held, saved and moved
+    again after coming back to the Inbox. The move goes through only on a fresh
+    reference that is the sole one alive, made while the view is still away;
+    and nothing refused is ever saved."""
+    client, item, result = _apply_held_by_reference(cfg, archive_root)
+
+    assert result["ok"] is True, result["error"]
+    assert result["moved"] is True
+    assert result["move_via"] == batch.MOVE_VIA_FOLDER_SWITCH
+    assert item.save_calls == 1, "only the category's own save, never a refused mail's"
+    assert client.folders[None] == [], "the Inbox must lose the mail"
+    assert client.folders["Archive"] == [item]
+    assert client.view_away is False, "the view is put back afterwards"
+
+
+def test_the_original_is_let_go_before_the_first_move(cfg, archive_root):
+    """With no selection holding it, a mail refused only while ``apply`` still
+    held the reference it archived moves on the first attempt: the original is
+    let go before the re-fetched reference is moved, and the view is never
+    touched."""
+    client, _, result = _apply_held_by_reference(cfg, archive_root, selection_held=False)
+
+    assert result["ok"] is True, result["error"]
+    assert result["move_via"] == batch.MOVE_VIA_REFETCHED
+    assert client.refusals == 0
+    assert client.folder_switches == 0
+
+
+def test_a_refused_move_leaves_breadcrumbs_for_the_next_occurrence(
+    cfg, archive_root, caplog
+):
+    """The next refusal on a real mailbox must be diagnosable from the log
+    alone: whether the re-fetch was the original object, that every reference
+    was let go first, which store was named (as a fingerprint, never the id),
+    where the view was, and which attempt finally moved it."""
+    with caplog.at_level("INFO", logger="email_archiver.batch"):
+        _apply_held_by_reference(cfg, archive_root)
+
+    log = caplog.text
+    assert "the re-fetched object is the original: no" in log
+    assert "References to it held now: none (all released)" in log
+    assert "with StoreID #" in log and FAKE_STORE_ID not in log
+    assert "Outlook's view while a@example.invalid is moved: parked on another folder" in log
+    assert "on attempt 2, 0.0 s after the one before" in log
 
 
 def test_apply_finishes_an_already_archived_mail_without_writing_files(
