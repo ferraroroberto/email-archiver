@@ -83,19 +83,19 @@ def test_finds_the_mail_open_in_a_window(monkeypatch, client):
         _FakeInspector(_FakeItem("other-mail")),
         _FakeInspector(_FakeItem("the-mail")),
     ))
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is True
+    assert client.is_open_in_inspector("the-mail") is True
 
 
 def test_reports_no_window_when_every_inspector_was_read(monkeypatch, client):
     """Only a complete read earns a ``False`` — that answer is what sends the
     operator to a restart, so it has to be a finding, not a default."""
     _with_app(monkeypatch, _app(_FakeInspector(_FakeItem("other-mail"))))
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is False
+    assert client.is_open_in_inspector("the-mail") is False
 
 
 def test_no_windows_open_at_all_is_a_clean_no(monkeypatch, client):
     _with_app(monkeypatch, _app())
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is False
+    assert client.is_open_in_inspector("the-mail") is False
 
 
 def test_an_unsaved_compose_window_is_not_a_gap(monkeypatch, client):
@@ -105,7 +105,7 @@ def test_an_unsaved_compose_window_is_not_a_gap(monkeypatch, client):
         _FakeInspector(_FakeUnreadable()),          # an unsaved draft
         _FakeInspector(_FakeItem("other-mail")),
     ))
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is False
+    assert client.is_open_in_inspector("the-mail") is False
 
 
 def test_a_window_that_will_not_be_read_makes_the_answer_undetermined(
@@ -117,20 +117,20 @@ def test_a_window_that_will_not_be_read_makes_the_answer_undetermined(
         _FakeInspector(None, raises=True),
         _FakeInspector(_FakeItem("other-mail")),
     ))
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is None
+    assert client.is_open_in_inspector("the-mail") is None
 
 
 def test_outlook_that_will_not_list_its_windows_is_undetermined(monkeypatch, client):
     _with_app(monkeypatch, _app(count_raises=True))
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is None
+    assert client.is_open_in_inspector("the-mail") is None
 
 
 def test_outlook_unreachable_is_undetermined(monkeypatch, client):
     _with_app(monkeypatch, None)
-    assert client.is_open_in_inspector(_FakeItem("the-mail")) is None
+    assert client.is_open_in_inspector("the-mail") is None
 
 
-def test_a_mail_with_no_readable_entry_id_is_undetermined(monkeypatch, client):
+def test_a_mail_with_no_entry_id_is_undetermined(monkeypatch, client):
     """Nothing to compare against, so nothing can be concluded."""
     _with_app(monkeypatch, _app(_FakeInspector(_FakeItem("the-mail"))))
-    assert client.is_open_in_inspector(_FakeUnreadable()) is None
+    assert client.is_open_in_inspector("") is None

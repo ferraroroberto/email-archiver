@@ -12,8 +12,9 @@ Design decisions:
   surface in outlook/drafts.py (a mixin OutlookClient inherits), and the
   vocabulary and COM-free helpers they share in outlook/mapi.py.
 - The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
-  find_by_message_id / archive_ref / refetch / save_item / move_to /
-  set_category / clear_category / is_open_in_inspector / release_folder_hold) lives here
+  find_by_message_id / archive_ref / item_ids / refetch / is_same_object /
+  move_to / set_category / clear_category / is_open_in_inspector /
+  view_away_from_inbox) lives here
   too, so batch.py stays pure orchestration and can be driven by a fake client
   in tests.
 - Every folder (Inbox, Sent, the archive folder, Drafts) comes from
@@ -29,6 +30,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import islice
@@ -64,11 +66,11 @@ from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
 
-# How long the Explorer stays on the other folder before it is put back, so
-# Outlook has let go of the reading-pane item. Unmeasured (issue #111): the
-# manual workaround this automates takes seconds, and half a second costs
-# nothing on a path only a refused move reaches.
-EXPLORER_SETTLE_SECONDS = 0.5
+# How long the Explorer sits on the other folder before the move is retried
+# there, so Outlook has let go of the reading-pane item. Unmeasured: the manual
+# workaround this automates takes seconds, half a second never freed a real
+# selection (issue #130), and the wait is only paid on a refused move.
+EXPLORER_SETTLE_SECONDS = 1.5
 
 
 # ----------------------------------------------------------------- types ----
@@ -658,43 +660,68 @@ class OutlookClient(DraftSurface):
             return value
         return str(safe_com(lambda: accessor.GetProperty(DASL_X_ARCHIVE_REF), "") or "").strip()
 
-    def refetch(self, item: Any) -> Any | None:
-        """Re-acquire a mail from the store by its ``EntryID``, or ``None``.
+    def item_ids(self, item: Any) -> tuple[str, str]:
+        """The mail's ``EntryID`` and its store's ``StoreID``, as plain strings.
+
+        Read once while the reference is alive, so the reference can then be
+        let go and the mail fetched again later from nothing but strings
+        (issue #130). Either is ``""`` when it cannot be read.
+        """
+        entry_id = safe_com(lambda: str(item.EntryID), "")
+        store_id = safe_com(lambda: str(item.Parent.StoreID), "")
+        return entry_id, store_id
+
+    def refetch(self, entry_id: str, store_id: str) -> Any | None:
+        """Fetch a mail from its store by ``EntryID``, or ``None``.
 
         ``MailItem.SaveAs`` can leave the in-memory item flagged as modified,
         and a later ``Move`` on *that* reference is then refused with
         MAPI_E_OBJECT_CHANGED — the mail stays in the Inbox with its files
         already on disk (issue #59). A reference read back through
-        ``Session.GetItemFromID`` is a fresh object carrying none of that
-        state, so it is what batch mode moves.
+        ``Session.GetItemFromID`` is a new COM object, so it is what batch mode
+        moves. The ``StoreID`` is passed whenever there is one: it names the
+        store to open instead of leaving Outlook to search every store it has
+        (issue #130).
 
-        ``None`` (never an exception) when the item has no readable EntryID or
-        the store cannot hand it back: failing to re-acquire is a reason to
-        move the original reference, not a reason to strand the mail.
+        ``None`` (never an exception) when there is no EntryID or the store
+        cannot hand the mail back.
         """
-        entry_id = safe_com(lambda: str(item.EntryID), "")
         if not entry_id:
             logger.warning("Cannot re-acquire a mail with no readable EntryID.")
             return None
         try:
             import win32com.client  # noqa: PLC0415
 
-            fresh = self._namespace().GetItemFromID(entry_id)
+            namespace = self._namespace()
+            fresh = (
+                namespace.GetItemFromID(entry_id, store_id) if store_id
+                else namespace.GetItemFromID(entry_id)
+            )
         except Exception as exc:
-            logger.warning("GetItemFromID failed for %s: %s", entry_id, exc)
+            logger.warning("GetItemFromID failed: %s: %s", type(exc).__name__, exc)
             return None
         if fresh is None:
             return None
         return win32com.client.Dispatch(fresh)
 
-    def save_item(self, item: Any) -> None:
-        """Commit a mail's pending changes.
+    def is_same_object(self, first: Any, second: Any) -> bool | None:
+        """Whether two references are one COM object (COM identity), or
+        ``None`` when that cannot be asked.
 
-        Its own method rather than an inline ``item.Save()`` in batch mode:
-        ``batch.py`` touches no COM object, and this is the call that clears
-        the modified flag behind a MAPI_E_OBJECT_CHANGED before the one retry.
+        Only a log breadcrumb (issue #130): it says whether a re-fetch handed
+        back the very object already held. Outlook can still share the mail's
+        underlying MAPI message between two distinct objects, which no call
+        here can see.
         """
-        item.Save()
+        try:
+            import pythoncom  # noqa: PLC0415
+
+            return bool(
+                first._oleobj_.QueryInterface(pythoncom.IID_IUnknown)
+                == second._oleobj_.QueryInterface(pythoncom.IID_IUnknown)
+            )
+        except Exception:
+            return None
 
     def move_to(self, item: Any, folder_name: str | None) -> Any:
         """Move a mail to a folder and return the moved item.
@@ -727,77 +754,96 @@ class OutlookClient(DraftSurface):
         """The mail's current EntryID (valid only for its current folder)."""
         return safe_com(lambda: str(item.EntryID), "")
 
-    def release_folder_hold(self, item: Any) -> bool | None:
-        """Switch the Explorer away from the mail's folder and back, to free it.
+    @contextmanager
+    def view_away_from_inbox(self) -> Iterator[bool | None]:
+        """Park the Explorer on another folder for the ``with`` body, to free
+        a mail it holds as its selected / reading-pane item.
 
-        An item the Explorer shows as its selected / reading-pane mail can keep
-        a reference that refuses every write, a ``Move`` included — the hold
-        issue #111 hit, which selecting another folder and then the message
-        again cleared with no restart. ``ClearSelection`` and
-        ``AddToSelection`` are no use: they raise ``0x80004005`` in
-        conversation view, which is Outlook's default. Setting
-        ``CurrentFolder`` works in every view.
+        An item the Explorer shows as its selection can keep a hold that
+        refuses every write, a ``Move`` included — the refusal issue #111 hit,
+        which selecting another folder and then the message again cleared with
+        no restart. ``ClearSelection`` and ``AddToSelection`` are no use: they
+        raise ``0x80004005`` in conversation view, which is Outlook's default.
+        Setting ``CurrentFolder`` works in every view. The move is retried
+        *inside* the block, while the view is away: coming back to the Inbox
+        first re-selects the mail and puts the hold back (issue #130).
 
-        Only done when the active Explorer is showing *this mail's own folder*:
-        any other folder is not holding it, and moving the user's view for
-        nothing is a cost. The original folder is always put back, and the
-        user's global Outlook settings are never touched. Three answers:
+        Only done when the active Explorer is showing this mailbox's Inbox,
+        the folder ``apply`` moves out of: any other folder is not holding the
+        mail, and moving the user's view for nothing is a cost. The original
+        folder is always put back on leaving the block, and the user's global
+        Outlook settings are never touched. The block is given one of:
 
-        ``True``   the Explorer was switched away and back — retry the move;
-        ``False``  there is no Explorer, or it is not on the mail's folder, so
-                   nothing was done;
+        ``True``   the Explorer is parked on another folder;
+        ``False``  there is no Explorer, or it is not on the Inbox, so nothing
+                   was done;
         ``None``   the question could not be answered or the switch failed —
                    not evidence that the hold survives a switch.
         """
         app = process.get_active_application()
         if app is None:
-            return None
+            yield None
+            return
         explorer = safe_com(lambda: app.ActiveExplorer(), None)
         if explorer is None:
-            return False
+            yield False
+            return
         current = safe_com(lambda: explorer.CurrentFolder, None)
         current_id = safe_com(lambda: str(current.EntryID), "")
-        parent_id = safe_com(lambda: str(item.Parent.EntryID), "")
-        if not current_id or not parent_id:
-            return None
-        if current_id != parent_id:
-            return False
+        inbox_id = safe_com(lambda: str(self._inbox().EntryID), "")
+        if not current_id or not inbox_id:
+            yield None
+            return
+        if current_id != inbox_id:
+            yield False
+            return
 
         # The mailbox's own Outbox, else its Drafts: an IMAP store other than
         # the default one may have no Outbox of its own.
-        away = None
+        away, away_name = None, ""
         try:
             store = self.store()
         except Exception as exc:
             logger.warning("Could not pick a folder to switch Outlook to: %s", exc)
-            return None
-        for kind in (OL_FOLDER_OUTBOX, OL_FOLDER_DRAFTS):
+            yield None
+            return
+        for kind, name in ((OL_FOLDER_OUTBOX, "Outbox"), (OL_FOLDER_DRAFTS, "Drafts")):
             candidate = safe_com(lambda k=kind: store.GetDefaultFolder(k), None)
             if candidate is not None and safe_com(lambda c=candidate: str(c.EntryID), "") != current_id:
-                away = candidate
+                away, away_name = candidate, name
                 break
         if away is None:
             logger.warning("Could not pick a folder to switch Outlook to: no Outbox or Drafts to use.")
-            return None
+            yield None
+            return
 
         switched = False
         try:
-            explorer.CurrentFolder = away
-            switched = True
-            time.sleep(EXPLORER_SETTLE_SECONDS)
-        except Exception as exc:
-            logger.warning("Could not switch Outlook to another folder: %s", exc)
-        finally:
             try:
-                explorer.CurrentFolder = current
+                explorer.CurrentFolder = away
+                switched = True
             except Exception as exc:
-                logger.error(
-                    "Could not put Outlook back on the folder it was showing: "
-                    "%s: %s", type(exc).__name__, exc,
+                logger.warning("Could not switch Outlook to another folder: %s", exc)
+            if switched:
+                logger.info(
+                    "Outlook's view is parked on the mailbox's %s for the move; "
+                    "waiting %.1f s for it to let go of the selected mail.",
+                    away_name, EXPLORER_SETTLE_SECONDS,
                 )
-        return True if switched else None
+                time.sleep(EXPLORER_SETTLE_SECONDS)
+            yield True if switched else None
+        finally:
+            if switched:
+                try:
+                    explorer.CurrentFolder = current
+                    logger.info("Outlook's view is back on the Inbox.")
+                except Exception as exc:
+                    logger.error(
+                        "Could not put Outlook back on the folder it was showing: "
+                        "%s: %s", type(exc).__name__, exc,
+                    )
 
-    def is_open_in_inspector(self, item: Any) -> bool | None:
+    def is_open_in_inspector(self, entry_id: str) -> bool | None:
         """Whether this mail is open in an Outlook window. ``None`` = unknown.
 
         An inspector holds its item open for the life of the window, and every
@@ -811,14 +857,13 @@ class OutlookClient(DraftSurface):
 
         ``True``   this mail was found in an open inspector — close it;
         ``False``  the inspectors were all read and none holds this mail;
-        ``None``   the question could not be answered — no readable EntryID,
+        ``None``   the question could not be answered — no EntryID (``""``),
                    Outlook unreachable, or an inspector that would not be read.
 
         ``None`` is deliberately not folded into ``False``: a check that could
         not run is not evidence the window is closed, and reporting it as one
         would point the next operator at the wrong remedy.
         """
-        entry_id = safe_com(lambda: str(item.EntryID), "")
         if not entry_id:
             return None
         app = process.get_active_application()
