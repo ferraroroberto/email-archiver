@@ -37,7 +37,7 @@ from itertools import islice
 from typing import Any
 
 from email_archiver.config import Mailbox
-from email_archiver.outlook import process
+from email_archiver.outlook import process, syncing
 from email_archiver.outlook.drafts import DraftSurface
 from email_archiver.outlook.mapi import (
     ARCHIVE_REF_HEADER,
@@ -366,6 +366,15 @@ class OutlookClient(DraftSurface):
         if self._resolved_store is None:
             self._resolved_store = resolve_store(self._namespace(), self.mailbox)
         return self._resolved_store
+
+    def start_sync(self) -> syncing.SyncHandle:
+        """Start Send/Receive for the whole profile and return a handle to watch.
+
+        Profile-wide whichever mailbox this client is bound to: Outlook has no
+        per-account trigger. The only thing in this class that starts a sync;
+        see :mod:`email_archiver.outlook.syncing`.
+        """
+        return syncing.start(self._namespace())
 
     def _inbox(self) -> Any:
         return self.store().GetDefaultFolder(OL_FOLDER_INBOX)

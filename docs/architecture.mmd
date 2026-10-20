@@ -13,7 +13,7 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send / mailboxes / find, one JSON document on stdout;\nevery Outlook verb acts on one registry mailbox"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send / mailboxes / find / sync, one JSON document on stdout;\nevery Outlook verb acts on one registry mailbox"]
     NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
   end
 
@@ -62,7 +62,7 @@ flowchart TB
 
   subgraph archive["Archive Email data flow"]
     OUTLOOK["outlook/client.py: OutlookClient\nCOM isolation, SMTP resolution\n(GetExchangeUser fallback), batch surface"]
-    PROCESS["outlook/process.py\nensure_running: start, poll, tear down what it started"]
+    PROCESS["outlook/process.py\nensure_running: start, poll, tear down what it started ·\ndesktop_state: Windows session id → interactive / session_0 / unknown"]
     DRAFTS["outlook/drafts.py: DraftSurface\ndraft methods OutlookClient inherits"]
     STORES["outlook/stores.py: resolve_store\nthe mailbox's Store by address (account, else store name);\nDefaultStore only for the synthesized mailbox;\nno match: MailboxNotInOutlookError"]
     MAPI["outlook/mapi.py\nconstants, OutlookUnavailableError, MailboxNotInOutlookError, SelectedEmailError,\nCOM-free helpers (categories, headers, body markers)"]
@@ -134,3 +134,13 @@ flowchart TB
   SEND -->|read_draft: open_draft by EntryID, snapshot_draft| OUTLOOK
   SEND --> SENDING
   SENDING -->|open_draft · close_inspectors_of · snapshot_draft · Send| OUTLOOK
+
+  subgraph syncflow["Send/Receive (headless, spawned by another app so a mail on the server becomes findable)"]
+    SYNC["sync.py\nrun — per-mailbox store check, ONE profile-wide trigger,\nbounded wait on an injected clock; outcome completed /\ntimed_out / unknown / mailbox_not_in_outlook, shared across\nthe present mailboxes (trigger.scope: profile). No COM,\nreads and sends no mail"]
+    SYNCING["outlook/syncing.py\nstart — SyncObject.Start + SyncEnd events pumped on the STA\nthread; no usable group or no events: SendAndReceive and an\nunobservable handle. The only place a sync is started"]
+  end
+  MAINBATCH -->|sync verb: session 0 → deferred, exit 3,\nbefore COM or ensure_running| PROCESS
+  MAINBATCH -->|sync verb| SYNC
+  SYNC -->|store check per mailbox · start_sync| OUTLOOK
+  OUTLOOK -->|start_sync| SYNCING
+  SYNCING -->|SyncObjects / SendAndReceive| OUTLOOKCOM

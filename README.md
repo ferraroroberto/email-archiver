@@ -116,6 +116,7 @@ archiver/
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
 │   ├── find.py                  ← Headless read-only live search over a mailbox's Outlook folders (no COM)
 │   ├── send.py                  ← Headless read-back + guarded send: fingerprint, approval check (no COM)
+│   ├── sync.py                  ← Headless Send/Receive: one profile-wide trigger, bounded wait, per-mailbox outcome (no COM)
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
@@ -129,10 +130,11 @@ archiver/
 │   ├── outlook/
 │   │   ├── client.py           ← Outlook COM isolation (OutlookClient): read path + batch surface
 │   │   ├── drafts.py           ← Draft surface OutlookClient inherits (DraftSurface)
-│   │   ├── process.py          ← Outlook process: ensure_running
+│   │   ├── process.py          ← Outlook process: ensure_running; the session-0 desktop check
 │   │   ├── mapi.py             ← Shared constants and COM-free helpers
 │   │   ├── stores.py           ← Which Outlook store a mailbox lives in (by address)
-│   │   └── sending.py          ← The one COM Send call (send verb only)
+│   │   ├── sending.py          ← The one COM Send call (send verb only)
+│   │   └── syncing.py          ← The one place a Send/Receive is started (sync verb only)
 │   │
 │   ├── archiver/
 │   │   └── archiver.py         ← File saving logic (EmailArchiver)
@@ -151,7 +153,7 @@ archiver/
 ├── main_archive.py              ← Stream Deck entry: Archive Email
 ├── main_scan.py                 ← Stream Deck entry: Scan Archive
 ├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes / find (JSON)
+├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes / find / sync (JSON)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code
@@ -271,7 +273,7 @@ The Stream Deck `launch_scan.bat` is unchanged and still opens the progress wind
 
 ## Verification
 
-The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read` and `send`) end to end against a fake Outlook client. Run it before declaring any change done:
+The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read`, `send` and `sync`) end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest tests/
@@ -283,7 +285,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 ## Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: nine verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, one that lists the mailboxes it can act on, and one that searches a mailbox's live folders — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: ten verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, one that lists the mailboxes it can act on, one that searches a mailbox's live folders, and one that asks Outlook to run Send/Receive — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
@@ -296,6 +298,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 & .\.venv\Scripts\python.exe main_batch.py send --entry-id <entry_id> --expect-hash <sha256>
 & .\.venv\Scripts\python.exe main_batch.py mailboxes
 & .\.venv\Scripts\python.exe main_batch.py find --mailbox <alias> --query "<words>"
+& .\.venv\Scripts\python.exe main_batch.py sync [--mailbox <alias>] [--timeout 120]
 ```
 
 | Verb | Reads | Does |
@@ -309,6 +312,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 | `send` | `--expect-hash` (and optionally `--expect-part`, `--expect-to`) | Sends that one draft, only if its live fingerprint still matches. Refused with `approval_mismatch` naming what differs otherwise. |
 | `mailboxes` | nothing | Lists the mailbox registry with each mailbox's `outlook_status`. Never starts Outlook. See [Mailboxes](#mailboxes). |
 | `find` | `--query` (and optionally `--since`, `--folders`, `--limit`) | Searches one mailbox's live Outlook folders (Inbox, archive folder, Sent). **Read-only.** See [Searching live mail](#searching-live-mail). |
+| `sync` | nothing (optionally `--mailbox`, `--timeout`) | Asks Outlook to run Send/Receive for the whole profile and reports, per mailbox, whether it was seen to finish. Reads, moves and sends no mail. See [Syncing mail](#syncing-mail). |
 
 An `apply` result can be handed straight back to `revert` — the object with its `results` list is accepted as-is, no reshaping needed.
 
@@ -362,6 +366,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
 | `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` (`draft --update`, `read`, `send`), `draft_body_unmarked` (`draft --update` only), `approval_mismatch` / `recipient_unreadable` (`send` only; `approval_mismatch` names the parts under `error.differs`), `mailbox_registry_invalid` (`config/mailboxes.json` is present but malformed), `mailbox_not_in_outlook` (a registry mailbox has no store in the running Outlook — never answered with the default store), `mailbox_unknown` (a `--mailbox` name the registry does not know; checked before Outlook is touched), `account_not_in_outlook` (`draft`: the mailbox's store is there but no Outlook account sends from its address), `sending_account_mismatch` (`draft`: Outlook would not set the mailbox's account, so the draft was discarded unsaved; `send`: the stored draft does not send as the mailbox's account, so nothing was sent). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
+| `3` | `sync` only: deferred, because this is a Windows session with no desktop (session 0). Outlook was not started and nothing was triggered; stdout carries the `desktop` block, `outcome: "deferred_no_desktop"` and an `error` with that code. See [Syncing mail](#syncing-mail). |
 
 Per-mail `error.code` values: `bad_decision` (the entry had no `message_id` or `folder_path`, or its `folder_path` does not resolve inside `archive.root_paths`, with a message starting `outside_archive_roots`), `not_in_inbox`, `not_in_archive_folder`, `archive_failed`, `move_failed`, `message_changed`, `category_failed`. The last three are deliberately distinct: after a `move_failed` the mail is still in the Inbox, after a `category_failed` it is already filed and only *looks* untouched in Outlook, and a [`message_changed`](#retrying-a-mail-that-was-written-but-never-moved) is a `move_failed` that an operator clears in seconds — usually by closing an open mail window.
 
@@ -623,6 +628,45 @@ The index (`data/emails.db`) knows only mail already archived to disk, and `plan
 - **Folders.** The default is the Inbox, the mailbox's `archive_folder` and Sent. `--folders` narrows them. `--since` compares the received time (the sent time in Sent). `--limit` (default 25) caps the hits, newest first across all folders.
 - **Each hit** carries `message_id`, `subject`, `sender`, `recipients`, `date` (sent time), `folder` (the Outlook folder's name), `entry_id`, `body_preview` and `already_archived` (the `.msg` path when its Message-ID is in the index, else `null`). The document adds per-folder `matched` counts under `folders`, `counts.matched` / `counts.returned`, and `truncated` when more matched than were returned.
 - **Coverage limit.** The document says `coverage: "outlook_folders"` and gives a `coverage_note`, rather than implying completeness. With Gmail over IMAP (root folder path `[Gmail]`, All Mail not synced), mail archived from Gmail web or phone without the `[Gmail]/Archive` label lives only in All Mail, which is invisible to Outlook, so `find` cannot see it. A complete search would need the Gmail API, which is out of scope here.
+
+### Syncing mail
+
+A mail that is already on the server stays invisible to `find`, `plan` and `apply` until Outlook syncs on its own. `sync` makes Outlook do the Send/Receive (the F9 action) and reports how it went, so a caller can search right after:
+
+```powershell
+& .\.venv\Scripts\python.exe main_batch.py sync [--mailbox <alias>] [--timeout 120]
+```
+
+- **It spans mailboxes.** Outlook's Send/Receive is global to the profile, so one sync is triggered for all of it and `--mailbox` only narrows which mailboxes are *reported* (default: every mailbox in the registry; with no registry file, the one `default`). The document therefore has no single `mailbox` key; it lists them under `mailboxes`. `trigger.scope` says `"profile"`, and every mailbox that is present shares the one observed outcome rather than implying a per-account observation that does not exist.
+- **Outcomes**, per mailbox, with `waited_seconds` and a `reason` for anything but `completed`:
+
+  | `outcome` | Meaning |
+  |---|---|
+  | `completed` | The end of the sync was observed. |
+  | `timed_out` | No end was reported within `--timeout` seconds (default 120, any positive number). The sync may still be running; the verb returned at the deadline. |
+  | `unknown` | The end cannot be observed (no usable sync object, events that cannot be attached, an error Outlook reported), the trigger failed, or the mailbox check could not run. **Never folded into `completed`.** |
+  | `mailbox_not_in_outlook` | The registry names a mailbox the running Outlook does not hold. That mailbox only: the others still sync. With none present, nothing is triggered. |
+
+- **Exit code `0`** whenever the document was produced: a `timed_out` or `unknown` mailbox is a result, not a failure, like a per-mail error elsewhere. `2` when the run could not start (`bad_input` for a non-positive or non-numeric `--timeout`, `mailbox_unknown`, `mailbox_registry_invalid`, `outlook_unavailable`, `com_unavailable`). `3` when deferred, below.
+- **No desktop, no sync.** In a Windows session with no desktop (session 0: a service or a scheduled task with no logged-on user) Outlook has nowhere to show a profile prompt or a progress dialog, so the verb starts nothing, prints the deferral document and exits `3`, before it touches COM or Outlook. The `desktop` block (`session_id`, `status` of `interactive`, `session_0` or `unknown`) is in every `sync` document; a session state that cannot be read is `unknown` and the run proceeds.
+- **Outlook closed** is started first, as `plan` and `find` do (bounded by `--start-timeout`). It is never killed or restarted to force a sync.
+- **Reads nothing.** It moves, saves, drafts and sends no mail. The one COM call that starts a sync lives in `email_archiver/outlook/syncing.py`, reached only by this verb, and a test pins that nowhere else references it.
+- **A progress dialog may take focus** on the desktop while it runs.
+- **How the end is observed:** each of Outlook's sync groups raises a `SyncEnd` event, which the verb waits for while pumping COM messages. Folder item counts are deliberately not used: a count that stops changing is not proof the sync ended. If Outlook exposes no usable sync group, `Namespace.SendAndReceive` is the trigger and the outcome is `unknown`.
+
+> **Not yet proven against a live Outlook.** The unit tests drive fakes. Whether `SyncEnd` fires for the group covering each IMAP account, and whether it fires only after "Synchronizing subscribed folders" finishes rather than before, is unconfirmed until one live run; if it can fire early, `completed` would overclaim for IMAP stores. The caller's own retry on a mail it expects (that loop lives in the consumer, not here) stays the safety net.
+
+```json
+{
+  "verb": "sync", "schema_version": 1, "generated_at": "…",
+  "desktop": {"session_id": 1, "status": "interactive"},
+  "timeout_seconds": 120.0,
+  "trigger": {"method": "SyncObject.Start", "scope": "profile", "signal": "sync_object", "started": true},
+  "mailboxes": [
+    {"alias": "owner", "address": "owner@example.com", "outcome": "completed", "waited_seconds": 14.25, "reason": ""}
+  ]
+}
+```
 
 ---
 

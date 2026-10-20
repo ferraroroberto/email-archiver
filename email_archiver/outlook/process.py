@@ -76,6 +76,45 @@ def get_active_application() -> Any | None:
         return None
 
 
+def windows_session_id() -> int | None:
+    """This process's Windows session id, or None when it cannot be read.
+
+    Session 0 is where a service or a scheduled task with no logged-on user
+    runs: it has no desktop for Outlook to show anything on.
+    """
+    import sys  # noqa: PLC0415
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        import os  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        session = wintypes.DWORD()
+        if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+            return None
+        return int(session.value)
+    except Exception:
+        return None
+
+
+def desktop_state() -> dict[str, Any]:
+    """``{"session_id", "status"}`` for the ``desktop`` block of a document.
+
+    ``status`` is ``session_0`` (no desktop), ``interactive`` or ``unknown``
+    (the API did not answer, which is not a claim either way).
+    """
+    session_id = windows_session_id()
+    if session_id is None:
+        status = "unknown"
+    elif session_id == 0:
+        status = "session_0"
+    else:
+        status = "interactive"
+    return {"session_id": session_id, "status": status}
+
+
 def _spawn_outlook(exe: str) -> Any:
     """Start ``exe`` and return the handle that owns the started process.
 
