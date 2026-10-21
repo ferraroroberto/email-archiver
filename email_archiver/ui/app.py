@@ -219,7 +219,7 @@ class ArchiveDialog:
         except Exception as exc:
             logger.exception("Error in archive load worker")
             self._root.after(
-                0, lambda: self._show_error(f"Unexpected error:\n{exc}")
+                0, lambda exc=exc: self._show_error(f"Unexpected error:\n{exc}")
             )
 
     @staticmethod
@@ -603,7 +603,7 @@ class ScanWindow:
                 )
                 self._root.after(0, lambda: self._on_done(stats))
             except Exception as exc:
-                self._root.after(0, lambda: self._on_error(exc))
+                self._root.after(0, lambda exc=exc: self._on_error(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 

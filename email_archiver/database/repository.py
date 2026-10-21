@@ -11,7 +11,6 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Sequence
 
 logger = logging.getLogger(__name__)
