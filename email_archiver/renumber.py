@@ -58,7 +58,7 @@ from typing import Any
 
 from email_archiver.archiver.archiver import (
     SequencePrefix,
-    sanitize_filename,
+    legacy_ascii_filename,
     split_sequence_prefix,
 )
 from email_archiver.database.repository import EmailRepository
@@ -254,8 +254,12 @@ def _match_key(stem: str) -> str:
     the stem to fit MAX_PATH (leaving a trailing ``...``) and appends ``_2`` on
     a collision, so the name on disk is rarely the name the mail carries. Both
     sides go through this before they are compared.
+
+    Both are folded to the ASCII-only form the archiver wrote before it kept
+    Unicode letters, so ``canci_n`` archived back then still meets the mail's
+    ``canción`` (and an accented name on disk meets either).
     """
-    return sanitize_filename(stem, max_len=60).casefold().rstrip("._ ")
+    return legacy_ascii_filename(stem, max_len=60).casefold().rstrip("._ ")
 
 
 # Below this, a shared prefix says nothing: "re" and "report.pdf" are not the

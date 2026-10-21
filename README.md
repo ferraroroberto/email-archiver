@@ -54,7 +54,7 @@ When an email is archived in a folder, files are named `NNN - <name>`, using ` -
 ```
 
 - `NNN` is a zero-padded 3-digit sequence number, derived from the highest existing prefix in that destination folder. It groups a bundle — an email and its attachments always share one `NNN` — and increments per folder.
-- The email gets `NNN - sanitized_subject.msg`
+- The email gets `NNN - sanitized_subject.msg`. Unicode letters (accents, `ñ`, `ç`, `·`) are kept as written; only what Windows forbids in a name is replaced (`/ \ :` become `-`; `< > " | ? *` and control characters become `_`), and trailing dots and spaces are dropped
 - Each real attachment gets `NNN - original_filename.ext`
 - Existing archived files are never renamed — this only affects what gets written going forward
 - Embedded images (inline in HTML body) are skipped automatically; real attachments (e.g. PDFs) are saved even when the client sets a ContentId
