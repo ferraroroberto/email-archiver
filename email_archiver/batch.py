@@ -86,8 +86,8 @@ from email_archiver.engine.suggester import SuggestionEngine
 from email_archiver.outlook.client import EmailData
 from email_archiver.outlook.mapi import MailboxNotInOutlookError, is_message_changed_error
 from email_archiver.paths import (
-    REFUSED_OUTSIDE_ROOTS,
-    REFUSED_UNRESOLVABLE,
+    REFUSED_OUTSIDE_ROOTS as REFUSED_OUTSIDE_ROOTS,
+    REFUSED_UNRESOLVABLE as REFUSED_UNRESOLVABLE,
     archive_roots as _archive_roots,
     resolve_under_roots as _resolve_under_roots,
 )
