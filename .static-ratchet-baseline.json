@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "tools": {"jscpd": "5.4.0", "ruff": "0.17.1"},
+  "entries": [
+    {"key": "unused:F401:email_archiver/batch.py:email_archiver.paths.REFUSED_OUTSIDE_ROOTS", "files": ["email_archiver/batch.py"]},
+    {"key": "unused:F401:email_archiver/batch.py:email_archiver.paths.REFUSED_UNRESOLVABLE", "files": ["email_archiver/batch.py"]},
+    {"key": "unused:F401:email_archiver/database/repository.py:datetime.datetime", "files": ["email_archiver/database/repository.py"]},
+    {"key": "unused:F401:tests/test_selected_email_errors.py:email_archiver.outlook.client.EmailData", "files": ["tests/test_selected_email_errors.py"]},
+    {"key": "unused:F841:email_archiver/ui/app.py:exc", "files": ["email_archiver/ui/app.py"]},
+    {"key": "unused:F841:email_archiver/ui/app.py:exc#2", "files": ["email_archiver/ui/app.py"]}
+  ]
+}

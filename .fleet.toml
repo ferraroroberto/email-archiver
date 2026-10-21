@@ -6,3 +6,17 @@ layer       = "working-pipe"
 icon        = "📧"
 description = "Outlook → OneDrive archive with a SQLite index and headless batch CLI."
 tag         = ["→", "OneDrive"]
+
+# Byte-for-byte copies from project-scaffolding; never edited here. /propagate-vendored re-vendors.
+[vendored]
+static_ratchet = { src = "scripts/static_ratchet.py", sha = "2f1e2f7c81b9a91a062271881fc87830104808ae", dest = "scripts/static_ratchet.py" }
+
+# [static_ratchet] -- the scaffold's baseline-and-ratchet static analysis. The gate
+# (scripts/verify-before-ship.ps1) runs scripts/static_ratchet.py through
+# scripts/static_ratchet_gate.py: a duplicate block (jscpd via npx, Python and JS) or an
+# unused import/variable (ruff F401,F841) that is not in .static-ratchet-baseline.json
+# fails. Needs Node and ruff in the gate's venv; a detector that cannot run exits 3,
+# which fails the gate. Procedure + limits: project-scaffolding docs/static-ratchet.md.
+[static_ratchet]
+enabled  = true
+baseline = ".static-ratchet-baseline.json"
