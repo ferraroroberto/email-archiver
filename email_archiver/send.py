@@ -113,7 +113,9 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
             "after_region_html": html_after_marked_region(snapshot.html_body),
         },
         "attachments": [
-            {"name": a.name, "size_bytes": a.size_bytes, "sha256": a.sha256}
+            # kind "embedded": a mail attached as an item, whose sha256 binds
+            # its content rather than bytes Outlook rewrites on every save.
+            {"name": a.name, "kind": a.kind, "size_bytes": a.size_bytes, "sha256": a.sha256}
             for a in snapshot.attachments
         ],
         "fingerprint": fingerprint(snapshot),

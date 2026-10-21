@@ -96,6 +96,11 @@ OL_BCC = 3
 OL_SAVE = 0
 # olDiscard, for MailItem.Close: drop an item opened only to be replied to.
 OL_DISCARD = 1
+# OlAttachmentType: a file attached by value, and a mail attached as an item.
+# Outlook writes an attached item out afresh on every SaveAsFile, so its bytes
+# never hash the same twice (issue #135).
+OL_BY_VALUE = 1
+OL_EMBEDDED_ITEM = 5
 # DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
 # draft stamped with it carries ``X-Archive-Ref: <token>`` into the sent mail, so
 # a caller can recognise its own copy when it lands back in the Inbox.
