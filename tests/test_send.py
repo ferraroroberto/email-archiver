@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -63,12 +64,50 @@ class _FakeCollection:
 
 
 class _FakeAttachment:
+    Type = mapi.OL_BY_VALUE
+
     def __init__(self, name: str, data: bytes) -> None:
         self.FileName = name
         self.data = data
 
     def SaveAsFile(self, path: str) -> None:  # noqa: N802 - COM's spelling
         Path(path).write_bytes(self.data)
+
+
+class _FakeInnerMail:
+    """A mail attached to a draft as an item, as OpenSharedItem opens it."""
+
+    def __init__(self, subject: str = "An attached mail", body: str = "Its text.",
+                 attachments: list | None = None) -> None:
+        self.Subject = subject
+        self.SenderEmailAddress = OTHER
+        self.SentOn = "2026-01-02 03:04:05+00:00"
+        self.To = SELF
+        self.CC = ""
+        self.Body = body
+        self.Attachments = _FakeCollection(attachments or [])
+        self.closed_with: list[int] = []
+
+    def Close(self, mode: int) -> None:  # noqa: N802 - COM's spelling
+        self.closed_with.append(mode)
+
+
+class _FakeEmbeddedAttachment:
+    """A saved mail attached as an item: Outlook writes it out afresh on every
+    ``SaveAsFile``, so the bytes differ from one save to the next (issue #135)."""
+
+    Type = mapi.OL_EMBEDDED_ITEM
+    opened: dict[str, _FakeInnerMail] = {}
+
+    def __init__(self, inner: _FakeInnerMail) -> None:
+        self.FileName = f"{inner.Subject}.msg"
+        self.Size = 4946
+        self.inner = inner
+
+    def SaveAsFile(self, path: str) -> None:  # noqa: N802 - COM's spelling
+        key = os.urandom(8).hex()
+        _FakeEmbeddedAttachment.opened[key] = self.inner
+        Path(path).write_bytes(key.encode() + b"|" + os.urandom(64))
 
 
 class _FakeDraft:
@@ -99,6 +138,12 @@ class _FakeNamespace:
         if entry_id not in self.items:
             raise RuntimeError("The operation failed. An object could not be found.")
         return self.items[entry_id]
+
+    def OpenSharedItem(self, path: str):  # noqa: N802 - COM's spelling
+        if not path.lower().endswith(".msg"):
+            raise RuntimeError("Invalid path or URL.")  # what Outlook says
+        key =Path(path).read_bytes().split(b"|", 1)[0].decode()
+        return _FakeEmbeddedAttachment.opened[key]
 
     @property
     def DefaultStore(self):  # noqa: N802 - COM's spelling
@@ -156,7 +201,7 @@ def test_read_reports_the_item_as_stored_and_changes_nothing(monkeypatch):
         "after_region_html": '<div id="_MailAutoSig">-- sig</div></body></html>',
     }
     assert doc["attachments"] == [{
-        "name": "note.txt", "size_bytes": len(b"synthetic bytes"),
+        "name": "note.txt", "kind": "file", "size_bytes": len(b"synthetic bytes"),
         "sha256": hashlib.sha256(b"synthetic bytes").hexdigest(),
     }]
     assert set(doc["fingerprint"]["parts"]) == set(send.PARTS)
@@ -195,6 +240,41 @@ def test_a_body_without_the_region_reports_nothing_after_it(monkeypatch):
 def test_the_fingerprint_is_stable_while_nothing_changes(monkeypatch):
     mail = _FakeDraft()
     assert _approved(monkeypatch, mail) == _approved(monkeypatch, mail)
+
+
+def _with_attached_mail(inner: _FakeInnerMail) -> _FakeDraft:
+    mail = _FakeDraft()
+    mail.Attachments.items.append(_FakeEmbeddedAttachment(inner))
+    return mail
+
+
+def test_an_attached_mail_keeps_its_fingerprint_although_its_bytes_change(monkeypatch):
+    # Issue #135: Outlook re-serialises an attached mail on every SaveAsFile,
+    # so a hash of those bytes never matched between `read` and `send`.
+    inner = _FakeInnerMail(attachments=[_FakeAttachment("inner.txt", b"inner bytes")])
+    mail = _with_attached_mail(inner)
+
+    first = send.read_document(_client(monkeypatch, mail).read_draft("draft-1"))
+
+    assert first["fingerprint"] == _approved(monkeypatch, mail)
+    assert first["attachments"][1]["kind"] == "embedded"
+    assert first["attachments"][1]["name"] == "An attached mail.msg"
+    assert inner.closed_with == [mapi.OL_DISCARD, mapi.OL_DISCARD]
+
+
+@pytest.mark.parametrize("change", [
+    lambda inner: setattr(inner, "Body", "Other text."),
+    lambda inner: setattr(inner, "SentOn", "2026-01-03 03:04:05+00:00"),
+    lambda inner: setattr(inner.Attachments.items[0], "data", b"inner bytez"),
+])
+def test_a_change_inside_an_attached_mail_changes_its_hash(monkeypatch, change):
+    inner = _FakeInnerMail(attachments=[_FakeAttachment("inner.txt", b"inner bytes")])
+    mail = _with_attached_mail(inner)
+    before = _approved(monkeypatch, mail)["parts"]["attachments"]
+
+    change(inner)
+
+    assert _approved(monkeypatch, mail)["parts"]["attachments"] != before
 
 
 def test_recipient_order_and_case_do_not_change_the_fingerprint(monkeypatch):
@@ -241,6 +321,26 @@ def test_a_matching_draft_is_sent_exactly_once(monkeypatch):
     assert mail.calls == [("Send",)]
     assert bystander.calls == []
     assert (doc["verb"], doc["sent"], doc["entry_id"], doc["to"], doc["bcc"]) == ("send", True, "draft-1", [OTHER], [SELF])
+
+
+def test_a_draft_with_an_attached_mail_is_sent_with_the_hash_read_gave(monkeypatch):
+    mail = _with_attached_mail(_FakeInnerMail())
+
+    _send(monkeypatch, mail, _approved(monkeypatch, mail))
+
+    assert mail.calls == [("Send",)]
+
+
+def test_swapping_the_attached_mail_for_another_is_refused(monkeypatch):
+    mail = _with_attached_mail(_FakeInnerMail())
+    approval = _approved(monkeypatch, mail)
+    mail.Attachments.items[1] = _FakeEmbeddedAttachment(_FakeInnerMail(body="A different mail."))
+
+    with pytest.raises(send.SendRefused) as refused:
+        _send(monkeypatch, mail, approval)
+
+    assert (refused.value.code, refused.value.differs) == ("approval_mismatch", ["attachments"])
+    assert mail.calls == []
 
 
 def test_a_window_open_on_the_draft_is_closed_saving_before_the_read(monkeypatch):

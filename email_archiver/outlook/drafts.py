@@ -12,10 +12,11 @@ reached only by the ``send`` verb.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from email_archiver.outlook import process
@@ -28,6 +29,7 @@ from email_archiver.outlook.mapi import (
     OL_CC,
     OL_CLASS_MAIL_ITEM,
     OL_DISCARD,
+    OL_EMBEDDED_ITEM,
     OL_FOLDER_DRAFTS,
     OL_MAIL_ITEM,
     OL_SAVE,
@@ -101,14 +103,30 @@ class CreatedDraft:
     from_address: str = ""         # the account it sends from; "" when unreadable
 
 
+ATTACHMENT_FILE = "file"
+ATTACHMENT_EMBEDDED = "embedded"
+
+# How deep a mail attached to a mail attached to ... is opened to be hashed.
+# Below it an attached mail is bound by its name and stored size only.
+_EMBEDDED_DEPTH = 3
+
+
 @dataclass
 class DraftAttachment:
-    """One attachment of a draft as stored: its bytes, not Outlook's
-    ``Attachment.Size``, which counts MAPI overhead and never equals the file."""
+    """One attachment of a draft as stored.
+
+    A file (``ATTACHMENT_FILE``) is bound by its bytes, not Outlook's
+    ``Attachment.Size``, which counts MAPI overhead and never equals the file.
+    A mail attached as an item (``ATTACHMENT_EMBEDDED``) has no stable bytes:
+    Outlook writes it out afresh on every ``SaveAsFile`` (issue #135). It is
+    bound by a hash of its content instead (``DraftSurface._embedded_content``), and
+    ``size_bytes`` is Outlook's stored ``Attachment.Size``.
+    """
 
     name: str
     size_bytes: int
     sha256: str
+    kind: str = ATTACHMENT_FILE
 
 
 @dataclass
@@ -554,25 +572,19 @@ class DraftSurface:
         """Read one draft item into a :class:`DraftSnapshot`.
 
         Attachment bytes are saved to a temporary directory, hashed and
-        removed, so the snapshot binds their content and not only their name.
-        An attachment that cannot be saved raises: a snapshot that silently
-        skipped one would bind less than it claims.
+        removed, so the snapshot binds their content and not only their name;
+        an attached mail is opened from its saved copy and its content hashed
+        (see :class:`DraftAttachment`). An attachment that cannot be saved
+        raises: a snapshot that silently skipped one would bind less than it
+        claims.
         """
         lines, unreadable = _recipient_lines(mail)
 
-        attachments: list[DraftAttachment] = []
         with tempfile.TemporaryDirectory(prefix="email-archiver-read-") as scratch:
-            items = mail.Attachments
-            for index in range(1, int(items.Count) + 1):
-                item = items.Item(index)
-                path = os.path.join(scratch, str(index))
-                item.SaveAsFile(path)
-                with open(path, "rb") as fh:
-                    data = fh.read()
-                attachments.append(DraftAttachment(
-                    name=str(safe_com(lambda i=item: i.FileName, "") or ""),
-                    size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
-                ))
+            attachments = [
+                self._snapshot_attachment(item, scratch, str(index), 0)
+                for index, item in _attachments_of(mail)
+            ]
 
         html_body = str(mail.HTMLBody or "")
         return DraftSnapshot(
@@ -582,6 +594,51 @@ class DraftSurface:
             attachments=attachments, unreadable_recipients=unreadable,
             sending_account=sending_address(mail),
         )
+
+    def _snapshot_attachment(self, item: Any, scratch: str, key: str, depth: int) -> DraftAttachment:
+        """One attachment of a draft, or of a mail attached to it at ``depth``."""
+        name = str(safe_com(lambda: item.FileName, "") or "")
+        path = os.path.join(scratch, key)
+        if safe_com(lambda: int(item.Type), 0) != OL_EMBEDDED_ITEM:
+            item.SaveAsFile(path)
+            with open(path, "rb") as fh:
+                data = fh.read()
+            return DraftAttachment(name=name, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+        content: Any = None
+        if depth < _EMBEDDED_DEPTH:
+            # OpenSharedItem refuses a path without the extension: "Invalid path or URL."
+            path += ".msg"
+            item.SaveAsFile(path)
+            content = self._embedded_content(path, scratch, key, depth + 1)
+        return DraftAttachment(
+            name=name, size_bytes=int(item.Size), kind=ATTACHMENT_EMBEDDED,
+            sha256=hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest(),
+        )
+
+    def _embedded_content(self, path: str, scratch: str, key: str, depth: int) -> dict[str, Any]:
+        """What an attached mail says, in a form that reads the same every time.
+
+        Every field here was seen identical across repeated reads of one
+        unchanged draft (issue #135); the opened copy's ``CreationTime`` was
+        not, so it and anything like it stays out.
+        """
+        inner = self._namespace().OpenSharedItem(path)
+        try:
+            return {
+                "subject": str(inner.Subject or ""),
+                "sender": str(safe_com(lambda: inner.SenderEmailAddress, "") or ""),
+                "sent_on": str(safe_com(lambda: inner.SentOn, "") or ""),
+                "to": str(safe_com(lambda: inner.To, "") or ""),
+                "cc": str(safe_com(lambda: inner.CC, "") or ""),
+                "body": str(inner.Body or ""),
+                "attachments": [
+                    asdict(self._snapshot_attachment(item, scratch, f"{key}.{index}", depth))
+                    for index, item in _attachments_of(inner)
+                ],
+            }
+        finally:
+            # Opened only to be read: drop it, and with it the lock on the file.
+            safe_com(lambda: inner.Close(OL_DISCARD), None)
 
     def close_inspectors_of(self, entry_id: str) -> int:
         """Close every open compose window showing ``entry_id``, saving it.
@@ -708,3 +765,13 @@ def _recipient_lines(mail: Any) -> tuple[dict[int, list[str]], int]:
             continue
         lines[kind].append(address)
     return lines, unreadable
+
+
+def _attachments_of(mail: Any) -> list[tuple[int, Any]]:
+    """A mail's attachments with their 1-based index, in Outlook's order."""
+    items = mail.Attachments
+    return [(index, items.Item(index)) for index in range(1, int(items.Count) + 1)]
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
