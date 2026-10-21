@@ -119,14 +119,23 @@ class DraftAttachment:
     ``Attachment.Size``, which counts MAPI overhead and never equals the file.
     A mail attached as an item (``ATTACHMENT_EMBEDDED``) has no stable bytes:
     Outlook writes it out afresh on every ``SaveAsFile`` (issue #135). It is
-    bound by a hash of its content instead (``DraftSurface._embedded_content``), and
-    ``size_bytes`` is Outlook's stored ``Attachment.Size``.
+    bound by a hash of its content instead (``DraftSurface._embedded_content``).
+    Its ``size_bytes`` is Outlook's ``Attachment.Size``, which reads 0 until the
+    draft is saved: informational, never part of what binds it.
     """
 
     name: str
     size_bytes: int
     sha256: str
     kind: str = ATTACHMENT_FILE
+
+
+def _binding_fields(attachment: DraftAttachment) -> dict[str, Any]:
+    """The fields of an attachment that bind it; an attached mail's size is not one."""
+    fields = asdict(attachment)
+    if attachment.kind == ATTACHMENT_EMBEDDED:
+        del fields["size_bytes"]
+    return fields
 
 
 @dataclass
@@ -632,7 +641,7 @@ class DraftSurface:
                 "cc": str(safe_com(lambda: inner.CC, "") or ""),
                 "body": str(inner.Body or ""),
                 "attachments": [
-                    asdict(self._snapshot_attachment(item, scratch, f"{key}.{index}", depth))
+                    _binding_fields(self._snapshot_attachment(item, scratch, f"{key}.{index}", depth))
                     for index, item in _attachments_of(inner)
                 ],
             }

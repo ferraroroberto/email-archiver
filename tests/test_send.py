@@ -262,6 +262,23 @@ def test_an_attached_mail_keeps_its_fingerprint_although_its_bytes_change(monkey
     assert inner.closed_with == [mapi.OL_DISCARD, mapi.OL_DISCARD]
 
 
+def test_an_attached_mail_keeps_its_fingerprint_when_outlook_settles_its_size(monkeypatch):
+    # Attachment.Size reads 0 on a draft just written and only the
+    # stored size once the draft is saved, which `send` does before it compares.
+    inner = _FakeInnerMail(attachments=[_FakeAttachment("inner.txt", b"inner bytes")])
+    mail = _with_attached_mail(inner)
+    mail.Attachments.items[1].Size = 0
+    approved = _approved(monkeypatch, mail)
+
+    mail.Attachments.items[1].Size = 8106
+
+    settled = send.read_document(_client(monkeypatch, mail).read_draft("draft-1"))
+    assert settled["fingerprint"] == approved
+    assert settled["attachments"][1]["size_bytes"] == 8106
+    _send(monkeypatch, mail, approved)
+    assert mail.calls == [("Send",)]
+
+
 @pytest.mark.parametrize("change", [
     lambda inner: setattr(inner, "Body", "Other text."),
     lambda inner: setattr(inner, "SentOn", "2026-01-03 03:04:05+00:00"),
