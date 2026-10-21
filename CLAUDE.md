@@ -13,7 +13,9 @@ See `README.md` for setup, layout, and usage.
 ## Verification
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests/
+& .\scripts\verify-before-ship.ps1
 ```
 
-`pytest` is a dev-only dependency (declared in `requirements.txt`). Don't claim a change works without running this gate.
+The gate is `pytest tests/` followed by the **static ratchet** (`scripts/static_ratchet.py`, vendored byte-for-byte from project-scaffolding and never edited here; `.fleet.toml` `[static_ratchet]`, baseline `.static-ratchet-baseline.json`). The ratchet fails on a duplicate block (jscpd via `npx`, so **Node is a prerequisite**) or an unused import/variable (ruff `F401,F841`) that is not in the baseline; it reads the whole tree, so it is never path-routed. The gate calls it only through `python -m scripts.static_ratchet_gate`, which fails exit 3 (a detector could not run) as NOT CONFIRMED, never a pass or a skip. Shrink the baseline in the PR that removes debt (`--update-baseline`); adding to it needs `--allow-additions` and shows in review.
+
+`pytest` and `ruff` are dev-only dependencies (declared in `requirements.txt`). Don't claim a change works without running this gate.

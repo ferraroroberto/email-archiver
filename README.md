@@ -144,6 +144,7 @@ archiver/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Native folder-picker wrapper
 │
+├── scripts/                     ← pre-ship gate (verify-before-ship.ps1) and the vendored static ratchet
 ├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, Message-ID, batch verbs)
 ├── docs/
 │   └── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure
@@ -274,10 +275,12 @@ The Stream Deck `launch_scan.bat` is unchanged and still opens the progress wind
 The project ships a pytest suite (`tests/`) covering the filename fitter, sequencing, the date-prefix toggle, the Explorer picker, the Message-ID column and its migration, renumbering (ordering, both name forms, split numbers, the dry run, the index), the headless scan's exit codes and its missing-root purge guard, and every batch verb (including `draft`, `read` and `send`) end to end against a fake Outlook client. Run it before declaring any change done:
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests/
+& .\scripts\verify-before-ship.ps1
 ```
 
-`pytest` is a dev-only dependency — see `requirements.txt`.
+That runs `pytest tests/` and then the static ratchet: a duplicate block (jscpd via `npx`, so Node is needed) or an unused import/variable (ruff) that is not in `.static-ratchet-baseline.json` fails the gate. Existing debt is baselined, not fixed, so the count can only go down; a detector that cannot run fails as NOT CONFIRMED rather than passing.
+
+`pytest` and `ruff` are dev-only dependencies — see `requirements.txt`.
 
 ---
 
