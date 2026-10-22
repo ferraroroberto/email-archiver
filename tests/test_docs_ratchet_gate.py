@@ -23,37 +23,24 @@ from tests.test_static_ratchet_gate import _fake_script
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_only_exit_zero_passes() -> None:
-    assert gate.classify_exit(0)[0] is True
-    for code in (1, 2, 3, 4, -1):
-        assert gate.classify_exit(code)[0] is False, code
+def test_only_exit_zero_passes_and_exit_three_is_never_a_skip() -> None:
+    verdicts = {code: gate.classify_exit(code) for code in range(-1, 5)}
+    assert [code for code, (ok, _) in verdicts.items() if ok] == [0]
+    assert "NOT CONFIRMED" in verdicts[3][1]
+    assert "skip" not in verdicts[3][1].lower()
 
 
-def test_exit_three_is_not_confirmed_and_never_a_skip() -> None:
-    ok, label = gate.classify_exit(3)
-    assert not ok
-    assert "NOT CONFIRMED" in label
-    assert "skip" not in label.lower()
-
-
-@pytest.mark.parametrize(("code", "expected"), [(0, 0), (1, 1), (2, 1), (3, 1)])
-def test_run_exits_nonzero_for_every_script_failure(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], code: int, expected: int
-) -> None:
-    got = gate.run(_fake_script(tmp_path, code, "from the script"))
-    out = capsys.readouterr().out
-    assert got == expected
-    assert "from the script" in out  # the script's own finding is echoed
-    assert out.rstrip().splitlines()[-1].startswith("OK" if code == 0 else "FAIL")
-
-
-def test_run_reports_a_tree_it_could_not_read(
+def test_run_fails_every_nonzero_exit_and_names_a_tree_it_could_not_read(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert gate.run(_fake_script(tmp_path, 3, "docs/x.md: fence never closes")) == 1
-    out = capsys.readouterr().out
-    assert "docs/x.md: fence never closes" in out
-    assert "NOT CONFIRMED" in out
+    assert gate.run(_fake_script(tmp_path, 0, "all clear")) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith("OK")
+    for code in (1, 2, 3):
+        assert gate.run(_fake_script(tmp_path, code, "docs/x.md: fence never closes")) == 1
+        out = capsys.readouterr().out
+        assert "docs/x.md: fence never closes" in out  # the script's finding is echoed
+        assert out.rstrip().splitlines()[-1].startswith("FAIL")
+    assert "NOT CONFIRMED" in out  # the last code run was 3
 
 
 def test_the_pre_ship_gate_calls_the_wrapper_not_the_script() -> None:
