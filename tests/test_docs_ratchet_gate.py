@@ -1,0 +1,66 @@
+"""The gate's docs-ratchet stage maps the vendored script's exit codes.
+
+The runner (timeout, unstartable script, venv interpreter) is shared with the
+static-ratchet stage and pinned in test_static_ratchet_gate.py.
+
+`scripts/docs_ratchet.py` exits 3 when it could not confirm (git unusable, a
+non-UTF-8 file, a fence or comment that never closes): part of the tree was not
+read. These tests pin that 3 fails as NOT CONFIRMED -- never a pass, never a
+skip -- and that the pre-ship gate calls the wrapper that guarantees it rather
+than the script. They run fake scripts in a temp directory: no mailbox, no Outlook.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from scripts import docs_ratchet_gate as gate
+from tests.test_static_ratchet_gate import _fake_script
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_only_exit_zero_passes_and_exit_three_is_never_a_skip() -> None:
+    verdicts = {code: gate.classify_exit(code) for code in range(-1, 5)}
+    assert [code for code, (ok, _) in verdicts.items() if ok] == [0]
+    assert "NOT CONFIRMED" in verdicts[3][1]
+    assert "skip" not in verdicts[3][1].lower()
+
+
+def test_run_fails_every_nonzero_exit_and_names_a_tree_it_could_not_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert gate.run(_fake_script(tmp_path, 0, "all clear")) == 0
+    assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith("OK")
+    for code in (1, 2, 3):
+        assert gate.run(_fake_script(tmp_path, code, "docs/x.md: fence never closes")) == 1
+        out = capsys.readouterr().out
+        assert "docs/x.md: fence never closes" in out  # the script's finding is echoed
+        assert out.rstrip().splitlines()[-1].startswith("FAIL")
+    assert "NOT CONFIRMED" in out  # the last code run was 3
+
+
+def test_the_pre_ship_gate_calls_the_wrapper_not_the_script() -> None:
+    gate_ps1 = (REPO_ROOT / "scripts" / "verify-before-ship.ps1").read_text(
+        encoding="utf-8"
+    )
+    stage_lines = [
+        line for line in gate_ps1.splitlines() if line.lstrip().startswith("Invoke-Stage")
+    ]
+    ratchet = [line for line in stage_lines if "docs_ratchet" in line]
+    assert len(ratchet) == 1
+    assert "-m scripts.docs_ratchet_gate" in ratchet[0]
+    assert "docs_ratchet.py" not in ratchet[0]
+
+
+def test_the_ratchet_is_declared_and_its_script_is_vendored() -> None:
+    fleet = tomllib.loads((REPO_ROOT / ".fleet.toml").read_text(encoding="utf-8"))
+    assert fleet["docs_ratchet"]["enabled"] is True
+    baseline = REPO_ROOT / fleet["docs_ratchet"]["baseline"]
+    assert baseline.is_file()
+    entry = fleet["vendored"]["docs_ratchet"]
+    assert entry["dest"] == "scripts/docs_ratchet.py"
+    assert (REPO_ROOT / entry["dest"]).is_file()
