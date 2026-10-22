@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,9 +47,13 @@ def classify_exit(code: int) -> tuple[bool, str]:
     return False, _FAIL_LABELS.get(code, f"unexpected exit {code}")
 
 
-def run(script: Path = SCRIPT) -> int:
+def run_stage(
+    script: Path, stage: str, classify: Callable[[int], tuple[bool, str]]
+) -> int:
     """Run `script` under this interpreter (the venv python, which has ruff),
-    echo its output, then the verdict. Returns the gate's exit code."""
+    echo its output, then the `stage` verdict from `classify`. Returns the gate's
+    exit code. The docs-ratchet stage reuses this, so a ratchet that could not
+    run is NOT CONFIRMED in one place."""
     try:
         proc = subprocess.run(
             [sys.executable, str(script)],
@@ -63,9 +68,14 @@ def run(script: Path = SCRIPT) -> int:
         code, output = EXIT_NOT_CONFIRMED, f"{script.name} could not start: {exc}\n"
     if output:
         sys.stdout.write(output if output.endswith("\n") else output + "\n")
-    ok, label = classify_exit(code)
-    print(f"{'OK' if ok else 'FAIL'}: static ratchet: {label}")
+    ok, label = classify(code)
+    print(f"{'OK' if ok else 'FAIL'}: {stage}: {label}")
     return 0 if ok else 1
+
+
+def run(script: Path = SCRIPT) -> int:
+    """The static-ratchet stage."""
+    return run_stage(script, "static ratchet", classify_exit)
 
 
 if __name__ == "__main__":

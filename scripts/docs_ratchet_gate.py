@@ -8,7 +8,8 @@ it could not confirm (git unusable, a non-UTF-8 file, a fence or comment that
 never closes). Exit 3 means part of the tree was not read, so it fails the gate
 as its own state and never reads as a pass or a skip. This wrapper is the one
 place that mapping lives, so a test can pin it; `verify-before-ship.ps1` calls
-the wrapper, never the script.
+the wrapper, never the script. The runner itself is shared with the static-ratchet
+stage.
 
 Exit 0 only when the script exited 0; every other outcome exits 1 with its
 reason on the last line.
@@ -16,19 +17,15 @@ reason on the last line.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
+from scripts.static_ratchet_gate import (
+    EXIT_CONFIG, EXIT_NEW, EXIT_NOT_CONFIRMED, EXIT_PASS, run_stage,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "docs_ratchet.py"
-
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-EXIT_PASS, EXIT_NEW, EXIT_CONFIG, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
-
-# A Markdown line scan of a few files; a minute is far past any real run.
-RUN_TIMEOUT_S = 60
 
 _FAIL_LABELS = {
     EXIT_NEW: "NEW history marker, README past its budget, or missing baseline",
@@ -45,25 +42,8 @@ def classify_exit(code: int) -> tuple[bool, str]:
 
 
 def run(script: Path = SCRIPT) -> int:
-    """Run `script` under this interpreter, echo its output, then the verdict.
-    Returns the gate's exit code."""
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(script)],
-            cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
-            timeout=RUN_TIMEOUT_S, check=False,
-        )
-        code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired:
-        code, output = EXIT_NOT_CONFIRMED, f"{script.name} did not finish in {RUN_TIMEOUT_S}s\n"
-    except OSError as exc:
-        code, output = EXIT_NOT_CONFIRMED, f"{script.name} could not start: {exc}\n"
-    if output:
-        sys.stdout.write(output if output.endswith("\n") else output + "\n")
-    ok, label = classify_exit(code)
-    print(f"{'OK' if ok else 'FAIL'}: docs ratchet: {label}")
-    return 0 if ok else 1
+    """The docs-ratchet stage: the shared runner with this stage's verdicts."""
+    return run_stage(script, "docs ratchet", classify_exit)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 """The gate's docs-ratchet stage maps the vendored script's exit codes.
 
+The runner (timeout, unstartable script, venv interpreter) is shared with the
+static-ratchet stage and pinned in test_static_ratchet_gate.py.
+
 `scripts/docs_ratchet.py` exits 3 when it could not confirm (git unusable, a
 non-UTF-8 file, a fence or comment that never closes): part of the tree was not
 read. These tests pin that 3 fails as NOT CONFIRMED -- never a pass, never a
@@ -9,23 +12,15 @@ than the script. They run fake scripts in a temp directory: no mailbox, no Outlo
 
 from __future__ import annotations
 
-import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from scripts import docs_ratchet_gate as gate
+from tests.test_static_ratchet_gate import _fake_script
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _fake_script(tmp_path: Path, code: int, message: str = "") -> Path:
-    script = tmp_path / "fake_ratchet.py"
-    script.write_text(
-        f"import sys\nprint({message!r})\nsys.exit({code})\n", encoding="utf-8"
-    )
-    return script
 
 
 def test_only_exit_zero_passes() -> None:
@@ -59,39 +54,6 @@ def test_run_reports_a_tree_it_could_not_read(
     out = capsys.readouterr().out
     assert "docs/x.md: fence never closes" in out
     assert "NOT CONFIRMED" in out
-
-
-def test_run_treats_a_timeout_and_an_unstartable_script_as_not_confirmed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def hang(*_a: object, **_k: object) -> None:
-        raise gate.subprocess.TimeoutExpired(cmd="x", timeout=1)
-
-    monkeypatch.setattr(gate.subprocess, "run", hang)
-    assert gate.run(_fake_script(tmp_path, 0)) == 1
-    assert "NOT CONFIRMED" in capsys.readouterr().out
-
-    def refuse(*_a: object, **_k: object) -> None:
-        raise OSError("no interpreter")
-
-    monkeypatch.setattr(gate.subprocess, "run", refuse)
-    assert gate.run(_fake_script(tmp_path, 0)) == 1
-    assert "NOT CONFIRMED" in capsys.readouterr().out
-
-
-def test_the_wrapper_runs_under_the_venv_interpreter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: list[list[str]] = []
-    real = gate.subprocess.run
-
-    def spy(argv: list[str], **kwargs: object) -> object:
-        seen.append(argv)
-        return real(argv, **kwargs)
-
-    monkeypatch.setattr(gate.subprocess, "run", spy)
-    gate.run(_fake_script(tmp_path, 0))
-    assert seen[0][0] == sys.executable
 
 
 def test_the_pre_ship_gate_calls_the_wrapper_not_the_script() -> None:
