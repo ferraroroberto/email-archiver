@@ -4,7 +4,7 @@ Canonical instructions for AI coding agents working in this repository. Claude C
 
 ## This repository
 Modular Python app that indexes and archives Outlook emails into a structured OneDrive folder system.
-See `README.md` for setup, layout, and usage.
+See `README.md` for setup and usage; layout and per-feature reference are indexed there and live in `docs/`.
 
 ## Internal architecture
 
