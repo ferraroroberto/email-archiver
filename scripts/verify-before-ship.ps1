@@ -13,6 +13,12 @@
                          (exit 3) fails as NOT CONFIRMED, never a pass or a skip.
                          Needs Node and ruff in the .venv. Not path-routed: duplication
                          needs the whole tree.
+      3. docs ratchet  - scripts/docs_ratchet.py through scripts/docs_ratchet_gate.py:
+                         fails only on README.md past its size budget or baselined size,
+                         or a new history marker (issue reference, dated heading,
+                         changelog heading) in README.md / docs/**/*.md that is not in
+                         .docs-ratchet-baseline.json. An unreadable file (exit 3) fails
+                         as NOT CONFIRMED. Not path-routed: a count needs the whole tree.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -43,6 +49,7 @@ function Invoke-Stage {
 
 Invoke-Stage "pytest"         { & $py -m pytest tests/ }
 Invoke-Stage "static ratchet" { & $py -m scripts.static_ratchet_gate }
+Invoke-Stage "docs ratchet"   { & $py -m scripts.docs_ratchet_gate }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green
