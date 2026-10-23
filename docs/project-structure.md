@@ -26,6 +26,13 @@ archiver/
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
+│   ├── cli/
+│   │   ├── __init__.py          ← `python -m email_archiver <archive|scan|ui|batch>` dispatcher
+│   │   ├── archive.py           ← Archive Email dialog entry
+│   │   ├── scan.py              ← Scan Archive entry, headless exit codes
+│   │   ├── launcher.py          ← Full launcher window entry
+│   │   └── batch.py             ← Headless JSON verbs entry
+│   │
 │   ├── database/
 │   │   ├── models.py            ← SQLite schema, FTS5 setup, connection factory
 │   │   └── repository.py       ← All SQL queries (EmailRepository class)
@@ -57,10 +64,10 @@ archiver/
 │   ├── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure
 │   └── *.md                     ← Reference docs, indexed in the README
 │
-├── main_archive.py              ← Stream Deck entry: Archive Email
-├── main_scan.py                 ← Stream Deck entry: Scan Archive
-├── main_ui.py                   ← Full launcher (both buttons)
-├── main_batch.py                ← Headless entry: plan / apply / revert / renumber / draft / read / send / mailboxes / find (JSON)
+├── main_archive.py              ← Stream Deck entry: Archive Email (thin wrapper over cli/archive.py)
+├── main_scan.py                 ← Stream Deck entry: Scan Archive (thin wrapper over cli/scan.py)
+├── main_ui.py                   ← Full launcher, both buttons (thin wrapper over cli/launcher.py)
+├── main_batch.py                ← Headless JSON entry (thin wrapper over cli/batch.py)
 ├── launch_archive.bat           ← Runs pythonw main_archive.py (no console)
 ├── launch_scan.bat              ← Runs pythonw main_scan.py (no console)
 ├── run-scan-nightly.bat         ← Scheduled job: headless scan in the foreground, propagates the exit code

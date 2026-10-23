@@ -97,7 +97,12 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 
 # Full launcher with both buttons + DB stats
 & .\.venv\Scripts\python.exe main_ui.py
+
+# The same four tools behind one entry point: archive | scan | ui | batch
+& .\.venv\Scripts\python.exe -m email_archiver scan --no-ui
 ```
+
+The `main_*.py` scripts are thin wrappers over `python -m email_archiver <subcommand>`, kept at their paths for the launchers, the nightly job and the app that spawns `main_batch.py`.
 
 ## Verification
 
@@ -122,6 +127,7 @@ Durable reference lives in `docs/`; each line below is the entry point for one t
 | What Scan and Archive do, the three-stage folder ranking, incremental scan rules | [docs/archive-and-scan.md](docs/archive-and-scan.md) |
 | `NNN - name` file naming, the optional `YYYY-MM-DD - ` prefix, `naming.date_prefix` | [docs/naming.md](docs/naming.md) |
 | Repository layout | [docs/project-structure.md](docs/project-structure.md) |
+| Where new code goes, the declared root exceptions, the structure ratchet | [docs/layout.md](docs/layout.md) |
 | Scheduled headless scan and its exit codes | [docs/nightly-scan.md](docs/nightly-scan.md) |
 | SQLite schema, the follow-up flag, the Internet Message-ID | [docs/database.md](docs/database.md) |
 | `main_batch.py` verbs, filing specific mail, Sent Items, identity, exit codes | [docs/batch-mode.md](docs/batch-mode.md) |

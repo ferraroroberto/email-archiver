@@ -19,6 +19,12 @@
                          changelog heading) in README.md / docs/**/*.md that is not in
                          .docs-ratchet-baseline.json. An unreadable file (exit 3) fails
                          as NOT CONFIRMED. Not path-routed: a count needs the whole tree.
+      4. structure ratchet - scripts/structure_ratchet.py through
+                         scripts/structure_ratchet_gate.py: fails only on a file past 1,000
+                         lines, a function past 100 lines or a directory past 40 modules that
+                         is new or above its entry in .structure-ratchet-baseline.json, or a
+                         root folder outside the .fleet.toml shape + extra_roots. A tree it
+                         could not measure (exit 3) fails as NOT CONFIRMED. Not path-routed.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -50,6 +56,7 @@ function Invoke-Stage {
 Invoke-Stage "pytest"         { & $py -m pytest tests/ }
 Invoke-Stage "static ratchet" { & $py -m scripts.static_ratchet_gate }
 Invoke-Stage "docs ratchet"   { & $py -m scripts.docs_ratchet_gate }
+Invoke-Stage "structure ratchet" { & $py -m scripts.structure_ratchet_gate }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green

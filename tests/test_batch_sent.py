@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-import main_batch
+from email_archiver.cli import batch as main_batch
 from email_archiver import batch
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
