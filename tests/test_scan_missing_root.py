@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import main_scan
+from email_archiver.cli import scan as main_scan
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.scanner.scanner import FolderScanner
