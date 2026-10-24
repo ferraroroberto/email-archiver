@@ -47,6 +47,24 @@ def classify_exit(code: int) -> tuple[bool, str]:
     return False, _FAIL_LABELS.get(code, f"unexpected exit {code}")
 
 
+PY_NOT_CONFIRMED = "NOT CONFIRMED -- a Python file could not be parsed, so it was not checked"
+
+
+def verdicts(
+    passed: str, new: str, config: str, not_confirmed: str = PY_NOT_CONFIRMED
+) -> Callable[[int], tuple[bool, str]]:
+    """A `classify` for `run_stage`: only exit 0 passes, each other exit gets its label."""
+    labels = {EXIT_NEW: new, EXIT_CONFIG: config, EXIT_NOT_CONFIRMED: not_confirmed}
+
+    def classify_exit(code: int) -> tuple[bool, str]:
+        """`(ok, label)` for one script exit code. Only 0 passes."""
+        if code == EXIT_PASS:
+            return True, passed
+        return False, labels.get(code, f"unexpected exit {code}")
+
+    return classify_exit
+
+
 def run_stage(
     script: Path, stage: str, classify: Callable[[int], tuple[bool, str]]
 ) -> int:
