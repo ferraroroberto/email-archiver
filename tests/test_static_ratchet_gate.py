@@ -28,6 +28,14 @@ def _fake_script(tmp_path: Path, code: int, message: str = "") -> Path:
     return script
 
 
+def assert_only_zero_passes_and_three_is_not_confirmed(stage: object) -> None:
+    """The verdict contract every ratchet wrapper shares (`stage` is its gate module)."""
+    verdicts = {code: stage.classify_exit(code) for code in range(-1, 5)}
+    assert [code for code, (ok, _) in verdicts.items() if ok] == [0]
+    assert "NOT CONFIRMED" in verdicts[3][1]
+    assert "skip" not in verdicts[3][1].lower()
+
+
 def test_only_exit_zero_passes() -> None:
     assert gate.classify_exit(0)[0] is True
     for code in (1, 2, 3, 4, -1):
