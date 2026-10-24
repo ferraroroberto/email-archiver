@@ -31,6 +31,13 @@
                          .instruction-ratchet-baseline.json, or a file past its size cap. An
                          instruction file it could not measure (exit 3) fails as NOT
                          CONFIRMED. Not path-routed: one file's reader depends on another.
+      6. doc refs ratchet - scripts/doc_refs_ratchet.py through
+                         scripts/doc_refs_ratchet_gate.py: fails only on a repo path, `python -m`
+                         module or relative link in README.md / CLAUDE.md / docs/**/*.md that
+                         does not resolve against the tracked tree and is not in
+                         .doc-refs-ratchet-baseline.json. A doc it could not read (exit 3)
+                         fails as NOT CONFIRMED. Not path-routed: a code change can strand a
+                         reference without touching the doc.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -64,6 +71,7 @@ Invoke-Stage "static ratchet" { & $py -m scripts.static_ratchet_gate }
 Invoke-Stage "docs ratchet"   { & $py -m scripts.docs_ratchet_gate }
 Invoke-Stage "structure ratchet" { & $py -m scripts.structure_ratchet_gate }
 Invoke-Stage "instruction ratchet" { & $py -m scripts.instruction_ratchet_gate }
+Invoke-Stage "doc refs ratchet" { & $py -m scripts.doc_refs_ratchet_gate }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green
