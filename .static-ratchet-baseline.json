@@ -1,5 +1,7 @@
 {
   "version": 1,
   "tools": {"jscpd": "5.4.0", "ruff": "0.17.1"},
-  "entries": []
+  "entries": [
+    {"key": "dup:2f7071599cac:scripts/conventions_ratchet_gate.py|scripts/dead_code_ratchet_gate.py", "files": ["scripts/conventions_ratchet_gate.py", "scripts/dead_code_ratchet_gate.py"]}
+  ]
 }
