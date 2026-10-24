@@ -7,8 +7,9 @@
     Runs, fail-fast:
       1. pytest        - the unit suite (tests/); it never sends mail or touches a mailbox
       2. static ratchet - scripts/static_ratchet.py through scripts/static_ratchet_gate.py:
-                         fails only on a duplicate block (jscpd via npx) or an unused
-                         import/variable (ruff F401,F841) that is not in
+                         fails only on a duplicate block (jscpd via npx), an unused
+                         import/variable (ruff F401,F841) or a ruff bug (B) / security
+                         (S) finding (S113 strict) that is not in
                          .static-ratchet-baseline.json. A detector that cannot run
                          (exit 3) fails as NOT CONFIRMED, never a pass or a skip.
                          Needs Node and ruff in the .venv. Not path-routed: duplication
@@ -44,6 +45,12 @@
                          .dead-code-ratchet-baseline.json. A Python file it could not parse
                          (exit 3) fails as NOT CONFIRMED. Not path-routed: deleting the last
                          caller in one file strands a definition in another.
+      8. conventions ratchet - scripts/conventions_ratchet.py through
+                         scripts/conventions_ratchet_gate.py: fails only on a no-window,
+                         logging-not-print or no-drive-path hit count in a file above its
+                         entry in .conventions-ratchet-baseline.json. A Python file it could
+                         not parse (exit 3) fails as NOT CONFIRMED. Not path-routed: a rule
+                         added to .fleet.toml must see the whole tree.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -79,6 +86,7 @@ Invoke-Stage "structure ratchet" { & $py -m scripts.structure_ratchet_gate }
 Invoke-Stage "instruction ratchet" { & $py -m scripts.instruction_ratchet_gate }
 Invoke-Stage "doc refs ratchet" { & $py -m scripts.doc_refs_ratchet_gate }
 Invoke-Stage "dead code ratchet" { & $py -m scripts.dead_code_ratchet_gate }
+Invoke-Stage "conventions ratchet" { & $py -m scripts.conventions_ratchet_gate }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green
