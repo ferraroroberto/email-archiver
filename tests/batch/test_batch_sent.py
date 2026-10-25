@@ -21,12 +21,12 @@ from email_archiver.cli import batch as main_batch
 from email_archiver import batch
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
-from tests.test_batch import (  # noqa: F401 - fixtures are used by name
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     _mail,
     archive_root,
     cfg,
 )
-from tests.test_batch_targeted import TargetedFakeClient
+from tests.batch.test_batch_targeted import TargetedFakeClient
 
 SENT = "__sent__"
 REF = "ref-0001"

@@ -29,19 +29,8 @@ Design decisions:
   ``already_archived``, still in the Inbox because an earlier run's move
   failed) is *finished* rather than re-written — ``reused: true``, the existing
   file reported back, nothing new on disk.
-- **The reference that is moved is not the one that was archived.**
-  ``MailItem.SaveAs`` can leave an item flagged as modified and ``Move`` then
-  refuses it with MAPI_E_OBJECT_CHANGED, which is how a mail ends up with its
-  files written and its place in the Inbox kept. ``apply`` moves a reference
-  re-acquired by EntryID and StoreID, with the original let go first. On that
-  refusal anyway, every reference to the mail is let go, Outlook's view is
-  parked off the Inbox when it is showing it (the Explorer holds its selected
-  mail too, issue #111), and the mail is fetched again and moved while the view
-  is still away (issue #130); it is never ``Save()``d. Which path finished it is
-  logged and reported as ``move_via``.
-  A refusal that survives all of that is reported as ``message_changed`` rather
-  than ``move_failed`` — usually a mail left open in an Outlook window, and the
-  message says so.
+- **The reference that is moved is not the one that was archived.** The move,
+  its retries and the ``message_changed`` error are ``email_archiver.batch_move``.
 - **Nothing is written outside the archive roots.** ``revert`` refuses per
   file, and ``apply`` refuses per decision, any path that does not resolve
   inside ``archive.root_paths`` — so a malformed, hostile or LLM-invented
@@ -61,11 +50,8 @@ Design decisions:
 """
 from __future__ import annotations
 
-import gc
-import hashlib
 import logging
 import os
-import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -84,7 +70,26 @@ from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
 from email_archiver.outlook.client import EmailData
-from email_archiver.outlook.mapi import MailboxNotInOutlookError, is_message_changed_error
+from email_archiver.batch_common import (
+    SCHEMA_VERSION as SCHEMA_VERSION,
+    envelope,
+    error_document as error_document,
+    now_iso as now_iso,
+    renumber_folders,
+    unique_folders,
+)
+from email_archiver.batch_move import (
+    ERROR_MESSAGE_CHANGED as ERROR_MESSAGE_CHANGED,
+    ERROR_MOVE_FAILED,
+    MOVE_VIA_FOLDER_SWITCH as MOVE_VIA_FOLDER_SWITCH,
+    MOVE_VIA_KEPT_IN_SENT,
+    MOVE_VIA_ORIGINAL as MOVE_VIA_ORIGINAL,
+    MOVE_VIA_REFETCHED as MOVE_VIA_REFETCHED,
+    MOVE_VIA_RELEASED_RETRY as MOVE_VIA_RELEASED_RETRY,
+    move_failure_error,
+    move_out_of_inbox,
+)
+from email_archiver.outlook.mapi import MailboxNotInOutlookError
 from email_archiver.paths import (
     REFUSED_OUTSIDE_ROOTS as REFUSED_OUTSIDE_ROOTS,
     REFUSED_UNRESOLVABLE as REFUSED_UNRESOLVABLE,
@@ -95,11 +100,6 @@ from email_archiver.renumber import RenumberResult, renumber_folder
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
-
-# Bumped when the shape of a document below changes incompatibly, so a consumer
-# spawning this process can refuse a version it does not understand instead of
-# reading a field that silently moved.
-SCHEMA_VERSION = 1
 
 # Default number of ranked folder candidates `plan` reports per mail. Larger
 # than the dialog's three: the caller re-ranks (an LLM, in task-os's case) and
@@ -124,13 +124,6 @@ ERROR_NOT_IN_SENT = "not_in_sent"              # a `source: sent` mail not in Se
 ERROR_NOT_IN_ARCHIVE = "not_in_archive_folder"  # revert cannot find it back
 ERROR_BAD_DECISION = "bad_decision"             # caller sent an unusable entry
 ERROR_ARCHIVE_FAILED = "archive_failed"         # disk write / Outlook SaveAs
-ERROR_MOVE_FAILED = "move_failed"               # files are on disk, mail is not
-# A move refused as MAPI_E_OBJECT_CHANGED after both retries — almost always a
-# mail left open in an Outlook window. Its own code because it is the one move
-# failure an operator clears in seconds without anything being wrong: close the
-# window, apply the same decision again. A caller that cannot tell it from a
-# plain `move_failed` has to treat both as needing a human.
-ERROR_MESSAGE_CHANGED = "message_changed"
 # The move landed and only the tag did not. Its own code because the two are
 # genuinely different states to recover from: after a move_failed the mail is
 # still in the Inbox, after a category_failed it is already filed and only
@@ -142,31 +135,6 @@ ERROR_CATEGORY_FAILED = "category_failed"
 # archive-root guard now that `renumber` applies it too. They stay readable as
 # `batch.REFUSED_*`, which is where consumers and tests look for them.
 
-# Which reference finished an `apply` move, reported as the result's
-# `move_via`. Genuinely different stories about the same mail, and the one
-# place that says which defence is earning its keep on this mailbox — see
-# `_move_out_of_inbox`.
-MOVE_VIA_REFETCHED = "refetched"     # a reference read back out of the store
-MOVE_VIA_ORIGINAL = "original"       # the re-acquire failed; the original moved
-# Refused with 0x80040109, then moved on a reference fetched again once every
-# other one was let go; Outlook's view was not on the Inbox, so it was left
-# alone. Replaces `saved_retry`: a refused mail is never saved.
-MOVE_VIA_RELEASED_RETRY = "released_retry"
-# The same, with Outlook's Explorer showing the Inbox and so holding the mail as
-# its selection: the view was parked on another folder while the move was
-# retried, then put back. The one path that disturbs the
-# user's view.
-MOVE_VIA_FOLDER_SWITCH = "folder_switch"
-# A `source: sent` mail is archived and tagged but never moved: Sent Items is
-# the user's record of what went out, so the mail stays where it is.
-MOVE_VIA_KEPT_IN_SENT = "kept_in_sent"
-
-# The pauses before each fresh-reference retry of a refused move, all made
-# while the view is away: one straight after it settles, one more after a
-# pause. Two tries, not more: the view is the user's, and a refusal that
-# outlasts both is reported as `message_changed` with its remedy.
-MOVE_RETRY_DELAYS_SECONDS = (0.0, 2.0)
-
 # A mailbox's `outlook_status` in the `mailboxes` document.
 MAILBOX_PRESENT = "present"   # its store is in the running Outlook
 MAILBOX_MISSING = "missing"   # Outlook answered; the mailbox is not in it
@@ -174,11 +142,6 @@ MAILBOX_UNKNOWN = "unknown"   # Outlook not running, or the check could not run
 
 
 # ---------------------------------------------------------------- helpers ---
-
-def now_iso() -> str:
-    """The local-time timestamp every batch-family document carries."""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
-
 
 def _iso_or_empty(value: datetime | None) -> str:
     return value.isoformat() if value is not None else ""
@@ -245,90 +208,6 @@ def _mail_dict(mail: Any, *, in_inbox: bool = True) -> dict[str, Any]:
         # ``already_archived`` cannot tell that from a mail that is properly
         # filed and gone.
         "in_inbox": in_inbox,
-    }
-
-
-def _envelope(
-    verb: str, cfg: dict[str, Any], category: str | None = None,
-    mailbox: Mailbox | None = None,
-) -> dict[str, Any]:
-    """The fields every verb's document opens with. ``category`` is the one
-    this run actually used, when the caller overrode the config's;
-    ``archive_folder`` is the one of ``mailbox`` (``main_batch`` adds the
-    ``mailbox`` key itself, to every Outlook verb's document)."""
-    return {
-        "verb": verb,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
-        "archive_folder": get_mailbox_archive_folder(cfg, mailbox),
-        "category": category or get_outlook_category(cfg),
-    }
-
-
-def _unique_folders(paths: list[str]) -> list[str]:
-    """The distinct folders in ``paths``, first spelling wins.
-
-    Deduplicated case-insensitively because Windows hands the same folder back
-    spelled several ways, and renumbering one folder twice in a run would
-    reorder what the first pass just fixed.
-    """
-    seen: set[str] = set()
-    folders: list[str] = []
-    for raw in paths:
-        folder = os.path.normpath(raw)
-        key = os.path.normcase(folder)
-        if key in seen:
-            continue
-        seen.add(key)
-        folders.append(folder)
-    return folders
-
-
-def _renumber_folders(
-    cfg: dict[str, Any], repo: EmailRepository, folders: list[str]
-) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
-    """Renumber each touched folder once; return ``(renumbered, refused)``.
-
-    ``renumbered`` is the map a consumer heals its stored paths from, keyed by
-    folder. A folder that could not be renumbered at all is **not** an empty
-    map in there — an empty map means "already in order", which is a different
-    fact — it goes into ``refused`` with its reason.
-    """
-    roots = _archive_roots(cfg)
-    renumbered: dict[str, list[dict[str, Any]]] = {}
-    refused: list[dict[str, Any]] = []
-
-    for folder in folders:
-        try:
-            result = renumber_folder(folder, repo, roots)
-        except Exception as exc:  # one folder's failure is not the run's
-            logger.exception("Renumbering %r failed", folder)
-            refused.append({
-                "folder_path": folder,
-                "reason": f"{type(exc).__name__}: {exc}",
-            })
-            continue
-        if result.refused:
-            refused.append({"folder_path": folder, "reason": result.refused})
-            continue
-        renumbered[result.folder_path] = result.renamed
-
-    return renumbered, refused
-
-
-def error_document(verb: str, code: str, message: str, **details: Any) -> dict[str, Any]:
-    """The document printed when the run could not start at all.
-
-    Deliberately the same envelope shape minus the results, so a consumer
-    parses one JSON document either way and branches on ``"error" in doc``
-    rather than on the exit code alone. ``details`` add keys to ``error``
-    (``send``'s refusal names the parts that differ under ``differs``).
-    """
-    return {
-        "verb": verb,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
-        "error": {"code": code, "message": message, **details},
     }
 
 
@@ -519,7 +398,7 @@ def plan(
         for mid in not_found
     )
 
-    doc = _envelope("plan", cfg, mailbox=mailbox)
+    doc = envelope("plan", cfg, mailbox=mailbox)
     if filters.active:
         doc["filters"] = filters.as_dict()
     doc["counts"] = {
@@ -628,12 +507,12 @@ def apply(
             results.append(
                 _apply_one(client, cfg, repo, raw, archive_folder, category, roots)
             )
-        doc = _envelope("apply", cfg, category, mailbox)
+        doc = envelope("apply", cfg, category, mailbox)
         if renumber:
             # Only a folder this run actually wrote into, and only once each.
-            doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
+            doc["renumbered"], doc["renumber_refused"] = renumber_folders(
                 cfg, repo,
-                _unique_folders([r["folder_path"] for r in results if r["files"]]),
+                unique_folders([r["folder_path"] for r in results if r["files"]]),
             )
     finally:
         conn.close()
@@ -670,6 +549,88 @@ def _archived_file_to_reuse(repo: EmailRepository, message_id: str) -> str | Non
     return None
 
 
+def _decision_refusal(
+    raw: dict[str, Any], message_id: str, folder_path: str, roots: list[Path]
+) -> dict[str, str] | None:
+    """The ``bad_decision`` error for a decision that cannot be acted on, else ``None``."""
+    if not message_id or not folder_path:
+        return {
+            "code": ERROR_BAD_DECISION,
+            "message": "a decision needs both a message_id and a folder_path",
+        }
+
+    # An unknown source is refused, never read as the Inbox: filing the wrong
+    # copy of a mail is not recoverable the way not filing one is.
+    source = raw.get("source", SOURCE_INBOX)
+    if source not in SOURCES:
+        return {
+            "code": ERROR_BAD_DECISION,
+            "message": f"source {source!r} is not one of {', '.join(SOURCES)}",
+        }
+
+    # Before Outlook is asked anything: the archiver creates a missing folder,
+    # so an unchecked path is a write anywhere on the disk.
+    _, refusal = _resolve_under_roots(folder_path, roots)
+    if refusal is not None:
+        logger.warning(
+            "Refusing the decision for %s: folder_path %r is %s.",
+            message_id, folder_path, refusal,
+        )
+        return {
+            "code": ERROR_BAD_DECISION,
+            "message": f"{refusal}: folder_path must resolve inside archive.root_paths",
+        }
+    return None
+
+
+def _archive_decision(
+    client: Any,
+    cfg: dict[str, Any],
+    repo: EmailRepository,
+    raw: dict[str, Any],
+    item: Any,
+    result: dict[str, Any],
+) -> bool:
+    """Write the decided mail's files, or find the ones an earlier run wrote.
+
+    Fills ``files`` (and ``sequence_number`` / ``reused``) in ``result``; on a
+    failure sets ``error`` instead and returns False.
+    """
+    message_id, folder_path = result["message_id"], result["folder_path"]
+    reused = _archived_file_to_reuse(repo, message_id)
+    if reused:
+        # Nothing to write: an earlier run already wrote this bundle and only
+        # the Outlook half of it is unfinished. Writing again would file a
+        # second copy of the same mail beside the first.
+        logger.info(
+            "Mail %s is already archived as %r; finishing it in Outlook "
+            "without writing anything.", message_id, reused,
+        )
+        result["reused"] = True
+        result["files"] = [reused]
+        return True
+
+    try:
+        mail = client.read_mail(item)
+        archiver = EmailArchiver(
+            cfg, date_prefix=_decision_date_prefix(cfg, raw, folder_path, message_id)
+        )
+        archived = archiver.archive(item, folder_path, mail.subject)
+    except Exception as exc:
+        logger.exception("Archiving %s failed", message_id)
+        result["error"] = {
+            "code": ERROR_ARCHIVE_FAILED,
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+        return False
+
+    result["sequence_number"] = archived.sequence_number
+    # Filled in before the move on purpose: if the move fails these files
+    # exist and the caller must be able to revert them.
+    result["files"] = [archived.email_path, *archived.attachment_paths]
+    return True
+
+
 def _apply_one(
     client: Any,
     cfg: dict[str, Any],
@@ -684,37 +645,10 @@ def _apply_one(
     folder_path = str(raw.get("folder_path") or "")
     result = _blank_apply_result(message_id, folder_path)
 
-    if not message_id or not folder_path:
-        result["error"] = {
-            "code": ERROR_BAD_DECISION,
-            "message": "a decision needs both a message_id and a folder_path",
-        }
+    result["error"] = _decision_refusal(raw, message_id, folder_path, roots)
+    if result["error"] is not None:
         return result
-
-    # An unknown source is refused, never read as the Inbox: filing the wrong
-    # copy of a mail is not recoverable the way not filing one is.
-    source = raw.get("source", SOURCE_INBOX)
-    if source not in SOURCES:
-        result["error"] = {
-            "code": ERROR_BAD_DECISION,
-            "message": f"source {source!r} is not one of {', '.join(SOURCES)}",
-        }
-        return result
-    from_sent = source == SOURCE_SENT
-
-    # Before Outlook is asked anything: the archiver creates a missing folder,
-    # so an unchecked path is a write anywhere on the disk.
-    _, refusal = _resolve_under_roots(folder_path, roots)
-    if refusal is not None:
-        logger.warning(
-            "Refusing the decision for %s: folder_path %r is %s.",
-            message_id, folder_path, refusal,
-        )
-        result["error"] = {
-            "code": ERROR_BAD_DECISION,
-            "message": f"{refusal}: folder_path must resolve inside archive.root_paths",
-        }
-        return result
+    from_sent = raw.get("source", SOURCE_INBOX) == SOURCE_SENT
 
     where = "Sent Items" if from_sent else "the Inbox"
     not_found_code = ERROR_NOT_IN_SENT if from_sent else ERROR_NOT_IN_INBOX
@@ -737,36 +671,8 @@ def _apply_one(
         }
         return result
 
-    reused = _archived_file_to_reuse(repo, message_id)
-    if reused:
-        # Nothing to write: an earlier run already wrote this bundle and only
-        # the Outlook half of it is unfinished. Writing again would file a
-        # second copy of the same mail beside the first.
-        logger.info(
-            "Mail %s is already archived as %r; finishing it in Outlook "
-            "without writing anything.", message_id, reused,
-        )
-        result["reused"] = True
-        result["files"] = [reused]
-    else:
-        try:
-            mail = client.read_mail(item)
-            archiver = EmailArchiver(
-                cfg, date_prefix=_decision_date_prefix(cfg, raw, folder_path, message_id)
-            )
-            archived = archiver.archive(item, folder_path, mail.subject)
-        except Exception as exc:
-            logger.exception("Archiving %s failed", message_id)
-            result["error"] = {
-                "code": ERROR_ARCHIVE_FAILED,
-                "message": f"{type(exc).__name__}: {exc}",
-            }
-            return result
-
-        result["sequence_number"] = archived.sequence_number
-        # Filled in before the move on purpose: if the move fails these files
-        # exist and the caller must be able to revert them.
-        result["files"] = [archived.email_path, *archived.attachment_paths]
+    if not _archive_decision(client, cfg, repo, raw, item, result):
+        return result
 
     try:
         if from_sent:
@@ -775,16 +681,15 @@ def _apply_one(
             logger.info("Archived %s from Sent Items; leaving it there.", message_id)
         else:
             # The move takes over the only reference: nothing in this frame
-            # may keep the mail alive while Outlook is asked to let go of it
-            # `mail` goes too — an InboxMail carries the item.
-            held, item, mail = [item], None, None
-            moved, via = _move_out_of_inbox(client, held, archive_folder, message_id)
+            # may keep the mail alive while Outlook is asked to let go of it.
+            held, item = [item], None
+            moved, via = move_out_of_inbox(client, held, archive_folder, message_id)
             result["moved"] = True
         result["move_via"] = via
         result["entry_id"] = client.entry_id(moved)
     except Exception as exc:
         logger.exception("Moving %s to %r failed", message_id, archive_folder)
-        result["error"] = _move_failure_error(client, exc, message_id)
+        result["error"] = move_failure_error(client, exc, message_id)
         return result
 
     # Tagged in its own step: a category that would not stick is a different
@@ -824,304 +729,6 @@ def _decision_date_prefix(
         )
         return resolved
     return bool(value)
-
-
-def _move_failure_error(
-    client: Any, exc: Exception, message_id: str
-) -> dict[str, str]:
-    """The ``error`` a failed ``apply`` move reports: its code and its message.
-
-    Anything other than MAPI_E_OBJECT_CHANGED after both defences is a plain
-    ``move_failed`` — a store that refused the write for its own reasons is a
-    different problem, and dressing it up as this one would hide it.
-
-    A move refused as *the message has been changed* on a re-acquired
-    reference *and* on fresh ones fetched after every reference was let go is
-    its own condition, and a recoverable one: the files are on disk, the mail
-    is still in the Inbox, and something in the running Outlook is holding the
-    item. Almost always that something is an open mail window — an inspector
-    holds its item for the life of the window, so both defences fail by
-    construction (issue #76: a live filing run refused this way finished on
-    the first attempt the moment the window was closed, with no restart).
-    Issue #59 saw the same refusal clear on an Outlook restart, which is why
-    that stays as the fallback rather than the headline.
-
-    When no window holds the mail the cause is still unresolved (issue #84).
-    What the 2026-09-16 occurrence ruled out: an inspector (the probe read
-    every window and none held it); the modified flag ``SaveAs`` leaves behind
-    (the two re-applies wrote nothing, and the first ``Move`` of a freshly
-    re-acquired reference was still refused); and anything transient (the
-    ``Save()`` meant to clear the flag was refused too, three times across
-    separate processes over 40 seconds). So it is state held on the item in
-    the running Outlook, not a race, and a bounded retry-with-delay would not
-    have cleared it. The message therefore says outright that re-applying
-    before a restart is not expected to help, rather than inviting a caller to
-    burn retries on it; restarting stays the user's call, never this tool's.
-
-    So the message leads with the cheap remedy, and says which of the two it
-    is on the evidence rather than on the guess: Outlook is asked whether this
-    mail is actually open. A check that could not be completed is reported as
-    *not determined* and never as "no window", because pointing an operator at
-    a restart they do not need is exactly the failure this replaces.
-
-    Issue #111 found a third holder: the Explorer showing the mail as its
-    selected / reading-pane item, freed by selecting another folder and the
-    message again with no restart. ``_move_out_of_inbox`` does that switch
-    itself, retrying the move while the view is away (issue #130), and a
-    refusal it wraps in ``_MoveRefused`` says whether it ran. The
-    restart advice is kept only for one that ran and did not help; otherwise
-    the message gives the by-hand switch as the remedy.
-    """
-    if not is_message_changed_error(getattr(exc, "cause", exc)):
-        return {
-            "code": ERROR_MOVE_FAILED,
-            "message": f"{type(exc).__name__}: {exc}",
-        }
-
-    folder_switched = getattr(exc, "folder_switched", None)
-    entry_id = getattr(exc, "entry_id", "")
-    exc = getattr(exc, "cause", exc)
-
-    try:
-        open_in_window = client.is_open_in_inspector(entry_id)
-    except Exception as probe_exc:  # the probe is a courtesy, never the run
-        logger.warning(
-            "Could not check whether %s is open in a window: %s: %s",
-            message_id, type(probe_exc).__name__, probe_exc,
-        )
-        open_in_window = None
-    logger.info(
-        "Move of %s was refused as a changed message; open in a window: %s; "
-        "Outlook's view parked on another folder for the retries: %s.",
-        message_id, {True: "yes", False: "no", None: "not determined"}[open_in_window],
-        {True: "yes", False: "not applicable", None: "not determined"}[folder_switched],
-    )
-
-    # Only a switch that actually happened and did not help is evidence the
-    # hold outlasts one. One that was not applicable or could not run says
-    # nothing, so it points the user at the same switch by hand, not a restart.
-    tried_switch = (
-        "Outlook's view was moved to another folder automatically and the move "
-        "retried there, and that did not free it. "
-    )
-    by_hand = (
-        "Select another folder in Outlook, then this message again, and apply "
-        "this same decision again; restart Outlook only if that does not clear it."
-    )
-    if open_in_window is True:
-        cause = (
-            "This mail is open in an Outlook window, which holds it and "
-            "refuses every write to it. Close that window and apply this same "
-            "decision again."
-        )
-    elif open_in_window is False and folder_switched is True:
-        cause = (
-            "This mail is not open in any Outlook window, so something else "
-            f"in the running Outlook is holding it. {tried_switch}"
-            "That hold outlasts re-applies, so applying again before a restart "
-            "is not expected to help. Restart Outlook, then apply this same "
-            "decision again. Deleting the mail from the Inbox by hand instead "
-            "leaves the files already written as its only copy, with nothing in "
-            "Outlook pointing at them."
-        )
-    elif open_in_window is False:
-        cause = (
-            "This mail is not open in any Outlook window, but Outlook may "
-            f"still be holding it as the message selected in its folder view. {by_hand}"
-        )
-    elif folder_switched is True:
-        cause = (
-            "Whether this mail is open in an Outlook window could not be "
-            f"determined. {tried_switch}A mail left open is the usual cause, so "
-            "close any window showing it and apply this same decision again; "
-            "restart Outlook if that does not clear it."
-        )
-    else:
-        cause = (
-            "Whether this mail is open in an Outlook window could not be "
-            "determined. A mail left open is the usual cause, so close any "
-            "window showing it and apply this same decision again. Failing "
-            "that, Outlook may be holding it as the message selected in its "
-            "folder view: select another folder in Outlook, then this message "
-            "again, and apply again; restart Outlook if that does not clear it."
-        )
-
-    return {
-        "code": ERROR_MESSAGE_CHANGED,
-        "message": (
-            f"{type(exc).__name__}: {exc} — Outlook refused the move as a "
-            f"changed message on a re-acquired reference, and again on a "
-            f"fresh one after every reference to it was released. {cause} "
-            f"The files are on disk and the mail is still "
-            f"in the Inbox, so re-applying writes nothing."
-        ),
-    }
-
-
-class _MoveRefused(Exception):
-    """A move still refused as a changed message after every retry.
-
-    Carries the refusal itself (``cause``), what the folder switch did, and the
-    mail's EntryID as a plain string (``entry_id``, ``""`` when unreadable) —
-    the caller let go of the mail itself before the move (issue #130), so the
-    window check behind ``_move_failure_error`` asks by id. A switch that
-    happened and did not help is the only evidence a restart is what is left.
-    ``folder_switched`` is ``True`` (it ran and did not help), ``False`` (the
-    Explorer was not on the Inbox, nothing to switch) or ``None`` (it could not
-    be determined or could not run).
-    """
-
-    def __init__(
-        self, cause: Exception, folder_switched: bool | None, entry_id: str
-    ) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
-        self.folder_switched = folder_switched
-        self.entry_id = entry_id
-
-
-def _store_note(store_id: str) -> str:
-    """How a log line names the StoreID a re-fetch used: a short fingerprint,
-    never the id itself — a StoreID can embed the store's file path."""
-    if not store_id:
-        return "without a StoreID (none was readable)"
-    return f"with StoreID #{hashlib.sha1(store_id.encode()).hexdigest()[:8]}"
-
-
-def _yes_no(answer: bool | None) -> str:
-    return {True: "yes", False: "no", None: "not determined"}[answer]
-
-
-def _refusal_without_frames(exc: Exception) -> Exception:
-    """The refusal with its traceback dropped, so keeping it keeps no frame.
-
-    A traceback keeps every frame it passed through alive, and with them their
-    locals — ``move_to``'s own ``item`` among them. Holding the refusal for
-    the error message would otherwise hold the very reference the retry
-    depends on having let go of (issue #130).
-    """
-    exc.__traceback__ = None
-    return exc
-
-
-def _move_out_of_inbox(
-    client: Any, held: list[Any], archive_folder: str, message_id: str
-) -> tuple[Any, str]:
-    """Move a just-archived mail out of the Inbox; return it and how it went.
-
-    ``held`` is a one-item list carrying the caller's reference to the mail;
-    it is emptied here, so the caller keeps none of its own.
-
-    ``MailItem.SaveAs`` can leave the in-memory item flagged as modified, and
-    ``Move`` on that same reference is then refused with MAPI_E_OBJECT_CHANGED
-    — the mail keeps its place in the Inbox with its files already on disk
-    (issue #59). Outlook documents the same refusal as intermittent on IMAP
-    stores, cleared by viewing another folder and retrying — the owner's own
-    manual remedy (issue #130). Two defences, in order:
-
-    1. move a reference re-acquired from the store by EntryID and StoreID,
-       with the original let go before the move;
-    2. on a 0x80040109 anyway, let go of every reference to the mail, park
-       Outlook's view on another folder when it is showing the Inbox (the
-       Explorer holds its selected mail too, issue #111), then fetch the mail
-       again from the two ids and move it *while the view is still away*,
-       retrying after a pause (``MOVE_RETRY_DELAYS_SECONDS``). The view is put
-       back afterwards whatever happened.
-
-    No ``Save()`` is ever called on a refused mail: on a refused object it is
-    refused too (the batch log from 2026-10-14 on), and a write to a mail
-    Outlook will not let go of is not one to force. Any other failure is
-    raised untouched: a store that refuses a move for a different reason is a
-    different problem, and retrying it would only hide it. Which path finished
-    the move is logged and reported as ``move_via``, because those are the
-    facts that say whether this fix is holding on a real mailbox. A 0x80040109
-    that survives every retry is raised as ``_MoveRefused`` so the message can
-    say whether the switch was tried.
-    """
-    original = held.pop()
-    entry_id, store_id = client.item_ids(original)
-    try:
-        fresh = client.refetch(entry_id, store_id) if entry_id else None
-    except Exception as exc:  # a refetch that raises is still just a fallback
-        fresh = None
-        logger.warning("Re-acquiring %s by EntryID raised %s: %s",
-                       message_id, type(exc).__name__, exc)
-    if fresh is not None:
-        logger.info(
-            "Re-acquired %s by EntryID %s; the re-fetched object is the "
-            "original: %s.", message_id, _store_note(store_id),
-            _yes_no(client.is_same_object(original, fresh)),
-        )
-        target, via = fresh, MOVE_VIA_REFETCHED
-    else:
-        logger.info(
-            "Could not re-acquire %s from the store; moving the original "
-            "reference.", message_id,
-        )
-        target, via = original, MOVE_VIA_ORIGINAL
-    original = fresh = None  # `target` is now the only reference to the mail
-
-    try:
-        moved = client.move_to(target, archive_folder)
-    except Exception as exc:
-        if not is_message_changed_error(exc):
-            raise
-        refusal = _refusal_without_frames(exc)
-    else:
-        logger.info("Moved %s to %r via the %s reference.", message_id, archive_folder, via)
-        return moved, via
-
-    target = None
-    if not entry_id:
-        # Nothing to fetch the mail again by; the original was the only way in.
-        raise _MoveRefused(refusal, None, entry_id) from refusal
-    gc.collect()  # a reference caught in a cycle is only let go here
-    logger.info(
-        "Outlook refused to move %s (the message has been changed) on the %s "
-        "reference. References to it held now: none (all released); fetching "
-        "it again %s while Outlook's view is moved off the Inbox.",
-        message_id, via, _store_note(store_id),
-    )
-
-    view_away: bool | None = None
-    with client.view_away_from_inbox() as view_away:
-        logger.info(
-            "Outlook's view while %s is moved: %s.", message_id,
-            {True: "parked on another folder",
-             False: "not on the Inbox, left where it was",
-             None: "not determined"}[view_away],
-        )
-        for attempt, delay in enumerate(MOVE_RETRY_DELAYS_SECONDS, start=2):
-            if delay:
-                time.sleep(delay)
-            try:
-                target = client.refetch(entry_id, store_id)
-            except Exception as exc:
-                logger.warning("Re-acquiring %s by EntryID raised %s: %s",
-                               message_id, type(exc).__name__, exc)
-                target = None
-            if target is None:
-                logger.info("Attempt %d: %s could not be fetched again.", attempt, message_id)
-                continue
-            try:
-                moved = client.move_to(target, archive_folder)
-            except Exception as exc:
-                if not is_message_changed_error(exc):
-                    raise
-                refusal = _refusal_without_frames(exc)
-                target = None
-                gc.collect()
-                logger.info("Attempt %d to move %s was refused again.", attempt, message_id)
-                continue
-            via = MOVE_VIA_FOLDER_SWITCH if view_away is True else MOVE_VIA_RELEASED_RETRY
-            logger.info(
-                "Moved %s to %r on attempt %d, %.1f s after the one before, on "
-                "a fresh reference with no other held (move_via %s).",
-                message_id, archive_folder, attempt, delay, via,
-            )
-            return moved, via
-
-    raise _MoveRefused(refusal, view_away, entry_id) from refusal
 
 
 # ----------------------------------------------------------------- revert ---
@@ -1211,12 +818,12 @@ def revert(
             conn.commit()
 
             results.append(_finish_revert_item(client, archive_folder, category, result, message_id))
-        doc = _envelope("revert", cfg, category, mailbox)
+        doc = envelope("revert", cfg, category, mailbox)
         if renumber:
             # The source folders: a gap only exists where a file really went.
-            doc["renumbered"], doc["renumber_refused"] = _renumber_folders(
+            doc["renumbered"], doc["renumber_refused"] = renumber_folders(
                 cfg, repo,
-                _unique_folders([
+                unique_folders([
                     os.path.dirname(path)
                     for r in results for path in r["deleted"]
                 ]),
@@ -1372,7 +979,7 @@ def renumber(
     finally:
         conn.close()
 
-    doc = _envelope("renumber", cfg)
+    doc = envelope("renumber", cfg)
     doc["dry_run"] = result.dry_run
     doc["folder_path"] = result.folder_path
     doc["first_number"] = result.first_number
