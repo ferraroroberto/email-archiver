@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # How long the Explorer sits on the other folder before the move is retried
 # there, so Outlook has let go of the reading-pane item. Unmeasured: the manual
 # workaround this automates takes seconds, half a second never freed a real
-# selection (issue #130), and the wait is only paid on a refused move.
+# selection, and the wait is only paid on a refused move.
 EXPLORER_SETTLE_SECONDS = 1.5
 
 
@@ -108,7 +108,7 @@ class InboxMail:
     item: Any = None
 
 
-# The folders `find` searches (issue #110), and how each one was searched.
+# The folders `find` searches, and how each one was searched.
 FIND_INBOX = "inbox"
 FIND_ARCHIVE = "archive"
 FIND_SENT = "sent"

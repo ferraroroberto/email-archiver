@@ -51,6 +51,11 @@
                          entry in .conventions-ratchet-baseline.json. A Python file it could
                          not parse (exit 3) fails as NOT CONFIRMED. Not path-routed: a rule
                          added to .fleet.toml must see the whole tree.
+      9. comment ratchet - scripts/comment_ratchet.py through
+                         scripts/comment_ratchet_gate.py: fails only on a file whose count of
+                         `#NNN` issue references inside comments rises above its entry in
+                         .comment-ratchet-baseline.json. A file it could not scan (exit 3)
+                         fails as NOT CONFIRMED. Not path-routed: a count needs the whole tree.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -87,6 +92,7 @@ Invoke-Stage "instruction ratchet" { & $py -m scripts.instruction_ratchet_gate }
 Invoke-Stage "doc refs ratchet" { & $py -m scripts.doc_refs_ratchet_gate }
 Invoke-Stage "dead code ratchet" { & $py -m scripts.dead_code_ratchet_gate }
 Invoke-Stage "conventions ratchet" { & $py -m scripts.conventions_ratchet_gate }
+Invoke-Stage "comment ratchet" { & $py -m scripts.comment_ratchet_gate }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green

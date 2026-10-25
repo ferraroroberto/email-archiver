@@ -87,7 +87,7 @@ class ArchiveDialog:
         self._date_prefix_var = tk.BooleanVar(value=get_date_prefix_enabled(cfg))
         # Whether the checkbox's value is the user's own choice. Until they
         # flip it, the value is only a preview, and the archive defers to
-        # naming.date_prefix for the folder actually chosen (issue #89).
+        # naming.date_prefix for the folder actually chosen.
         self._date_prefix_set_by_hand = False
 
         self._build_ui()
