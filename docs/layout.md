@@ -40,4 +40,4 @@ The root also holds the four `main_*.py` scripts and the `.bat` launchers. Those
 
 ## Baselined offenders
 
-The files and functions over the limits are recorded in `.structure-ratchet-baseline.json` at their real size and may not grow: `email_archiver/batch.py`, `tests/test_batch.py` and `tests/test_draft.py` past 1,000 lines, and seven functions past 100 lines, among them `main` and `_build_parser` in `email_archiver/cli/batch.py`. New code goes in a new module, not in these. Shrink the baseline with `--update-baseline` in the PR that splits one.
+None: `.structure-ratchet-baseline.json` is empty, so every file, function and directory sits under its limit and a new offender fails the gate. Split a growing module along its seam instead: `email_archiver/batch.py` keeps the verbs, `batch_move.py` the move and its error, `batch_common.py` the document envelope; the batch and draft tests share `tests/batch/batch_support.py` and `tests/draft_support.py`.

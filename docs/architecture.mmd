@@ -94,7 +94,9 @@ flowchart TB
   ARCHIVER -->|_get_sent_date_prefix formats\nsent_datetime — one implementation\nof SentOn-then-ReceivedTime| OUTLOOK
 
   subgraph batchflow["Batch mode data flow (headless, spawned by another app)"]
-    BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply moves a re-acquired reference\n(retrying a refusal with every reference\nreleased, view parked off the Inbox) and\nfinishes an already-archived mail\nwithout writing anything;\nplan --folder sent / source sent files\nfrom Sent Items and leave the mail there"]
+    BATCH["batch.py\nplan · apply · revert · renumber —\npure orchestration, no COM, no tkinter.\nIdentity is the Internet Message-ID,\nnot EntryID (which a Move rewrites).\napply finishes an already-archived mail\nwithout writing anything;\nplan --folder sent / source sent files\nfrom Sent Items and leave the mail there"]
+    BATCHMOVE["batch_move.py\nmove_out_of_inbox: a re-acquired reference,\nthen retries with every reference released and\nthe view parked off the Inbox;\nmove_failure_error: message_changed vs move_failed"]
+    BATCHCOMMON["batch_common.py\nSCHEMA_VERSION · envelope · error_document ·\nrenumber_folders (shared by apply and revert)"]
     RENUMBER["renumber.py: renumber_folder\nbundles a number with its files, orders them by\nsent date, hands out contiguous numbers from the\nfolder's lowest, two-phase renames, returns the\nold-to-new map the consumer heals its paths from"]
   end
   CALLER["another local app (task-os: the whole Inbox;\nlife-os: plan --message-id / --since / --search / --ref)\nspawns the process with a timeout,\nreads one JSON document"] -->|subprocess| MAINBATCH
@@ -107,7 +109,10 @@ flowchart TB
   BATCH -->|apply: per-mail date_prefix or auto,\nonly inside archive.root_paths,\nskipped entirely for a reused mail| ARCHIVER
   BATCH -->|revert: delete only inside archive.root_paths| ONEDRIVE
   BATCH -->|revert: delete_by_path per deleted .msg| REPO
-  BATCH -->|renumber verb, or --renumber on apply / revert:\nonce per touched folder| RENUMBER
+  BATCH -->|apply: the move| BATCHMOVE
+  BATCH -->|every document| BATCHCOMMON
+  BATCHCOMMON -->|--renumber on apply / revert:\nonce per touched folder| RENUMBER
+  BATCH -->|renumber verb| RENUMBER
   RENUMBER --> PATHS
   BATCH --> PATHS
   RENUMBER -->|split_sequence_prefix · sanitize_filename —\nthe naming rules stay the archiver's| ARCHIVER

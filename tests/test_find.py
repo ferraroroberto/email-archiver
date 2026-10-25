@@ -24,8 +24,8 @@ from email_archiver.outlook.client import (
     InboxMail,
     OutlookClient,
 )
-from tests.test_batch import _seed_index, archive_root, cfg  # noqa: F401 - fixtures are used by name
-from tests.test_batch_targeted import TargetedFakeClient
+from tests.batch.batch_support import _seed_index, archive_root, cfg  # noqa: F401 - fixtures are used by name
+from tests.batch.test_batch_targeted import TargetedFakeClient
 from tests.test_mailboxes import batch_process  # noqa: F401 - fixture is used by name
 
 MUTATIONS = ("Move", "Save", "Delete", "Send", "Display", "Close", "Add")

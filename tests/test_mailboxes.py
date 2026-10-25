@@ -28,12 +28,12 @@ from email_archiver.outlook import mapi, process
 from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.mapi import MailboxNotInOutlookError
 from email_archiver.outlook.stores import find_store, resolve_store
-from tests.test_batch import (  # noqa: F401 - fixtures are used by name
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     _mail,
     archive_root,
     cfg,
 )
-from tests.test_batch_targeted import TargetedFakeClient
+from tests.batch.test_batch_targeted import TargetedFakeClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OWNER = "owner@example.invalid"

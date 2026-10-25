@@ -66,6 +66,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -257,19 +258,7 @@ def _send_expectations(args: argparse.Namespace) -> tuple[str, dict[str, str], l
     return expect_hash, parts, expect_to
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="main_batch.py",
-        description="Plan, apply or revert archiving of the whole Outlook Inbox, "
-                    "or open an unsent draft.",
-    )
-    parser.add_argument(
-        "--start-timeout", type=float, default=DEFAULT_START_TIMEOUT_SECONDS,
-        help="Seconds to wait for a freshly started Outlook to answer over COM "
-             "(default: %(default)s).",
-    )
-    sub = parser.add_subparsers(dest="verb", required=True)
-
+def _add_plan_parser(sub: Any) -> argparse.ArgumentParser:
     p_plan = sub.add_parser(
         "plan", help="List Inbox mails (all, or the filtered ones) with ranked folders."
     )
@@ -304,7 +293,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Where to read mail from: 'inbox' (default) or 'sent' (Sent Items; "
              "--since then compares the sent time).",
     )
+    return p_plan
 
+
+def _add_apply_revert_parsers(sub: Any) -> list[argparse.ArgumentParser]:
     p_apply = sub.add_parser("apply", help="Archive, move and tag decided mails.")
     p_apply.add_argument(
         "--decisions", required=True,
@@ -336,7 +328,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove this Outlook category instead of outlook.category — the "
              "one the apply used.",
     )
+    return [p_apply, p_revert]
 
+
+def _add_renumber_parser(sub: Any) -> None:
     p_renumber = sub.add_parser(
         "renumber",
         help="Renumber one folder into date order and print the old-to-new map.",
@@ -350,6 +345,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Report the same map without renaming anything.",
     )
 
+
+def _add_draft_read_send_parsers(sub: Any) -> list[argparse.ArgumentParser]:
     p_draft = sub.add_parser(
         "draft",
         help="Open a filled, unsent Outlook draft that blind-copies your own address.",
@@ -391,13 +388,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="An address the To line must hold; given at all, the To line must be "
              "exactly these. Repeatable.",
     )
+    return [p_draft, p_read, p_send]
 
-    sub.add_parser(
-        "mailboxes",
-        help="List the mailbox registry with each mailbox's outlook_status "
-             "(present / missing / unknown). Never starts Outlook.",
-    )
 
+def _add_find_parser(sub: Any) -> argparse.ArgumentParser:
     p_find = sub.add_parser(
         "find",
         help="Search a mailbox's live Outlook folders. Read-only: moves, saves "
@@ -421,14 +415,111 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=find.DEFAULT_LIMIT,
         help="Most hits returned, newest first (default: %(default)s).",
     )
+    return p_find
 
-    for verb_parser in (p_plan, p_apply, p_revert, p_draft, p_read, p_send, p_find):
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="main_batch.py",
+        description="Plan, apply or revert archiving of the whole Outlook Inbox, "
+                    "or open an unsent draft.",
+    )
+    parser.add_argument(
+        "--start-timeout", type=float, default=DEFAULT_START_TIMEOUT_SECONDS,
+        help="Seconds to wait for a freshly started Outlook to answer over COM "
+             "(default: %(default)s).",
+    )
+    sub = parser.add_subparsers(dest="verb", required=True)
+
+    mailbox_verbs = [_add_plan_parser(sub)]
+    mailbox_verbs += _add_apply_revert_parsers(sub)
+    _add_renumber_parser(sub)
+    mailbox_verbs += _add_draft_read_send_parsers(sub)
+    sub.add_parser(
+        "mailboxes",
+        help="List the mailbox registry with each mailbox's outlook_status "
+             "(present / missing / unknown). Never starts Outlook.",
+    )
+    mailbox_verbs.append(_add_find_parser(sub))
+
+    for verb_parser in mailbox_verbs:
         verb_parser.add_argument(
             "--mailbox", metavar="ALIAS",
             help="Act on this registry mailbox (an alias or extra alias, as "
                  "`mailboxes` lists them) instead of the default one.",
         )
     return parser
+
+
+class _Refusal(Exception):
+    """A run that cannot start; ``main`` turns it into the one error document."""
+
+    def __init__(self, code: str, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+@dataclass
+class _Request:
+    """The caller's input, read and validated before Outlook is touched."""
+
+    payload: list[dict[str, Any]] = field(default_factory=list)
+    spec: draft.DraftSpec | None = None
+    expectations: tuple[str, dict[str, str], list[str] | None] = ("", {}, None)
+    find_args: tuple[list[str], datetime | None, tuple[str, ...]] = ([], None, ())
+    filters: batch.PlanFilters = field(default_factory=batch.PlanFilters)
+    category: str | None = None
+
+
+def _read_request(args: argparse.Namespace) -> _Request:
+    """Validate every flag and input file of the verb.
+
+    Read before touching Outlook: a malformed file should fail in milliseconds,
+    not after a 60-second Outlook start.
+
+    Raises:
+        _Refusal: ``bad_input``; the message names the flag or file.
+    """
+    verb: str = args.verb
+    request = _Request()
+    try:
+        if verb in ("apply", "revert"):
+            source = args.decisions if verb == "apply" else args.items
+            try:
+                request.payload = _load_input(source)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(f"{source}: {exc}") from exc
+
+        if verb == "draft":
+            try:
+                request.spec = draft.load_spec(args.spec)
+            except draft.SpecError as exc:
+                raise ValueError(str(exc)) from exc
+            if args.update is not None and not args.update.strip():
+                raise ValueError("--update must not be blank")
+
+        if verb == "find":
+            request.find_args = _find_args(args)
+
+        if verb in ("read", "send") and not args.entry_id.strip():
+            raise ValueError("--entry-id must not be blank")
+        if verb == "send":
+            request.expectations = _send_expectations(args)
+
+        if args.start_timeout <= 0:
+            raise ValueError("--start-timeout must be positive")
+        if verb == "plan":
+            if args.candidates < 0:
+                raise ValueError("--candidates must be 0 or more")
+            request.filters = _plan_filters(args)
+        if verb in ("apply", "revert") and args.category is not None:
+            request.category = args.category.strip()
+            if not request.category:
+                raise ValueError("--category must not be blank")
+    except ValueError as exc:
+        raise _Refusal(ERROR_BAD_INPUT, str(exc)) from exc
+    return request
 
 
 def _mailboxes(registry: MailboxRegistry) -> dict[str, Any]:
@@ -449,106 +540,74 @@ def _mailboxes(registry: MailboxRegistry) -> dict[str, Any]:
         pythoncom.CoUninitialize()
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def _renumber(cfg: dict[str, Any], args: argparse.Namespace) -> int:
+    """The ``renumber`` verb: no Outlook, no COM, it only reads a folder and the index."""
+    document = batch.renumber(cfg, args.folder, dry_run=args.dry_run)
+    if document["renumber_refused"]:
+        refusal = document["renumber_refused"][0]
+        return _fail(
+            args.verb, ERROR_BAD_INPUT,
+            f"{refusal['folder_path']}: {refusal['reason']}",
+        )
+    _emit(document)
+    return EXIT_OK
+
+
+def _dispatch(
+    args: argparse.Namespace,
+    cfg: dict[str, Any],
+    client: OutlookClient,
+    mailbox: Mailbox,
+    request: _Request,
+) -> dict[str, Any]:
+    """Run the verb against the started Outlook and return its document."""
     verb: str = args.verb
-
-    try:
-        cfg = load_config()
-    except Exception as exc:
-        # Deliberately broad: this process's whole contract is "exit 2 with a
-        # JSON error document when the run cannot start". A malformed YAML, an
-        # unreadable path, a missing section — anything that stops the config
-        # loading has to come out as that document, not as a traceback on
-        # stderr with nothing on stdout, which is what a spawning caller would
-        # see as a crash it cannot classify.
-        return _fail(verb, ERROR_CONFIG_MISSING, f"{type(exc).__name__}: {exc}")
-    setup_logging(cfg)
-
-    # Read the caller's input before touching Outlook: a malformed file should
-    # fail in milliseconds, not after a 60-second Outlook start.
-    payload: list[dict[str, Any]] = []
-    if verb in ("apply", "revert"):
-        source = args.decisions if verb == "apply" else args.items
-        try:
-            payload = _load_input(source)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return _fail(verb, ERROR_BAD_INPUT, f"{source}: {exc}")
-
-    spec: draft.DraftSpec | None = None
-    if verb == "draft":
-        try:
-            spec = draft.load_spec(args.spec)
-        except draft.SpecError as exc:
-            return _fail(verb, ERROR_BAD_INPUT, str(exc))
-        if args.update is not None and not args.update.strip():
-            return _fail(verb, ERROR_BAD_INPUT, "--update must not be blank")
-
-    expectations: tuple[str, dict[str, str], list[str] | None] = ("", {}, None)
-    find_args: tuple[list[str], datetime | None, tuple[str, ...]] = ([], None, ())
-    if verb == "find":
-        try:
-            find_args = _find_args(args)
-        except ValueError as exc:
-            return _fail(verb, ERROR_BAD_INPUT, str(exc))
-
-    if verb in ("read", "send"):
-        if not args.entry_id.strip():
-            return _fail(verb, ERROR_BAD_INPUT, "--entry-id must not be blank")
-    if verb == "send":
-        try:
-            expectations = _send_expectations(args)
-        except ValueError as exc:
-            return _fail(verb, ERROR_BAD_INPUT, str(exc))
-
-    if args.start_timeout <= 0:
-        return _fail(verb, ERROR_BAD_INPUT, "--start-timeout must be positive")
-    filters = batch.PlanFilters()
     if verb == "plan":
-        if args.candidates < 0:
-            return _fail(verb, ERROR_BAD_INPUT, "--candidates must be 0 or more")
-        try:
-            filters = _plan_filters(args)
-        except ValueError as exc:
-            return _fail(verb, ERROR_BAD_INPUT, str(exc))
-    category: str | None = None
-    if verb in ("apply", "revert") and args.category is not None:
-        category = args.category.strip()
-        if not category:
-            return _fail(verb, ERROR_BAD_INPUT, "--category must not be blank")
-
-    # Every verb but renumber is about a mailbox. The registry is read here,
-    # before Outlook: a malformed file must stop the run, never fall back to
-    # the default store.
-    registry: MailboxRegistry | None = None
-    if verb != "renumber":
-        try:
-            registry = load_mailbox_registry()
-        except MailboxRegistryError as exc:
-            return _fail(verb, ERROR_MAILBOX_REGISTRY_INVALID, str(exc))
-    if verb == "mailboxes":
-        _emit(_mailboxes(registry))
-        return EXIT_OK
-    mailbox: Mailbox | None = None
-    if verb != "renumber":
-        try:
-            mailbox = registry.select(args.mailbox)
-        except MailboxUnknownError as exc:
-            # Before Outlook: an unknown name must never reach a mailbox at all.
-            return _fail(verb, ERROR_MAILBOX_UNKNOWN, str(exc))
-
-    if verb == "renumber":
-        # No Outlook, no COM: this verb only reads a folder and the index.
-        document = batch.renumber(cfg, args.folder, dry_run=args.dry_run)
-        if document["renumber_refused"]:
-            refusal = document["renumber_refused"][0]
-            return _fail(
-                verb, ERROR_BAD_INPUT,
-                f"{refusal['folder_path']}: {refusal['reason']}",
+        return batch.plan(
+            client, cfg, candidates=args.candidates, filters=request.filters,
+            mailbox=mailbox,
+        )
+    if verb == "apply":
+        return batch.apply(
+            client, cfg, request.payload, renumber=args.renumber,
+            category=request.category, mailbox=mailbox,
+        )
+    if verb == "draft":
+        self_address = draft.resolve_self_address(cfg, client, mailbox)
+        if self_address is None:
+            # Before any draft exists: one without the BCC copy would
+            # never reach the Inbox, so it could never be filed.
+            raise _Refusal(
+                ERROR_SELF_ADDRESS_UNRESOLVED,
+                "No address to blind-copy: set outlook.self_address, or "
+                "make sure Outlook's default account reports an SMTP address.",
             )
-        _emit(document)
-        return EXIT_OK
+        if args.update is None:
+            return draft.create(client, request.spec, self_address)
+        return draft.update(client, args.update.strip(), request.spec, self_address)
+    if verb == "find":
+        words, since, folders = request.find_args
+        return find.find(
+            client, cfg, mailbox, words, since=since, folders=folders, limit=args.limit,
+        )
+    if verb == "read":
+        return send.read_document(client.read_draft(args.entry_id.strip()))
+    if verb == "send":
+        return send.send(
+            client, args.entry_id.strip(), *request.expectations,
+            expect_account=None if mailbox.synthesized else mailbox.address,
+        )
+    return batch.revert(
+        client, cfg, request.payload, renumber=args.renumber,
+        category=request.category, mailbox=mailbox,
+    )
 
+
+def _run_in_outlook(
+    args: argparse.Namespace, cfg: dict[str, Any], mailbox: Mailbox, request: _Request,
+) -> int:
+    """Start (or attach to) Outlook, run the verb, and print its document."""
+    verb: str = args.verb
     try:
         import pythoncom  # noqa: PLC0415
     except ImportError as exc:
@@ -573,57 +632,13 @@ def main(argv: list[str] | None = None) -> int:
             return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
 
         try:
-            if verb == "plan":
-                document = batch.plan(
-                    client, cfg, candidates=args.candidates, filters=filters,
-                    mailbox=mailbox,
-                )
-            elif verb == "apply":
-                document = batch.apply(
-                    client, cfg, payload, renumber=args.renumber, category=category,
-                    mailbox=mailbox,
-                )
-            elif verb == "draft":
-                self_address = draft.resolve_self_address(cfg, client, mailbox)
-                if self_address is None:
-                    # Before any draft exists: one without the BCC copy would
-                    # never reach the Inbox, so it could never be filed.
-                    return _fail(
-                        verb, ERROR_SELF_ADDRESS_UNRESOLVED,
-                        "No address to blind-copy: set outlook.self_address, or "
-                        "make sure Outlook's default account reports an SMTP address.",
-                    )
-                if args.update is None:
-                    document = draft.create(client, spec, self_address)
-                else:
-                    document = draft.update(client, args.update.strip(), spec, self_address)
-            elif verb == "find":
-                words, since, folders = find_args
-                document = find.find(
-                    client, cfg, mailbox, words, since=since, folders=folders, limit=args.limit,
-                )
-            elif verb == "read":
-                document = send.read_document(client.read_draft(args.entry_id.strip()))
-            elif verb == "send":
-                document = send.send(
-                    client, args.entry_id.strip(), *expectations,
-                    expect_account=None if mailbox.synthesized else mailbox.address,
-                )
-            else:
-                document = batch.revert(
-                    client, cfg, payload, renumber=args.renumber, category=category,
-                    mailbox=mailbox,
-                )
-        except DraftUpdateError as exc:
-            # Raised before the item was changed: the caller learns which of
-            # gone / not editable / unmarked it is, never a generic failure.
-            return _fail(verb, exc.code, str(exc))
-        except ReplySourceError as exc:
-            # Raised before anything was saved: the mail to reply to could not
-            # be found, or Outlook would not reply to it.
-            return _fail(verb, exc.code, str(exc))
-        except DraftAccountError as exc:
-            # The draft would not send as the mailbox: nothing was kept.
+            document = _dispatch(args, cfg, client, mailbox, request)
+        except _Refusal as exc:
+            return _fail(verb, exc.code, str(exc), **exc.details)
+        except (DraftUpdateError, ReplySourceError, DraftAccountError) as exc:
+            # Raised before the item was changed or saved: the caller learns
+            # which of gone / not editable / unmarked / mail not found / would
+            # not send as the mailbox it is, never a generic failure.
             return _fail(verb, exc.code, str(exc))
         except AccountNotInOutlookError as exc:
             return _fail(verb, ERROR_ACCOUNT_NOT_IN_OUTLOOK, str(exc))
@@ -638,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
             # unreachable partway through the walk (client._namespace()).
             return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
         except Exception as exc:
-            # Deliberately broad, mirroring the config-load guard above: once
+            # Deliberately broad, mirroring the config-load guard in main: once
             # Outlook has been reached, any other failure during the walk (a
             # locked or corrupt database, a COM call raising something other
             # than OutlookUnavailableError) still has to come out as this
@@ -652,6 +667,49 @@ def main(argv: list[str] | None = None) -> int:
     document["mailbox"] = mailbox.alias
     _emit(document)
     return EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    verb: str = args.verb
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        # Deliberately broad: this process's whole contract is "exit 2 with a
+        # JSON error document when the run cannot start". A malformed YAML, an
+        # unreadable path, a missing section — anything that stops the config
+        # loading has to come out as that document, not as a traceback on
+        # stderr with nothing on stdout, which is what a spawning caller would
+        # see as a crash it cannot classify.
+        return _fail(verb, ERROR_CONFIG_MISSING, f"{type(exc).__name__}: {exc}")
+    setup_logging(cfg)
+
+    try:
+        request = _read_request(args)
+    except _Refusal as exc:
+        return _fail(verb, exc.code, str(exc))
+
+    if verb == "renumber":
+        return _renumber(cfg, args)
+
+    # Every other verb is about a mailbox. The registry is read here, before
+    # Outlook: a malformed file must stop the run, never fall back to the
+    # default store.
+    try:
+        registry = load_mailbox_registry()
+    except MailboxRegistryError as exc:
+        return _fail(verb, ERROR_MAILBOX_REGISTRY_INVALID, str(exc))
+    if verb == "mailboxes":
+        _emit(_mailboxes(registry))
+        return EXIT_OK
+    try:
+        mailbox = registry.select(args.mailbox)
+    except MailboxUnknownError as exc:
+        # Before Outlook: an unknown name must never reach a mailbox at all.
+        return _fail(verb, ERROR_MAILBOX_UNKNOWN, str(exc))
+
+    return _run_in_outlook(args, cfg, mailbox, request)
 
 
 if __name__ == "__main__":

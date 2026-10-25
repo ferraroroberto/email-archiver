@@ -1,15 +1,4 @@
 {
   "version": 1,
-  "entries": [
-    {"key": "fn:email_archiver/batch.py:_apply_one", "lines": 134},
-    {"key": "fn:email_archiver/batch.py:_move_failure_error", "lines": 130},
-    {"key": "fn:email_archiver/batch.py:_move_out_of_inbox", "lines": 118},
-    {"key": "fn:email_archiver/cli/batch.py:_build_parser", "lines": 172},
-    {"key": "fn:email_archiver/cli/batch.py:main", "lines": 203},
-    {"key": "fn:email_archiver/database/repository.py:EmailRepository.suggest_folders", "lines": 111},
-    {"key": "fn:email_archiver/scanner/scanner.py:FolderScanner.scan", "lines": 128},
-    {"key": "size:email_archiver/batch.py", "lines": 1387},
-    {"key": "size:tests/test_batch.py", "lines": 1674},
-    {"key": "size:tests/test_draft.py", "lines": 1321}
-  ]
+  "entries": []
 }

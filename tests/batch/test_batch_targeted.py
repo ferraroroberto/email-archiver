@@ -30,7 +30,7 @@ from email_archiver.cli import batch as main_batch
 from email_archiver import batch
 from email_archiver.outlook.client import InboxMail
 from email_archiver.outlook.mapi import header_value, received_since_filter
-from tests.test_batch import (  # noqa: F401 - fixtures are used by name
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     FakeOutlookClient,
     _mail,
     _seed_index,
