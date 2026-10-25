@@ -59,7 +59,7 @@ THREAD_SET = "set"
 THREAD_NOT_SET = "not_set"
 
 # Who a reply was addressed from. Outlook's own ``Reply()`` answers the
-# original's sender, which on a mail the user sent is the user (issue #105).
+# original's sender, which on a mail the user sent is the user.
 RECIPIENTS_SENDER = "sender"                      # Outlook's reply: the original's sender
 RECIPIENTS_ORIGINAL = "original_recipients"       # the original was sent by the user: its To / CC
 RECIPIENTS_CALLER = "caller"                      # the caller gave `to`
@@ -182,7 +182,7 @@ REPLY_UNAVAILABLE = "reply_unavailable"            # the original opened but Out
 
 # The draft does not send as the mailbox it was made for: Outlook refused the
 # account, or (send) the stored draft's account is not the mailbox's. Its own
-# `error.code`; nothing is kept or sent (issue #109).
+# `error.code`; nothing is kept or sent.
 SENDING_ACCOUNT_MISMATCH = "sending_account_mismatch"
 
 

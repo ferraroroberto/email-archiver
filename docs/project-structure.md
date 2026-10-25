@@ -58,7 +58,7 @@ archiver/
 │       ├── app.py              ← ArchiveDialog, ScanWindow, LauncherApp
 │       └── dialogs.py          ← Native folder-picker wrapper
 │
-├── scripts/                     ← pre-ship gate (verify-before-ship.ps1) and the vendored static ratchet
+├── scripts/                     ← pre-ship gate (verify-before-ship.ps1) and the vendored ratchets
 ├── tests/                       ← pytest suite (filename fitting, sequencing, date-prefix toggle, Explorer picker, Message-ID, batch verbs)
 ├── docs/
 │   ├── architecture.mmd         ← Hand-authored Mermaid diagram of internal structure

@@ -111,7 +111,7 @@ SKIP_NO_MESSAGE_ID = "no_message_id"
 SKIP_NOT_IN_INBOX = "not_in_inbox"  # a --message-id that matched nothing
 SKIP_NOT_IN_SENT = "not_in_sent"    # the same, under `--folder sent`
 
-# Where a plan reads from and an apply decision files from (issue #103).
+# Where a plan reads from and an apply decision files from.
 # The Inbox is the default and the only source that moves the mail out; Sent
 # Items is opt-in, for a sent mail whose self-BCC copy never reached the Inbox.
 SOURCE_INBOX = "inbox"
@@ -129,7 +129,7 @@ ERROR_MOVE_FAILED = "move_failed"               # files are on disk, mail is not
 # mail left open in an Outlook window. Its own code because it is the one move
 # failure an operator clears in seconds without anything being wrong: close the
 # window, apply the same decision again. A caller that cannot tell it from a
-# plain `move_failed` has to treat both as needing a human (issue #76).
+# plain `move_failed` has to treat both as needing a human.
 ERROR_MESSAGE_CHANGED = "message_changed"
 # The move landed and only the tag did not. Its own code because the two are
 # genuinely different states to recover from: after a move_failed the mail is
@@ -150,11 +150,11 @@ MOVE_VIA_REFETCHED = "refetched"     # a reference read back out of the store
 MOVE_VIA_ORIGINAL = "original"       # the re-acquire failed; the original moved
 # Refused with 0x80040109, then moved on a reference fetched again once every
 # other one was let go; Outlook's view was not on the Inbox, so it was left
-# alone (issue #130). Replaces `saved_retry`: a refused mail is never saved.
+# alone. Replaces `saved_retry`: a refused mail is never saved.
 MOVE_VIA_RELEASED_RETRY = "released_retry"
 # The same, with Outlook's Explorer showing the Inbox and so holding the mail as
 # its selection: the view was parked on another folder while the move was
-# retried, then put back (issues #111, #130). The one path that disturbs the
+# retried, then put back. The one path that disturbs the
 # user's view.
 MOVE_VIA_FOLDER_SWITCH = "folder_switch"
 # A `source: sent` mail is archived and tagged but never moved: Sent Items is
@@ -164,10 +164,10 @@ MOVE_VIA_KEPT_IN_SENT = "kept_in_sent"
 # The pauses before each fresh-reference retry of a refused move, all made
 # while the view is away: one straight after it settles, one more after a
 # pause. Two tries, not more: the view is the user's, and a refusal that
-# outlasts both is reported as `message_changed` with its remedy (issue #130).
+# outlasts both is reported as `message_changed` with its remedy.
 MOVE_RETRY_DELAYS_SECONDS = (0.0, 2.0)
 
-# A mailbox's `outlook_status` in the `mailboxes` document (issue #108).
+# A mailbox's `outlook_status` in the `mailboxes` document.
 MAILBOX_PRESENT = "present"   # its store is in the running Outlook
 MAILBOX_MISSING = "missing"   # Outlook answered; the mailbox is not in it
 MAILBOX_UNKNOWN = "unknown"   # Outlook not running, or the check could not run
@@ -243,7 +243,7 @@ def _mail_dict(mail: Any, *, in_inbox: bool = True) -> dict[str, Any]:
         # fact that makes an ``already_archived`` mail *retryable*: its files
         # are on disk but it never left the Inbox, and a consumer reading only
         # ``already_archived`` cannot tell that from a mail that is properly
-        # filed and gone (issue #59).
+        # filed and gone.
         "in_inbox": in_inbox,
     }
 
@@ -776,7 +776,7 @@ def _apply_one(
         else:
             # The move takes over the only reference: nothing in this frame
             # may keep the mail alive while Outlook is asked to let go of it
-            # (issue #130). `mail` goes too — an InboxMail carries the item.
+            # `mail` goes too — an InboxMail carries the item.
             held, item, mail = [item], None, None
             moved, via = _move_out_of_inbox(client, held, archive_folder, message_id)
             result["moved"] = True

@@ -528,7 +528,7 @@ class EmailArchiver:
                 # depends only on folder/prefix/suffix length, never the
                 # stem) unchanged across iterations, so once truncation
                 # kicked in every attempt truncated to the exact same
-                # characters and `os.path.exists` never went False (#43).
+                # characters and `os.path.exists` never went False.
                 # Bounded so a fitter regression degrades to a logged, skipped
                 # attachment instead of hanging the caller's thread.
                 counter = 2

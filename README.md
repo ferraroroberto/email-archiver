@@ -112,7 +112,7 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 & .\scripts\verify-before-ship.ps1
 ```
 
-That runs `pytest tests/` and then the static ratchet: a duplicate block (jscpd via `npx`, so Node is needed) or an unused import/variable (ruff) that is not in `.static-ratchet-baseline.json` fails the gate. Existing debt is baselined, not fixed, so the count can only go down; a detector that cannot run fails as NOT CONFIRMED rather than passing.
+That runs `pytest tests/` and then the static ratchet: a duplicate block (jscpd via `npx`, so Node is needed) or an unused import/variable (ruff) that is not in `.static-ratchet-baseline.json` fails the gate. Existing debt is baselined, not fixed, so the count can only go down; a detector that cannot run fails as NOT CONFIRMED rather than passing. The same gate then runs the docs, structure, instruction, doc-refs, dead-code, conventions and comment ratchets, each with its own baseline file at the repo root; the comment ratchet fails a `#NNN` issue reference added to a code comment.
 
 `pytest` and `ruff` are dev-only dependencies — see `requirements.txt`.
 
