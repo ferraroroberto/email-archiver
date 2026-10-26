@@ -72,6 +72,8 @@ if (-not (Test-Path $py)) {
     exit 1
 }
 
+. (Join-Path $PSScriptRoot "box_lock_gate.ps1"); Enter-BoxLockGate
+
 function Invoke-Stage {
     param([string]$Name, [scriptblock]$Body)
     Write-Host ""
