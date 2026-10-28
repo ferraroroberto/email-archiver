@@ -27,7 +27,7 @@ The root also holds the four `main_*.py` scripts and the `.bat` launchers. Those
 | `email_archiver/scanner/` | The incremental `.msg` indexer. |
 | `email_archiver/archiver/` | Saving an email into the archive tree. |
 | `email_archiver/engine/` | The three-stage folder ranking. |
-| `email_archiver/*.py` | The headless batch verbs (`batch`, `draft`, `find`, `send`, `renumber`) and the shared helpers (`config`, `paths`, `text`, `explorer`). |
+| `email_archiver/*.py` | The headless batch verbs (`batch`, `dismiss`, `draft`, `find`, `send`, `renumber`) and the shared helpers (`config`, `paths`, `text`, `explorer`). |
 
 ## Entry points
 

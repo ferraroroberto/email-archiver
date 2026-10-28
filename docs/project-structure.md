@@ -22,6 +22,7 @@ archiver/
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
 │   ├── batch_common.py          ← What every batch-family document shares: schema version, envelope, error shape, folder renumbering
 │   ├── batch_move.py            ← Moving an archived mail out of the Inbox: the retries and the `message_changed` error
+│   ├── dismiss.py               ← Headless move-only verb: Inbox mail to the archive folder, tagged, no .msg kept (no COM)
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
 │   ├── find.py                  ← Headless read-only live search over a mailbox's Outlook folders (no COM)
 │   ├── send.py                  ← Headless read-back + guarded send: fingerprint, approval check (no COM)
