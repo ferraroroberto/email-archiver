@@ -144,7 +144,7 @@ class EmailRepository:
         path: SQLite's ``SQLITE_LIMIT_VARIABLE_NUMBER`` is 32,766, so a
         one-placeholder-per-file query raises ``OperationalError: too many SQL
         variables`` once the archive passes that many files -- after the
-        indexing pass has already completed, aborting the purge (#43). The
+        indexing pass has already completed, aborting the purge. The
         temp table keeps this independent of file count; caller commits (same
         pattern as ``upsert_email``/``upsert_folder``).
         """

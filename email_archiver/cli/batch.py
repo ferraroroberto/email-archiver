@@ -106,6 +106,10 @@ ERROR_MAILBOX_NOT_IN_OUTLOOK = "mailbox_not_in_outlook"
 ERROR_MAILBOX_UNKNOWN = "mailbox_unknown"
 # The mailbox's store is there but no Outlook account sends from its address.
 ERROR_ACCOUNT_NOT_IN_OUTLOOK = "account_not_in_outlook"
+# Outlook was reached but the walk then hit something unclassified (a locked
+# or corrupt index database, a renumber or disk error) — distinct from
+# com_unavailable, which is reserved for "pywin32 is not installed".
+ERROR_RUN_FAILED = "run_failed"
 
 
 def _emit(document: dict[str, Any]) -> None:
@@ -660,7 +664,7 @@ def _run_in_outlook(
             # process's one JSON document, not as a traceback on stderr with
             # nothing on stdout, which is what a spawning caller would see as
             # a crash it cannot classify.
-            return _fail(verb, ERROR_COM_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+            return _fail(verb, ERROR_RUN_FAILED, f"{type(exc).__name__}: {exc}")
     finally:
         pythoncom.CoUninitialize()
 

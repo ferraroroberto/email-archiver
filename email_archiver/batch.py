@@ -473,7 +473,7 @@ def apply(
     A decision may carry ``"source": "sent"`` (default ``"inbox"``, anything
     else is a ``bad_decision``): the mail is then looked up in Sent Items,
     archived and tagged like any other, but **not moved** — ``moved`` stays
-    false and ``move_via`` is ``kept_in_sent`` (issue #103). ``revert`` does not
+    false and ``move_via`` is ``kept_in_sent``. ``revert`` does not
     undo that move, since there was none: it deletes the files and reports the
     mail ``not_in_archive_folder``.
 
@@ -483,7 +483,7 @@ def apply(
     existing ``.msg`` is reported back as ``files``, ``reused`` is true, and
     the mail is moved and tagged like any other. That is what makes such a mail
     finishable at all; re-archiving it would file a second copy beside the
-    first (issue #59).
+    first.
 
     Whatever happens to one mail, the next is still attempted; the per-mail
     ``error`` says what went wrong and ``files`` says what is already on disk.
