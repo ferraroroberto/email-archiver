@@ -35,7 +35,7 @@ class MailboxNotInOutlookError(RuntimeError):
 
 class AccountNotInOutlookError(RuntimeError):
     """A registry mailbox's store is present but no Outlook account sends from
-    its address, so a draft cannot be made to send as it (issue #109).
+    its address, so a draft cannot be made to send as it.
 
     Distinct from ``MailboxNotInOutlookError``: the mailbox can be read and
     filed, only not sent from. Never answered by sending from another account.

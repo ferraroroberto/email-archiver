@@ -375,7 +375,7 @@ class ArchiveDialog:
         seed or a hover preview for a suggestion card, which says nothing about
         a folder picked through *Browse folder…* or *Explorer folder*. So it
         defers to ``naming.date_prefix``, which under ``auto`` is inferred from
-        the destination the archiver actually writes into (issue #89).
+        the destination the archiver actually writes into.
         """
         if self._date_prefix_set_by_hand:
             return self._date_prefix_var.get()

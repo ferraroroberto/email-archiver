@@ -1,5 +1,5 @@
 """
-Read-only live search over one mailbox's Outlook folders (issue #110).
+Read-only live search over one mailbox's Outlook folders.
 
 This is what ``main_batch.py find`` runs. The index (``data/emails.db``) only
 knows mail already archived to disk, and ``plan --search`` reads only the Inbox
