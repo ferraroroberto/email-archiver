@@ -237,6 +237,67 @@ class FolderScanner:
         self._preview_len: int = cfg["scanning"]["body_preview_length"]
         self._max_path: int = get_max_path_length(cfg)
 
+    def _discover_msg_paths(self) -> list[str]:
+        """Every ``.msg`` file under the existing roots whose path fits the limit."""
+        logger.info("Discovering .msg files under %s …", self._roots)
+        all_msg_paths: list[str] = []
+        for root in self._roots:
+            if not root.exists():
+                continue
+            for dirpath, _dirs, files in os.walk(root):
+                for fname in files:
+                    if fname.lower().endswith(".msg"):
+                        fp = os.path.join(dirpath, fname)
+                        if len(fp) <= self._max_path:
+                            all_msg_paths.append(fp)
+        return all_msg_paths
+
+    def _index_file(self, repo: EmailRepository, file_path: str, stats: ScanStats) -> bool:
+        """Index one ``.msg`` file when it is new or changed, counting it in ``stats``.
+
+        Returns:
+            True when the file was written to the index, False when it was
+            skipped as unchanged or could not be read.
+        """
+        folder_path = str(Path(file_path).parent)
+        filename = Path(file_path).name
+
+        # --- incremental check ---
+        try:
+            disk_mtime = os.stat(file_path).st_mtime
+        except OSError:
+            stats.errors += 1
+            return False
+
+        stored_mtime = repo.get_mtime(file_path)
+        if stored_mtime is not None and abs(stored_mtime - disk_mtime) < 1.0:
+            stats.skipped += 1
+            return False
+
+        # --- read metadata ---
+        meta = _extract_msg_metadata(file_path, self._preview_len)
+        if meta is None:
+            stats.errors += 1
+            return False
+
+        was_new = stored_mtime is None
+        repo.upsert_email(
+            EmailRecord(
+                file_path=file_path,
+                folder_path=folder_path,
+                filename=filename,
+                file_mtime=disk_mtime,
+                **meta,
+            )
+        )
+        repo.upsert_folder(folder_path)
+
+        if was_new:
+            stats.newly_indexed += 1
+        else:
+            stats.updated += 1
+        return True
+
     def scan(
         self,
         progress_callback: ProgressCallback | None = None,
@@ -266,23 +327,12 @@ class FolderScanner:
 
         # Collect all .msg paths upfront for progress reporting and for
         # the post-scan purge (delete DB entries whose files were removed).
-        logger.info("Discovering .msg files under %s …", self._roots)
-        all_msg_paths: list[str] = []
-        for root in self._roots:
-            if not root.exists():
-                continue
-            for dirpath, _dirs, files in os.walk(root):
-                for fname in files:
-                    if fname.lower().endswith(".msg"):
-                        fp = os.path.join(dirpath, fname)
-                        if len(fp) <= self._max_path:
-                            all_msg_paths.append(fp)
+        all_msg_paths = self._discover_msg_paths()
 
         stats.total_found = len(all_msg_paths)
         logger.info("Found %d .msg files. Starting indexing …", stats.total_found)
 
         batch_counter = 0
-        indexed_folders: set[str] = set()
 
         for idx, file_path in enumerate(all_msg_paths):
             if stop_flag is not None and stop_flag.is_set():
@@ -292,45 +342,8 @@ class FolderScanner:
             if progress_callback:
                 progress_callback(idx + 1, stats.total_found, file_path)
 
-            folder_path = str(Path(file_path).parent)
-            filename = Path(file_path).name
-
-            # --- incremental check ---
-            try:
-                disk_mtime = os.stat(file_path).st_mtime
-            except OSError:
-                stats.errors += 1
+            if not self._index_file(repo, file_path, stats):
                 continue
-
-            stored_mtime = repo.get_mtime(file_path)
-            if stored_mtime is not None and abs(stored_mtime - disk_mtime) < 1.0:
-                stats.skipped += 1
-                indexed_folders.add(folder_path)
-                continue
-
-            # --- read metadata ---
-            meta = _extract_msg_metadata(file_path, self._preview_len)
-            if meta is None:
-                stats.errors += 1
-                continue
-
-            was_new = stored_mtime is None
-            repo.upsert_email(
-                EmailRecord(
-                    file_path=file_path,
-                    folder_path=folder_path,
-                    filename=filename,
-                    file_mtime=disk_mtime,
-                    **meta,
-                )
-            )
-            repo.upsert_folder(folder_path)
-            indexed_folders.add(folder_path)
-
-            if was_new:
-                stats.newly_indexed += 1
-            else:
-                stats.updated += 1
 
             batch_counter += 1
             if batch_counter >= self._batch_size:

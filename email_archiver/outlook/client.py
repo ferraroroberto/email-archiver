@@ -7,7 +7,7 @@ Design decisions:
   so the rest of the app never touches COM objects after this layer.
 - SMTP address resolution handles Exchange (on-prem / O365) where
   SenderEmailAddress may return a cryptic X.500/EX address instead of SMTP.
-- Split by concern (issue #88): this module is the read path and the batch
+- Split by concern: this module is the read path and the batch
   surface. The Outlook process lifecycle is in outlook/process.py, the draft
   surface in outlook/drafts.py (a mixin OutlookClient inherits), and the
   vocabulary and COM-free helpers they share in outlook/mapi.py.
@@ -19,8 +19,7 @@ Design decisions:
   in tests.
 - Every folder (Inbox, Sent, the archive folder, Drafts) comes from
   ``store()``: the store of the mailbox the client was built for, resolved by
-  address in outlook/stores.py — never from the namespace's default folders
-  (issue #108).
+  address in outlook/stores.py — never from the namespace's default folders.
 - The draft surface (default_account_smtp / create_draft / update_draft /
   open_draft / read_draft / snapshot_draft / close_inspectors_of) is inherited
   from outlook/drafts.py, for email_archiver/draft.py and email_archiver/send.py.
@@ -69,7 +68,7 @@ logger = logging.getLogger(__name__)
 # How long the Explorer sits on the other folder before the move is retried
 # there, so Outlook has let go of the reading-pane item. Unmeasured: the manual
 # workaround this automates takes seconds, half a second never freed a real
-# selection (issue #130), and the wait is only paid on a refused move.
+# selection, and the wait is only paid on a refused move.
 EXPLORER_SETTLE_SECONDS = 1.5
 
 
@@ -108,7 +107,7 @@ class InboxMail:
     item: Any = None
 
 
-# The folders `find` searches (issue #110), and how each one was searched.
+# The folders `find` searches, and how each one was searched.
 FIND_INBOX = "inbox"
 FIND_ARCHIVE = "archive"
 FIND_SENT = "sent"
@@ -247,9 +246,9 @@ class OutlookClient(DraftSurface):
     Lazy-initialised: COM objects are created only when needed, so importing
     this module is free (important for the fast-startup requirement).
 
-    ``mailbox`` is the registry mailbox every folder lookup is taken from
-    (issue #108); ``None`` is the profile's default store, as before the
-    registry existed. Its store is resolved once, on first use.
+    ``mailbox`` is the registry mailbox every folder lookup is taken from;
+    ``None`` falls back to the profile's default store. Its store is
+    resolved once, on first use.
     """
 
     def __init__(self, mailbox: Mailbox | None = None) -> None:
@@ -368,12 +367,7 @@ class OutlookClient(DraftSurface):
         return self._resolved_store
 
     def start_sync(self) -> syncing.SyncHandle:
-        """Start Send/Receive for the whole profile and return a handle to watch.
-
-        Profile-wide whichever mailbox this client is bound to: Outlook has no
-        per-account trigger. The only thing in this class that starts a sync;
-        see :mod:`email_archiver.outlook.syncing`.
-        """
+        """Start a profile-wide Send/Receive; Outlook has no per-account trigger."""
         return syncing.start(self._namespace())
 
     def _inbox(self) -> Any:
@@ -433,7 +427,7 @@ class OutlookClient(DraftSurface):
         )
 
     def iter_sent(self, preview_len: int = 500) -> Iterator[InboxMail]:
-        """Yield every MailItem in Sent Items (issue #103)."""
+        """Yield every MailItem in Sent Items."""
         yield from self._iter_items(self._sent_items().Items, preview_len)
 
     def iter_sent_since(
@@ -606,8 +600,8 @@ class OutlookClient(DraftSurface):
         return self._find_in_folder(self._resolve_folder(folder_name), message_id)
 
     def find_sent_by_message_id(self, message_id: str) -> Any | None:
-        """Return the Sent Items MailItem with this Message-ID, or ``None``
-        (issue #103). Same lookup, same empty-id rule, as
+        """Return the Sent Items MailItem with this Message-ID, or ``None``.
+        Same lookup, same empty-id rule, as
         :meth:`find_by_message_id`."""
         if not message_id:
             return None
@@ -673,8 +667,8 @@ class OutlookClient(DraftSurface):
         """The mail's ``EntryID`` and its store's ``StoreID``, as plain strings.
 
         Read once while the reference is alive, so the reference can then be
-        let go and the mail fetched again later from nothing but strings
-        (issue #130). Either is ``""`` when it cannot be read.
+        let go and the mail fetched again later from nothing but strings.
+        Either is ``""`` when it cannot be read.
         """
         entry_id = safe_com(lambda: str(item.EntryID), "")
         store_id = safe_com(lambda: str(item.Parent.StoreID), "")
@@ -686,11 +680,10 @@ class OutlookClient(DraftSurface):
         ``MailItem.SaveAs`` can leave the in-memory item flagged as modified,
         and a later ``Move`` on *that* reference is then refused with
         MAPI_E_OBJECT_CHANGED — the mail stays in the Inbox with its files
-        already on disk (issue #59). A reference read back through
+        already on disk. A reference read back through
         ``Session.GetItemFromID`` is a new COM object, so it is what batch mode
         moves. The ``StoreID`` is passed whenever there is one: it names the
-        store to open instead of leaving Outlook to search every store it has
-        (issue #130).
+        store to open instead of leaving Outlook to search every store it has.
 
         ``None`` (never an exception) when there is no EntryID or the store
         cannot hand the mail back.
@@ -717,7 +710,7 @@ class OutlookClient(DraftSurface):
         """Whether two references are one COM object (COM identity), or
         ``None`` when that cannot be asked.
 
-        Only a log breadcrumb (issue #130): it says whether a re-fetch handed
+        Only a log breadcrumb: it says whether a re-fetch handed
         back the very object already held. Outlook can still share the mail's
         underlying MAPI message between two distinct objects, which no call
         here can see.
@@ -769,13 +762,13 @@ class OutlookClient(DraftSurface):
         a mail it holds as its selected / reading-pane item.
 
         An item the Explorer shows as its selection can keep a hold that
-        refuses every write, a ``Move`` included — the refusal issue #111 hit,
-        which selecting another folder and then the message again cleared with
-        no restart. ``ClearSelection`` and ``AddToSelection`` are no use: they
+        refuses every write, a ``Move`` included; selecting another folder
+        and then the message again clears the hold, with no restart needed.
+        ``ClearSelection`` and ``AddToSelection`` are no use: they
         raise ``0x80004005`` in conversation view, which is Outlook's default.
         Setting ``CurrentFolder`` works in every view. The move is retried
         *inside* the block, while the view is away: coming back to the Inbox
-        first re-selects the mail and puts the hold back (issue #130).
+        first re-selects the mail and puts the hold back.
 
         Only done when the active Explorer is showing this mailbox's Inbox,
         the folder ``apply`` moves out of: any other folder is not holding the
@@ -860,7 +853,7 @@ class OutlookClient(DraftSurface):
         including on a reference re-acquired by EntryID, which is the same
         underlying object, and including after a ``Save()``. So both of batch
         mode's move defences fail by construction on an open mail, and the
-        only useful thing left to do is say so (issue #76).
+        only useful thing left to do is say so.
 
         Three genuinely different answers, never two:
 

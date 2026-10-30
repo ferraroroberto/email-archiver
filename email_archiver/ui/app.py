@@ -87,7 +87,7 @@ class ArchiveDialog:
         self._date_prefix_var = tk.BooleanVar(value=get_date_prefix_enabled(cfg))
         # Whether the checkbox's value is the user's own choice. Until they
         # flip it, the value is only a preview, and the archive defers to
-        # naming.date_prefix for the folder actually chosen (issue #89).
+        # naming.date_prefix for the folder actually chosen.
         self._date_prefix_set_by_hand = False
 
         self._build_ui()
@@ -219,7 +219,7 @@ class ArchiveDialog:
         except Exception as exc:
             logger.exception("Error in archive load worker")
             self._root.after(
-                0, lambda: self._show_error(f"Unexpected error:\n{exc}")
+                0, lambda exc=exc: self._show_error(f"Unexpected error:\n{exc}")
             )
 
     @staticmethod
@@ -375,7 +375,7 @@ class ArchiveDialog:
         seed or a hover preview for a suggestion card, which says nothing about
         a folder picked through *Browse folder…* or *Explorer folder*. So it
         defers to ``naming.date_prefix``, which under ``auto`` is inferred from
-        the destination the archiver actually writes into (issue #89).
+        the destination the archiver actually writes into.
         """
         if self._date_prefix_set_by_hand:
             return self._date_prefix_var.get()
@@ -603,7 +603,7 @@ class ScanWindow:
                 )
                 self._root.after(0, lambda: self._on_done(stats))
             except Exception as exc:
-                self._root.after(0, lambda: self._on_error(exc))
+                self._root.after(0, lambda exc=exc: self._on_error(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 

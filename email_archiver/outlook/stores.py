@@ -1,5 +1,5 @@
 """
-Which Outlook store a mailbox lives in (issue #108).
+Which Outlook store a mailbox lives in.
 
 Every folder the client touches (Inbox, Sent, Drafts, the archive folder) is
 taken from one resolved ``Store``, never from the namespace's default folders,

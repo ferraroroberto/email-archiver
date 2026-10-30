@@ -35,7 +35,7 @@ class MailboxNotInOutlookError(RuntimeError):
 
 class AccountNotInOutlookError(RuntimeError):
     """A registry mailbox's store is present but no Outlook account sends from
-    its address, so a draft cannot be made to send as it (issue #109).
+    its address, so a draft cannot be made to send as it.
 
     Distinct from ``MailboxNotInOutlookError``: the mailbox can be read and
     filed, only not sent from. Never answered by sending from another account.
@@ -65,13 +65,13 @@ def safe_com(read: Any, default: Any) -> Any:
         return default
 
 
-# olFolderInbox. Batch mode files out of the Inbox, and (opt-in, issue #103)
+# olFolderInbox. Batch mode files out of the Inbox, and (opt-in)
 # out of Sent Items.
 OL_FOLDER_INBOX = 6
 # olFolderSentMail: where a sent mail's own copy lives, carrying its headers.
 OL_FOLDER_SENT_MAIL = 5
 # olFolderOutbox: the folder `view_away_from_inbox` parks the Explorer in for a
-# moment (issue #111) — almost always empty, so nothing is selected or rendered.
+# moment — almost always empty, so nothing is selected or rendered.
 OL_FOLDER_OUTBOX = 4
 # MailItem. Anything else in the Inbox (meeting requests, reports) is skipped.
 OL_CLASS_MAIL_ITEM = 43
@@ -96,6 +96,11 @@ OL_BCC = 3
 OL_SAVE = 0
 # olDiscard, for MailItem.Close: drop an item opened only to be replied to.
 OL_DISCARD = 1
+# OlAttachmentType: a file attached by value, and a mail attached as an item.
+# Outlook writes an attached item out afresh on every SaveAsFile, so its bytes
+# never hash the same twice.
+OL_BY_VALUE = 1
+OL_EMBEDDED_ITEM = 5
 # DASL name of an Internet header in the PS_INTERNET_HEADERS property set. A
 # draft stamped with it carries ``X-Archive-Ref: <token>`` into the sent mail, so
 # a caller can recognise its own copy when it lands back in the Inbox.
@@ -106,7 +111,7 @@ DASL_X_ARCHIVE_REF = (
 ARCHIVE_REF_HEADER = "X-Archive-Ref"
 # DASL name for MAPI PR_TRANSPORT_MESSAGE_HEADERS (0x007D001F): the raw header
 # block of a mail that arrived through a server. It is where the Step 3 probe
-# read X-Archive-Ref back on an IMAP mailbox (email-archiver#70).
+# read X-Archive-Ref back on an IMAP mailbox.
 DASL_TRANSPORT_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
 # DASL name for MAPI PR_IN_REPLY_TO_ID (0x1042001F): the Message-ID a reply
 # answers, which Outlook sends as the In-Reply-To header.
@@ -229,7 +234,7 @@ def sent_since_filter(since: datetime) -> str:
     return f"@SQL=\"{DASL_DATE_SENT}\" >= '{utc:%Y-%m-%d %H:%M}'"
 
 
-# What a `find` word is looked for in (issue #110): subject, sender name and
+# What a `find` word is looked for in: subject, sender name and
 # address, the To / CC display lines, and the plain-text body — the same
 # fields the index search covers.
 DASL_FIND_FIELDS = (
@@ -274,7 +279,7 @@ _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 #
 # Outlook's editor drops that comment: with the compose window open it
 # re-serializes the HTML as it is set, and on a reply (a Word-flavoured quote)
-# the comment never survives (issue #105; an empty div, span or anchor after
+# the comment never survives (an empty div, span or anchor after
 # the region does not either). What does survive is the opening
 # `<div id=...>` and the div nesting, so a region whose comment is gone ends at
 # the `</div>` that closes its own opening tag.

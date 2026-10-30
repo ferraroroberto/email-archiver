@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-import string
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +68,14 @@ _RE_UNDATED_PREFIX = re.compile(r"^(\d{3}) - ")
 # Appended to a filename's stem when it has to be cut to fit the path budget
 # (see ``_fit_filename_to_path``).
 _ELLIPSIS = "..."
+
+# What ``sanitize_filename`` rewrites: ``/ \ :`` to a dash, the rest of what
+# NTFS forbids (``< > " | ? *``, control characters, lone surrogates) to ``_``.
+_DASHED = str.maketrans("/\\:", "---")
+_RE_FORBIDDEN_RUN = re.compile(r'[<>"|?*\x00-\x1f\x7f-\x9f\ud800-\udfff]+')
+_RE_WHITESPACE = re.compile(r"\s+")
+# The allow-list ``sanitize_filename`` used before it kept Unicode letters.
+_RE_NOT_LEGACY_SAFE = re.compile(r"[^A-Za-z0-9 \-_.()]")
 
 # Bound on the attachment de-duplication loop in ``_save_attachments`` — a
 # fitter regression (or a pathological folder with dozens of same-name
@@ -131,14 +139,49 @@ def split_sequence_prefix(filename: str) -> SequencePrefix | None:
 
 def sanitize_filename(text: str, max_len: int = 80) -> str:
     """
-    Remove characters illegal on Windows NTFS and truncate.
-    Keeps ASCII letters/digits + a small set of safe punctuation.
+    Make ``text`` safe as a Windows NTFS file name and truncate.
+
+    Unicode letters and digits are kept (NFC-normalised, so a decomposed and a
+    composed spelling give one name). Only what NTFS forbids is replaced:
+    ``/ \\ :`` become ``-``; ``< > " | ? *``, control characters and lone
+    surrogates become ``_``, a run of them collapsing to one. A real ``_`` in
+    ``text`` is left alone.
     """
-    safe = set(string.ascii_letters + string.digits + " -_.()")
-    cleaned = "".join(c if c in safe else "_" for c in text)
-    # Collapse multiple underscores/spaces
+    cleaned = unicodedata.normalize("NFC", _RE_WHITESPACE.sub(" ", text))
+    cleaned = cleaned.translate(_DASHED)
+    cleaned = _RE_FORBIDDEN_RUN.sub("_", cleaned).strip("_. ")
+    cleaned = cleaned[:max_len].rstrip("_. ")
+    return cleaned if cleaned else "email"
+
+
+def legacy_ascii_filename(text: str, max_len: int = 80) -> str:
+    """What ``sanitize_filename`` produced before Unicode letters were kept.
+
+    Archives written back then hold ``canci_n`` for ``canción``. Anything that
+    has to recognise such a name next to its accented spelling compares both
+    through this, so the two meet in the same ASCII-only form.
+    """
+    cleaned = _RE_NOT_LEGACY_SAFE.sub("_", unicodedata.normalize("NFC", text))
     cleaned = re.sub(r"[_ ]{2,}", "_", cleaned).strip("_. ")
     return cleaned[:max_len] if cleaned else "email"
+
+
+def _utf16_len(text: str) -> int:
+    """Length of ``text`` in UTF-16 code units — what Windows counts for MAX_PATH."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _cut_utf16(text: str, units: int) -> str:
+    """The longest prefix of ``text`` within ``units`` UTF-16 code units.
+
+    Never splits a surrogate pair: an astral character (an emoji) costs two.
+    """
+    used = 0
+    for i, ch in enumerate(text):
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > units:
+            return text[:i]
+    return text
 
 
 def _fit_filename_to_path(
@@ -162,22 +205,23 @@ def _fit_filename_to_path(
     """
     prefix = f"{date_prefix} - {seq} - " if date_prefix else f"{seq} - "
     sep_len = 1  # path separator inserted by os.path.join
-    filename_budget = max_path - len(folder_path) - sep_len
-    fixed = len(prefix) + len(suffix)
+    # Windows counts MAX_PATH in UTF-16 code units, so an emoji costs two.
+    filename_budget = max_path - _utf16_len(folder_path) - sep_len
+    fixed = _utf16_len(prefix) + _utf16_len(suffix)
 
-    if filename_budget >= fixed + len(stem):
+    if filename_budget >= fixed + _utf16_len(stem):
         return f"{prefix}{stem}{suffix}"
 
     stem_budget = filename_budget - fixed - len(_ELLIPSIS)
     if stem_budget > 0:
-        return f"{prefix}{stem[:stem_budget]}{_ELLIPSIS}{suffix}"
+        return f"{prefix}{_cut_utf16(stem, stem_budget)}{_ELLIPSIS}{suffix}"
 
     # Pathological: even a one-char stem + ellipsis won't fit.
     # Cut as tightly as possible without the ellipsis; if the folder itself
     # already exceeds the budget there is nothing we can do except let the
     # underlying call surface a clear OSError.
     stem_budget = max(1, filename_budget - fixed)
-    return f"{prefix}{stem[:stem_budget]}{suffix}"
+    return f"{prefix}{_cut_utf16(stem, stem_budget)}{suffix}"
 
 
 @dataclass
@@ -484,7 +528,7 @@ class EmailArchiver:
                 # depends only on folder/prefix/suffix length, never the
                 # stem) unchanged across iterations, so once truncation
                 # kicked in every attempt truncated to the exact same
-                # characters and `os.path.exists` never went False (#43).
+                # characters and `os.path.exists` never went False.
                 # Bounded so a fitter regression degrades to a logged, skipped
                 # attachment instead of hanging the caller's thread.
                 counter = 2

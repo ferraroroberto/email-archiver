@@ -267,6 +267,61 @@ def test_a_shared_numbers_attachments_go_to_the_mail_that_carries_them(
     assert entry["attachments_placed"] == renumber_module.PLACED_BY_MSG
 
 
+def test_an_attachment_archived_under_its_ascii_only_name_still_bundles(
+    repo, folder, roots, monkeypatch
+):
+    """Before Unicode letters were kept, the archiver wrote an accented
+    attachment as ``canci_n``. The mail still carries ``canción``; the pair
+    has to keep matching or the file is orphaned onto the earlier mail."""
+    _seed(repo, folder, {
+        "087 - earlier.msg": "2026-09-08T16:00:00+02:00",
+        "087 - later.msg": "2026-09-09T05:00:00+02:00",
+    })
+    _write(folder, "087 - canci_n del a_o.pdf")
+
+    facts = {
+        "087 - earlier.msg": MsgFacts("", "", ("image001.png",)),
+        "087 - later.msg": MsgFacts("", "", ("canción del año.pdf",)),
+    }
+    monkeypatch.setattr(
+        renumber_module, "read_msg_facts",
+        lambda path: facts.get(os.path.basename(path)),
+    )
+
+    result = renumber_folder(str(folder), repo, roots)
+
+    assert _names(folder) == [
+        "087 - earlier.msg", "088 - canci_n del a_o.pdf", "088 - later.msg",
+    ]
+    assert result.renamed[0]["attachments_placed"] == renumber_module.PLACED_BY_MSG
+
+
+def test_an_attachment_archived_under_its_accented_name_bundles(
+    repo, folder, roots, monkeypatch
+):
+    _seed(repo, folder, {
+        "087 - earlier.msg": "2026-09-08T16:00:00+02:00",
+        "087 - later.msg": "2026-09-09T05:00:00+02:00",
+    })
+    _write(folder, "087 - canción del año.pdf")
+
+    facts = {
+        "087 - earlier.msg": MsgFacts("", "", ("image001.png",)),
+        "087 - later.msg": MsgFacts("", "", ("canción del año.pdf",)),
+    }
+    monkeypatch.setattr(
+        renumber_module, "read_msg_facts",
+        lambda path: facts.get(os.path.basename(path)),
+    )
+
+    result = renumber_folder(str(folder), repo, roots)
+
+    assert _names(folder) == [
+        "087 - earlier.msg", "088 - canción del año.pdf", "088 - later.msg",
+    ]
+    assert result.renamed[0]["attachments_placed"] == renumber_module.PLACED_BY_MSG
+
+
 def test_an_unclaimed_attachment_follows_the_earlier_mail_and_says_so(
     repo, folder, roots, monkeypatch
 ):

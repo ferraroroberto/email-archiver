@@ -13,7 +13,7 @@ import types
 import pytest
 
 from email_archiver.outlook import client as client_mod
-from email_archiver.outlook.client import EmailData, OutlookClient
+from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.mapi import OL_CLASS_MAIL_ITEM, SelectedEmailError
 from email_archiver.ui import app
 

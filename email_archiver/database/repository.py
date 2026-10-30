@@ -11,7 +11,6 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Sequence
 
 logger = logging.getLogger(__name__)
@@ -145,7 +144,7 @@ class EmailRepository:
         path: SQLite's ``SQLITE_LIMIT_VARIABLE_NUMBER`` is 32,766, so a
         one-placeholder-per-file query raises ``OperationalError: too many SQL
         variables`` once the archive passes that many files -- after the
-        indexing pass has already completed, aborting the purge (#43). The
+        indexing pass has already completed, aborting the purge. The
         temp table keeps this independent of file count; caller commits (same
         pattern as ``upsert_email``/``upsert_folder``).
         """
@@ -303,8 +302,6 @@ class EmailRepository:
         and aggregate per-folder in Python (step 3).  Clean, fast, zero SQL
         context issues.
         """
-        from collections import defaultdict
-
         query_text = f"{subject} {sender} {recipients}"
         fts_query = _build_fts_query(query_text)
 
@@ -312,48 +309,9 @@ class EmailRepository:
             logger.warning("Empty FTS query for: %r", query_text)
             return []
 
-        # Step 1 – FTS5 search.
-        # Use bm25() with explicit column weights so subject matches count
-        # far more than sender/recipients, which in turn count more than body.
-        # Weights: subject×10, sender×3, recipients×3, body_preview×1.
-        # bm25() returns negative values; more negative = better match.
-        # We invert to positive for intuitive aggregation.
-        try:
-            fts_rows = self._conn.execute(
-                """
-                SELECT rowid, bm25(emails_fts, 10.0, 3.0, 3.0, 1.0) AS rank
-                FROM   emails_fts
-                WHERE  emails_fts MATCH ?
-                ORDER  BY rank
-                LIMIT  ?
-                """,
-                (fts_query, FTS_ROW_CAP),
-            ).fetchall()
-        except sqlite3.OperationalError as exc:
-            logger.warning("FTS query failed (%s) for query %r", exc, fts_query)
+        folder_scores, folder_counts = self._score_folders(fts_query)
+        if not folder_scores:
             return []
-
-        if not fts_rows:
-            return []
-
-        # Step 2 – Batch-fetch folder_path for matched rowids.
-        rowid_score: dict[int, float] = {r[0]: -r[1] for r in fts_rows}
-        placeholders = ",".join("?" * len(rowid_score))
-        email_rows = self._conn.execute(
-            f"SELECT id, folder_path FROM emails WHERE id IN ({placeholders})",
-            list(rowid_score.keys()),
-        ).fetchall()
-
-        if not email_rows:
-            return []
-
-        # Step 3 – Aggregate scores and counts per folder in Python.
-        folder_scores: dict[str, float] = defaultdict(float)
-        folder_counts: dict[str, int] = defaultdict(int)
-        for row in email_rows:
-            fp = row["folder_path"]
-            folder_scores[fp] += rowid_score.get(row["id"], 0.0)
-            folder_counts[fp] += 1
 
         max_raw = max(folder_scores.values()) or 1.0
         sorted_folders = sorted(
@@ -387,6 +345,54 @@ class EmailRepository:
             )
 
         return suggestions[:max_results]
+
+    def _score_folders(self, fts_query: str) -> tuple[dict[str, float], dict[str, int]]:
+        """Summed match score and match count per folder for an FTS query.
+
+        Both dicts are empty when the query matches nothing or FTS rejects it.
+        """
+        from collections import defaultdict
+
+        # Step 1 – FTS5 search.
+        # Use bm25() with explicit column weights so subject matches count
+        # far more than sender/recipients, which in turn count more than body.
+        # Weights: subject×10, sender×3, recipients×3, body_preview×1.
+        # bm25() returns negative values; more negative = better match.
+        # We invert to positive for intuitive aggregation.
+        try:
+            fts_rows = self._conn.execute(
+                """
+                SELECT rowid, bm25(emails_fts, 10.0, 3.0, 3.0, 1.0) AS rank
+                FROM   emails_fts
+                WHERE  emails_fts MATCH ?
+                ORDER  BY rank
+                LIMIT  ?
+                """,
+                (fts_query, FTS_ROW_CAP),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            logger.warning("FTS query failed (%s) for query %r", exc, fts_query)
+            return {}, {}
+
+        if not fts_rows:
+            return {}, {}
+
+        # Step 2 – Batch-fetch folder_path for matched rowids.
+        rowid_score: dict[int, float] = {r[0]: -r[1] for r in fts_rows}
+        placeholders = ",".join("?" * len(rowid_score))
+        email_rows = self._conn.execute(
+            f"SELECT id, folder_path FROM emails WHERE id IN ({placeholders})",
+            list(rowid_score.keys()),
+        ).fetchall()
+
+        # Step 3 – Aggregate scores and counts per folder in Python.
+        folder_scores: dict[str, float] = defaultdict(float)
+        folder_counts: dict[str, int] = defaultdict(int)
+        for row in email_rows:
+            fp = row["folder_path"]
+            folder_scores[fp] += rowid_score.get(row["id"], 0.0)
+            folder_counts[fp] += 1
+        return folder_scores, folder_counts
 
     def get_last_scan_time(self) -> str:
         """Return ISO datetime of the most recent indexing operation."""

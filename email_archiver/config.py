@@ -396,7 +396,7 @@ def setup_logging(cfg: dict[str, Any] | None = None) -> None:
     # caller decoding it as UTF-8 (task-os does, without setting PYTHONUTF8)
     # gets U+FFFD and \uXXXX escapes in the failure detail it shows. Fixed
     # here, the one call every entry point makes, so it depends on no caller
-    # remembering the env var (issue #87). pythonw has no stderr at all.
+    # remembering the env var. pythonw has no stderr at all.
     if sys.stderr is not None:
         try:
             sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")

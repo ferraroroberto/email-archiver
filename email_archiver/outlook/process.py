@@ -221,7 +221,7 @@ def ensure_running(timeout: float = DEFAULT_START_TIMEOUT_SECONDS) -> Any:
     # Nothing else owns this process's lifetime. Left running it outlives
     # the run — on a scheduled unattended run, an invisible orphan
     # holding the profile and OST against the user's own Outlook, one more
-    # every time the wait times out (#78).
+    # every time the wait times out.
     teardown = _terminate_spawned_outlook(proc)
     raise OutlookUnavailableError(
         f"Outlook was started but did not publish its COM object within "

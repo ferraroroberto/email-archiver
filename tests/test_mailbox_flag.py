@@ -23,9 +23,9 @@ from email_archiver.outlook.drafts import (
     DraftAccountError,
 )
 from email_archiver.outlook.mapi import AccountNotInOutlookError
-from tests.test_batch import _mail, archive_root, cfg  # noqa: F401 - fixtures are used by name
-from tests.test_batch_targeted import TargetedFakeClient
-from tests.test_draft import FakeDraftClient, _FakeApplication, _FakeComMail
+from tests.batch.batch_support import _mail, archive_root, cfg  # noqa: F401 - fixtures are used by name
+from tests.batch.test_batch_targeted import TargetedFakeClient
+from tests.draft_support import FakeDraftClient, _FakeApplication, _FakeComMail
 from tests.test_mailboxes import batch_process  # noqa: F401 - fixture is used by name
 from tests.test_send import _FakeDraft
 

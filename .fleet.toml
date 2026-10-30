@@ -6,3 +6,113 @@ layer       = "working-pipe"
 icon        = "📧"
 description = "Outlook → OneDrive archive with a SQLite index and headless batch CLI."
 tag         = ["→", "OneDrive"]
+
+# The root layout the structure ratchet checks (project-scaffolding docs/repo-layout.md).
+# extra_roots only adds: the package sits at the root instead of under src/, and logs/
+# is the log file's folder, kept in git by a .gitkeep so the file handler has a place
+# to open. docs/layout.md carries the same two reasons.
+shape       = "pipeline-cli"
+extra_roots = ["email_archiver", "logs"]
+
+# Byte-for-byte copies from project-scaffolding; never edited here. /propagate-vendored re-vendors.
+[vendored]
+static_ratchet = { src = "scripts/static_ratchet.py", sha = "0eb0da42298e391fc614b3fe550bd6cf2d07c693", dest = "scripts/static_ratchet.py" }
+docs_ratchet = { src = "scripts/docs_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/docs_ratchet.py" }
+structure_ratchet = { src = "scripts/structure_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/structure_ratchet.py" }
+box_lock_gate = { src = "scripts/box_lock_gate.ps1", sha = "98cdb1b7727d12a5c233580478e6fae40d98e6f3", dest = "scripts/box_lock_gate.ps1" }
+instruction_ratchet = { src = "scripts/instruction_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/instruction_ratchet.py" }
+doc_refs_ratchet = { src = "scripts/doc_refs_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/doc_refs_ratchet.py" }
+dead_code_ratchet = { src = "scripts/dead_code_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/dead_code_ratchet.py" }
+conventions_ratchet = { src = "scripts/conventions_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/conventions_ratchet.py" }
+comment_ratchet = { src = "scripts/comment_ratchet.py", sha = "baac1ed97388a3545bd1e52544821ec20f1dc77a", dest = "scripts/comment_ratchet.py" }
+
+# [static_ratchet] -- the scaffold's baseline-and-ratchet static analysis. The gate
+# (scripts/verify-before-ship.ps1) runs scripts/static_ratchet.py through
+# scripts/static_ratchet_gate.py: a duplicate block (jscpd via npx, Python and JS) or an
+# unused import/variable (ruff F401,F841), or a ruff bug (B) or security (S) finding (S113
+# strict), that is not in .static-ratchet-baseline.json fails. Needs Node and ruff in the gate's venv; a detector that cannot run exits 3,
+# which fails the gate. Procedure + limits: project-scaffolding docs/static-ratchet.md.
+[static_ratchet]
+enabled  = true
+baseline = ".static-ratchet-baseline.json"
+
+# [docs_ratchet] -- the scaffold's baseline-and-ratchet docs check. The gate
+# (scripts/verify-before-ship.ps1) runs scripts/docs_ratchet.py through
+# scripts/docs_ratchet_gate.py: README.md past its size budget or past its baselined size, or a
+# new history marker (issue reference, dated heading, changelog heading) in README.md or
+# docs/**/*.md that is not in .docs-ratchet-baseline.json, fails. No generated or dated
+# report folder exists under docs/, so nothing is excluded. Exit 3 (a file could not be read)
+# fails as NOT CONFIRMED. Procedure + limits: project-scaffolding docs/docs-ratchet.md.
+[docs_ratchet]
+enabled  = true
+baseline = ".docs-ratchet-baseline.json"
+
+# [structure_ratchet] -- the scaffold's baseline-and-ratchet structure check. The gate
+# (scripts/verify-before-ship.ps1) runs scripts/structure_ratchet.py through
+# scripts/structure_ratchet_gate.py: a file past 1,000 lines, a function past 100 lines or a
+# directory past 40 modules that is new or above its entry in .structure-ratchet-baseline.json
+# fails, and so does a root folder outside `shape` + `extra_roots`. Existing offenders are
+# baselined at their real size, never excluded. Exit 3 (could not measure) fails as NOT
+# CONFIRMED. The pipeline-cli shape has no src/ -> app/ layer pair. Procedure + limits:
+# project-scaffolding docs/structure-ratchet.md.
+[structure_ratchet]
+enabled  = true
+baseline = ".structure-ratchet-baseline.json"
+
+# [instruction_ratchet] -- the scaffold's baseline-and-ratchet check of the weekly prompt
+# audit's deterministic rules over the instruction files (CLAUDE.md, AGENTS.md; this repo
+# keeps no skills or rules files). The gate (scripts/verify-before-ship.ps1) runs
+# scripts/instruction_ratchet.py through scripts/instruction_ratchet_gate.py: a rule count
+# above its entry in .instruction-ratchet-baseline.json, or a file past its size cap, fails.
+# Existing hits are baselined at their real size, never excluded. Exit 3 (a file could not
+# be measured) fails as NOT CONFIRMED. Procedure + limits: project-scaffolding
+# docs/instruction-ratchet.md.
+[instruction_ratchet]
+enabled  = true
+baseline = ".instruction-ratchet-baseline.json"
+
+# [doc_refs_ratchet] -- the scaffold's baseline-and-ratchet check of the docs' repo references.
+# The gate (scripts/verify-before-ship.ps1) runs scripts/doc_refs_ratchet.py through
+# scripts/doc_refs_ratchet_gate.py: a repo path, `python -m` module or relative link named in
+# README.md, CLAUDE.md or docs/**/*.md that does not resolve against the tracked tree, and is
+# not in .doc-refs-ratchet-baseline.json or allow_refs, fails. Ports are not checked: this
+# repo declares no `port`. Exit 3 (a doc could not be read) fails as NOT CONFIRMED. Procedure
+# + limits: project-scaffolding docs/doc-refs-ratchet.md.
+[doc_refs_ratchet]
+enabled  = true
+baseline = ".doc-refs-ratchet-baseline.json"
+
+# [dead_code_ratchet] -- the scaffold's baseline-and-ratchet check for dead Python. The gate
+# (scripts/verify-before-ship.ps1) runs scripts/dead_code_ratchet.py through
+# scripts/dead_code_ratchet_gate.py: a function, class or method that nothing in the tracked
+# tree refers to, and that is not in .dead-code-ratchet-baseline.json, fails. Vendored copies
+# are read for references but never reported. Exit 3 (a file could not be parsed) fails as NOT
+# CONFIRMED. Procedure + limits: project-scaffolding docs/dead-code-ratchet.md.
+[dead_code_ratchet]
+enabled  = true
+baseline = ".dead-code-ratchet-baseline.json"
+
+# [conventions_ratchet] -- the scaffold's baseline-and-ratchet check of fleet conventions as
+# `ast` rules. The gate (scripts/verify-before-ship.ps1) runs scripts/conventions_ratchet.py
+# through scripts/conventions_ratchet_gate.py: a rule count above its entry in
+# .conventions-ratchet-baseline.json fails. Exit 3 (a file could not be parsed) fails as NOT
+# CONFIRMED. Rules: no-window (a Windows app), logging-not-print (the library code lives in
+# email_archiver/, not the default app/ or src/; cli/ entry points print by design),
+# no-drive-path (any repo). secret-compare and git-wrapper are off: the repo has neither
+# helper. Procedure + limits: project-scaffolding docs/conventions-ratchet.md.
+[conventions_ratchet]
+enabled     = true
+baseline    = ".conventions-ratchet-baseline.json"
+rules       = ["no-window", "logging-not-print", "no-drive-path"]
+print_paths = ["email_archiver/"]
+
+# [comment_ratchet] -- the scaffold's baseline-and-ratchet check of `#NNN` issue references in
+# product-code comments (a comment states the present-tense why; history lives in the issue
+# and git log). The gate (scripts/verify-before-ship.ps1) runs scripts/comment_ratchet.py
+# through scripts/comment_ratchet_gate.py: a file whose reference count rises above its entry
+# in .comment-ratchet-baseline.json fails. Tests and vendored scripts are out of scope by
+# default. Exit 3 (a file could not be scanned) fails as NOT CONFIRMED. Procedure + limits:
+# project-scaffolding docs/comment-ratchet.md.
+[comment_ratchet]
+enabled  = true
+baseline = ".comment-ratchet-baseline.json"

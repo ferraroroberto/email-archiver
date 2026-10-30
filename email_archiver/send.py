@@ -33,7 +33,12 @@ from typing import Any
 
 from email_archiver.batch import SCHEMA_VERSION, now_iso
 from email_archiver.draft import html_to_text
-from email_archiver.outlook.drafts import SENDING_ACCOUNT_MISMATCH, DraftSnapshot
+from email_archiver.outlook.drafts import (
+    ATTACHMENT_EMBEDDED,
+    SENDING_ACCOUNT_MISMATCH,
+    DraftAttachment,
+    DraftSnapshot,
+)
 from email_archiver.outlook.mapi import html_after_marked_region, strip_word_padding
 from email_archiver.outlook.sending import send_if_approved
 
@@ -67,6 +72,18 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _attachment_binding(attachment: DraftAttachment) -> list[Any]:
+    """What binds one attachment: its content hash, with its size for a file.
+
+    An attached mail's ``Attachment.Size`` reads 0 until Outlook saves the
+    draft, which ``send`` does before it compares, so its size is left out and
+    its content hash alone binds it.
+    """
+    if attachment.kind == ATTACHMENT_EMBEDDED:
+        return [attachment.name, attachment.sha256]
+    return [attachment.name, attachment.size_bytes, attachment.sha256]
+
+
 def part_values(snapshot: DraftSnapshot) -> dict[str, Any]:
     """Each fingerprinted part in the form it is hashed in."""
     return {
@@ -75,7 +92,7 @@ def part_values(snapshot: DraftSnapshot) -> dict[str, Any]:
         "bcc": _addresses(snapshot.bcc),
         "subject": snapshot.subject,
         "body": snapshot.html_body,
-        "attachments": sorted([a.name, a.size_bytes, a.sha256] for a in snapshot.attachments),
+        "attachments": sorted(_attachment_binding(a) for a in snapshot.attachments),
     }
 
 
@@ -113,7 +130,10 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
             "after_region_html": html_after_marked_region(snapshot.html_body),
         },
         "attachments": [
-            {"name": a.name, "size_bytes": a.size_bytes, "sha256": a.sha256}
+            # kind "embedded": a mail attached as an item, whose sha256 binds
+            # its content rather than bytes Outlook rewrites on every save; its
+            # size_bytes is informational and not part of the fingerprint.
+            {"name": a.name, "kind": a.kind, "size_bytes": a.size_bytes, "sha256": a.sha256}
             for a in snapshot.attachments
         ],
         "fingerprint": fingerprint(snapshot),

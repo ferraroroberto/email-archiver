@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-import main_batch
 from email_archiver import sync
+from email_archiver.cli import batch as main_batch
 from email_archiver.config import load_mailbox_registry, parse_mailbox_registry
 from email_archiver.outlook import process, syncing
 from email_archiver.outlook.mapi import (
@@ -26,7 +26,7 @@ from email_archiver.outlook.mapi import (
     MailboxNotInOutlookError,
     OutlookUnavailableError,
 )
-from tests.test_batch import archive_root, cfg  # noqa: F401 - fixtures are used by name
+from tests.batch.batch_support import archive_root, cfg  # noqa: F401 - fixtures are used by name
 from tests.test_mailboxes import OWNER, _registry_doc, batch_process  # noqa: F401
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
