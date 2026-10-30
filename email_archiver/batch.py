@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -69,12 +69,13 @@ from email_archiver.config import (
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
+from email_archiver.mail_filter import mail_matches
 from email_archiver.outlook.client import EmailData
 from email_archiver.batch_common import (
-    SCHEMA_VERSION as SCHEMA_VERSION,
+    ERROR_CATEGORY_FAILED,
+    ERROR_NOT_IN_INBOX,
     envelope,
-    error_document as error_document,
-    now_iso as now_iso,
+    header,
     renumber_folders,
     unique_folders,
 )
@@ -119,16 +120,12 @@ SOURCE_SENT = "sent"
 SOURCES = (SOURCE_INBOX, SOURCE_SENT)
 
 # `error.code` values, and the reason each one is worth telling apart.
-ERROR_NOT_IN_INBOX = "not_in_inbox"            # already moved, or never there
+# ERROR_NOT_IN_INBOX and ERROR_CATEGORY_FAILED live in `batch_common`, which
+# `dismiss` shares.
 ERROR_NOT_IN_SENT = "not_in_sent"              # a `source: sent` mail not in Sent Items
 ERROR_NOT_IN_ARCHIVE = "not_in_archive_folder"  # revert cannot find it back
 ERROR_BAD_DECISION = "bad_decision"             # caller sent an unusable entry
 ERROR_ARCHIVE_FAILED = "archive_failed"         # disk write / Outlook SaveAs
-# The move landed and only the tag did not. Its own code because the two are
-# genuinely different states to recover from: after a move_failed the mail is
-# still in the Inbox, after a category_failed it is already filed and only
-# looks untouched in Outlook.
-ERROR_CATEGORY_FAILED = "category_failed"
 
 # The per-file outcomes in a revert result — REFUSED_OUTSIDE_ROOTS and
 # REFUSED_UNRESOLVABLE — are imported above from `paths`, which owns the
@@ -278,35 +275,6 @@ def _plan_source(
         yield from client.iter_sent(preview_len)
     else:
         yield from client.iter_inbox(preview_len)
-
-
-def mail_matches(
-    mail: Any, terms: Sequence[str], since: datetime | None, sent: bool
-) -> bool:
-    """Whether ``mail`` carries every term (casefolded, in the subject, sender,
-    recipients or body preview) and is dated at or after ``since``.
-
-    The one per-mail rule shared by ``plan --search``/``--since`` and the
-    ``find`` folder-walk fallback. ``since`` is checked here even after a
-    server-side Restrict: this is the exact comparison, the Restrict only
-    narrows the walk."""
-    if since is not None:
-        # A Sent Items mail's own clock is when it was sent; its received time
-        # is whatever the store stamped and means nothing here.
-        when = (
-            (mail.date_sent or mail.date_received)
-            if sent
-            else (mail.date_received or mail.date_sent)
-        )
-        if when is None or when < since:
-            return False
-    if terms:
-        haystack = "\n".join(
-            (mail.subject, mail.sender, mail.recipients, mail.body_preview)
-        ).casefold()
-        if not all(term.casefold() in haystack for term in terms):
-            return False
-    return True
 
 
 def _matches(client: Any, mail: Any, filters: PlanFilters) -> bool:
@@ -934,9 +902,7 @@ def mailboxes(
         "Mailboxes: %s.", ", ".join(f"{e['alias']} {e['outlook_status']}" for e in entries)
     )
     return {
-        "verb": "mailboxes",
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header("mailboxes"),
         "registry": "synthesized" if registry.synthesized else "file",
         "default": registry.default,
         "mailboxes": entries,

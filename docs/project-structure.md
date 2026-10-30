@@ -20,7 +20,8 @@ archiver/
 │   ├── text.py                  ← Shared subject + Message-ID normalisation
 │   ├── paths.py                 ← Archive-root guard shared by revert and renumber
 │   ├── batch.py                 ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
-│   ├── batch_common.py          ← What every batch-family document shares: schema version, envelope, error shape, folder renumbering
+│   ├── batch_common.py          ← What every batch-family document shares: schema version, document header, envelope, error shape, folder renumbering
+│   ├── mail_filter.py           ← The per-mail search/since rule `plan` and `find` share
 │   ├── batch_move.py            ← Moving an archived mail out of the Inbox: the retries and the `message_changed` error
 │   ├── dismiss.py               ← Headless move-only verb: Inbox mail to the archive folder, tagged, no .msg kept (no COM)
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)

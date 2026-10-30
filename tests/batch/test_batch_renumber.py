@@ -228,7 +228,7 @@ def test_the_renumber_verb_reports_the_map_and_a_dry_run_changes_nothing(
 
     planned = batch.renumber(cfg, str(dest), dry_run=True)
     assert planned["verb"] == "renumber"
-    assert planned["schema_version"] == batch.SCHEMA_VERSION
+    assert planned["schema_version"] == batch_common.SCHEMA_VERSION
     assert planned["dry_run"] is True
     assert planned["counts"]["bundles"] == 2
     assert planned["counts"]["renamed"] == 1

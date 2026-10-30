@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from email_archiver import batch
+from email_archiver import batch, batch_common
 from email_archiver.archiver import archiver as archiver_module
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
@@ -59,7 +59,7 @@ def test_plan_lists_every_inbox_mail_with_ranked_candidates(cfg, archive_root):
     doc = batch.plan(client, cfg, candidates=5)
 
     assert doc["verb"] == "plan"
-    assert doc["schema_version"] == batch.SCHEMA_VERSION
+    assert doc["schema_version"] == batch_common.SCHEMA_VERSION
     assert doc["archive_folder"] == "Archive"
     assert doc["counts"] == {
         "inbox": 2, "planned": 2, "already_archived": 0, "skipped": 0,

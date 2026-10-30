@@ -30,7 +30,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION, error_document, now_iso
+from email_archiver.batch_common import error_document, header
 from email_archiver.config import Mailbox
 from email_archiver.outlook.mapi import (
     SYNC_ENDED,
@@ -178,9 +178,7 @@ def run(
         "Sync: %s.", ", ".join(f"{e['alias']} {e['outcome']}" for e in results) or "no mailbox",
     )
     return {
-        "verb": VERB,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(VERB),
         "desktop": desktop,
         "timeout_seconds": timeout,
         "trigger": trigger,

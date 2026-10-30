@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from email_archiver import batch
+from email_archiver import batch, batch_common
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.outlook.mapi import (
@@ -259,7 +259,7 @@ def test_the_category_helpers_survive_an_empty_string():
 # ------------------------------------------------------- the error envelope --
 
 def test_the_error_document_carries_a_code_and_the_same_envelope():
-    doc = batch.error_document("plan", "outlook_unavailable", "nope")
+    doc = batch_common.error_document("plan", "outlook_unavailable", "nope")
     assert doc["verb"] == "plan"
-    assert doc["schema_version"] == batch.SCHEMA_VERSION
+    assert doc["schema_version"] == batch_common.SCHEMA_VERSION
     assert doc["error"] == {"code": "outlook_unavailable", "message": "nope"}
