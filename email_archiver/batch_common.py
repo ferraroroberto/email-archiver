@@ -30,9 +30,27 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 
+# `error.code` values more than one verb reports. The move landed and only the
+# tag did not: its own code because the two are genuinely different states to
+# recover from — after a move_failed the mail is still in the Inbox, after a
+# category_failed it is already filed and only looks untouched in Outlook.
+ERROR_NOT_IN_INBOX = "not_in_inbox"            # already moved, or never there
+ERROR_CATEGORY_FAILED = "category_failed"
+
+
 def now_iso() -> str:
     """The local-time timestamp every batch-family document carries."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def header(verb: str) -> dict[str, Any]:
+    """The three keys every verb's document opens with, so a schema change to
+    them lands here and nowhere else."""
+    return {
+        "verb": verb,
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": now_iso(),
+    }
 
 
 def envelope(
@@ -44,9 +62,7 @@ def envelope(
     ``archive_folder`` is the one of ``mailbox`` (``main_batch`` adds the
     ``mailbox`` key itself, to every Outlook verb's document)."""
     return {
-        "verb": verb,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(verb),
         "archive_folder": get_mailbox_archive_folder(cfg, mailbox),
         "category": category or get_outlook_category(cfg),
     }
@@ -112,8 +128,6 @@ def error_document(verb: str, code: str, message: str, **details: Any) -> dict[s
     (``send``'s refusal names the parts that differ under ``differs``).
     """
     return {
-        "verb": verb,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(verb),
         "error": {"code": code, "message": message, **details},
     }

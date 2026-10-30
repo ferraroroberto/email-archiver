@@ -31,7 +31,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION, now_iso
+from email_archiver.batch_common import header, now_iso
 from email_archiver.draft import html_to_text
 from email_archiver.outlook.drafts import (
     ATTACHMENT_EMBEDDED,
@@ -106,9 +106,7 @@ def read_document(snapshot: DraftSnapshot) -> dict[str, Any]:
     """The ``read`` document: the draft as stored, and its fingerprint."""
     region = snapshot.body_region_html
     return {
-        "verb": READ_VERB,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(READ_VERB),
         "entry_id": snapshot.entry_id,
         "subject": snapshot.subject,
         "to": list(snapshot.to),
@@ -217,9 +215,7 @@ def send(
     snapshot = send_if_approved(client, entry_id, _check)
     logger.info("Sent draft %s: its fingerprint matched the approval.", entry_id)
     return {
-        "verb": SEND_VERB,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(SEND_VERB),
         "entry_id": entry_id,
         "from_address": snapshot.sending_account,
         "subject": snapshot.subject,

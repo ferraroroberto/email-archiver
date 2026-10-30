@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION, now_iso
+from email_archiver.batch_common import header
 from email_archiver.config import Mailbox, get_outlook_self_address
 from email_archiver.outlook.drafts import (
     REPLY_BY_MESSAGE_ID,
@@ -363,12 +363,10 @@ def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) ->
         ref_reason = REF_REASON_NONE_GIVEN
     else:
         ref_reason = "" if result.ref_stamped else result.ref_reason
-    now = now_iso()
+    head = header(VERB)
     replying = spec.reply_to is not None and not updated
     return {
-        "verb": VERB,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now,
+        **head,
         "entry_id": result.entry_id,
         # The account the draft sends from, for the caller's preview; "" when
         # Outlook would not say.
@@ -386,5 +384,5 @@ def _document(spec: DraftSpec, bcc: list[str], result: Any, *, updated: bool) ->
         **_reply_fields(spec, result, updated=updated),
         "displayed": result.displayed,
         "updated": updated,
-        "updated_at" if updated else "created_at": now,
+        "updated_at" if updated else "created_at": head["generated_at"],
     }

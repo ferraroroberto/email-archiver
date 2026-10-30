@@ -83,7 +83,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from email_archiver import batch, dismiss, draft, find, send, sync
+from email_archiver import batch, batch_common, dismiss, draft, find, send, sync
 from email_archiver.config import (
     Mailbox,
     MailboxRegistry,
@@ -147,7 +147,7 @@ def _emit(document: dict[str, Any]) -> None:
 
 def _fail(verb: str, code: str, message: str, **details: Any) -> int:
     logger.error("%s: %s", code, message)
-    _emit(batch.error_document(verb, code, message, **details))
+    _emit(batch_common.error_document(verb, code, message, **details))
     return EXIT_CANNOT_START
 
 

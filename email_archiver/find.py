@@ -27,10 +27,11 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from email_archiver.batch import SCHEMA_VERSION, mail_matches, now_iso
+from email_archiver.batch_common import header
 from email_archiver.config import Mailbox, get_mailbox_archive_folder
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
+from email_archiver.mail_filter import mail_matches
 from email_archiver.outlook.client import FIND_ARCHIVE, FIND_INBOX, FIND_SENT
 from email_archiver.outlook.mapi import words_filter
 
@@ -112,9 +113,7 @@ def find(
         matched, ", ".join(f["folder"] for f in searched), len(hits),
     )
     return {
-        "verb": VERB,
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_iso(),
+        **header(VERB),
         "query": {
             "words": list(words),
             "since": since.isoformat(timespec="minutes") if since else None,
