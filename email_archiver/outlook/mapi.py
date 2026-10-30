@@ -131,6 +131,12 @@ DASL_DATE_SENT = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
 # every other move failure because it is the only one worth retrying.
 MAPI_E_OBJECT_CHANGED = 0x80040109
 
+# What a Send/Receive handle (outlook/syncing.py) reports when polled. A sync
+# whose end cannot be observed is its own state, never folded into "ended".
+SYNC_RUNNING = "running"
+SYNC_ENDED = "ended"
+SYNC_UNOBSERVABLE = "unobservable"
+
 
 def is_message_changed_error(exc: Any) -> bool:
     """Whether a COM failure is MAPI_E_OBJECT_CHANGED (0x80040109).

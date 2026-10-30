@@ -36,7 +36,7 @@ from itertools import islice
 from typing import Any
 
 from email_archiver.config import Mailbox
-from email_archiver.outlook import process
+from email_archiver.outlook import process, syncing
 from email_archiver.outlook.drafts import DraftSurface
 from email_archiver.outlook.mapi import (
     ARCHIVE_REF_HEADER,
@@ -365,6 +365,10 @@ class OutlookClient(DraftSurface):
         if self._resolved_store is None:
             self._resolved_store = resolve_store(self._namespace(), self.mailbox)
         return self._resolved_store
+
+    def start_sync(self) -> syncing.SyncHandle:
+        """Start a profile-wide Send/Receive; Outlook has no per-account trigger."""
+        return syncing.start(self._namespace())
 
     def _inbox(self) -> Any:
         return self.store().GetDefaultFolder(OL_FOLDER_INBOX)
