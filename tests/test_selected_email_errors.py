@@ -17,6 +17,8 @@ from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.mapi import OL_CLASS_MAIL_ITEM, SelectedEmailError
 from email_archiver.ui import app
 
+from .conftest import _FakeMailItem
+
 
 @pytest.fixture
 def outlook(monkeypatch):
@@ -105,3 +107,78 @@ def test_worker_asks_for_a_selection_only_when_nothing_is_selected(monkeypatch):
     dialog, shown = _worker_dialog(monkeypatch, lambda: None)
     dialog._load_worker()
     assert len(shown) == 1 and "No email selected" in shown[0]
+
+
+# ---------------------------------------- the Archive click vs. the selection ---
+
+
+class _SelectionRoot:
+    destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class _ShownEmail:
+    subject = "First mail"
+    entry_id = "entry-first"
+
+
+class _NoDatePrefix:
+    def get(self) -> bool:
+        return False
+
+
+@pytest.fixture
+def archive_dialog(monkeypatch):
+    """A dialog showing ``First mail``; the Outlook selection is set per test."""
+    dialog = app.ArchiveDialog.__new__(app.ArchiveDialog)
+    dialog._cfg = {"path": {"max_length": 255}, "naming": {"date_prefix": "off"}}
+    dialog._email = _ShownEmail()
+    dialog._root = _SelectionRoot()
+    dialog._date_prefix_var = _NoDatePrefix()
+    dialog._date_prefix_set_by_hand = False
+    errors: list = []
+    monkeypatch.setattr(app.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    return dialog, errors
+
+
+def test_a_selection_moved_in_outlook_is_refused_and_nothing_is_written(
+    archive_dialog, monkeypatch, tmp_path
+):
+    dialog, errors = archive_dialog
+    other = _FakeMailItem(entry_id="entry-second")
+    monkeypatch.setattr(app, "get_selected_mail_item", lambda: other)
+
+    dialog._do_archive(str(tmp_path))
+
+    assert list(tmp_path.iterdir()) == []
+    assert len(errors) == 1 and "Re-select" in errors[0][1]
+    assert dialog._root.destroyed is False
+
+
+def test_the_same_mail_still_selected_is_archived(archive_dialog, monkeypatch, tmp_path):
+    dialog, errors = archive_dialog
+    same = _FakeMailItem(entry_id="entry-first")
+    monkeypatch.setattr(app, "get_selected_mail_item", lambda: same)
+
+    dialog._do_archive(str(tmp_path))
+
+    assert errors == []
+    assert [p.name.endswith("001 - First mail.msg") for p in tmp_path.iterdir()] == [True]
+    assert dialog._root.destroyed is True
+
+
+def test_the_entry_id_of_the_selected_mail_is_read(outlook):
+    outlook["item"] = types.SimpleNamespace(
+        Class=OL_CLASS_MAIL_ITEM,
+        Subject="Hello",
+        EntryID="entry-xyz",
+        SenderEmailAddress="a@example.invalid",
+        SenderEmailType="SMTP",
+        Recipients=[],
+        SentOn=None,
+        ReceivedTime=None,
+    )
+
+    assert OutlookClient().get_selected_email().entry_id == "entry-xyz"

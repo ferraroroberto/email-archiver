@@ -34,6 +34,7 @@ class _FakeRoot:
 
 class _FakeEmail:
     subject = "Next one"
+    entry_id = "entry-1"
 
 
 @pytest.fixture

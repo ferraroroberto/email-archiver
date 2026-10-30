@@ -32,7 +32,9 @@ Design decisions:
   the archiver never lists a destination folder twice for one archive call.
 - Embedded images (ContentId set) are skipped; only real attachments are saved.
 - Subject sanitisation removes characters illegal on Windows file systems.
-- SaveAs uses olMSG format constant (3) to produce a proper .msg file.
+- SaveAs uses the olMSGUnicode format constant (9): olMSG (3) is the ANSI
+  .msg format and turns text outside the system code page into "?" inside the
+  permanent copy.
 """
 from __future__ import annotations
 
@@ -55,8 +57,8 @@ from email_archiver.outlook.client import sent_datetime
 
 logger = logging.getLogger(__name__)
 
-# Outlook SaveAs format constant for .msg
-_OL_MSG_FORMAT = 3
+# Outlook SaveAs format constant for a Unicode .msg (olMSGUnicode)
+_OL_MSG_FORMAT = 9
 
 # Regexes to find the leading sequence number, in either filename form.
 # Dated is tried first since it is the more specific match. Applied in exactly

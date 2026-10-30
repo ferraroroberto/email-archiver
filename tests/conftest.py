@@ -47,8 +47,11 @@ class _FakeAttachments:
 class _FakeMailItem:
     """Enough of a MailItem for the archiver: dates, SaveAs, attachments."""
 
-    def __init__(self, sent_on=datetime(2026, 3, 14, 9, 30), attachments=()):
+    def __init__(
+        self, sent_on=datetime(2026, 3, 14, 9, 30), attachments=(), entry_id="entry-1"
+    ):
         self.SentOn = sent_on
+        self.EntryID = entry_id
         self.ReceivedTime = None
         self.Attachments = _FakeAttachments(
             _FakeAttachment(n) for n in attachments
