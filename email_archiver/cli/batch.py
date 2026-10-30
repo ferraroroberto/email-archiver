@@ -1,6 +1,6 @@
 """
-Headless batch entry point – plan / apply / revert / dismiss / renumber / draft / read /
-send / mailboxes / find, over JSON.
+Headless batch entry point – plan / apply / revert / dismiss / renumber / draft / read / send /
+mailboxes / find / sync, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os, life-os),
 never used interactively: every verb prints exactly one JSON document on
@@ -27,12 +27,17 @@ one the caller approved (`read` reports it).
     python main_batch.py plan --mailbox <alias> --candidates 0
     python main_batch.py find --mailbox <alias> --query "<words>" [--since YYYY-MM-DD] \
         [--folders inbox,archive,sent] [--limit N]
+    python main_batch.py sync [--mailbox <alias>] [--timeout SECONDS]
 
 Every Outlook verb acts on one mailbox of the registry (config/mailboxes.json,
 or Outlook's default store when there is no such file): `--mailbox <alias>`
 picks it, the registry default otherwise, and its document carries that
 mailbox's alias as `mailbox`. `mailboxes` lists the registry with
-each mailbox's `outlook_status`, and never starts Outlook.
+each mailbox's `outlook_status`, and never starts Outlook. `sync` is the one
+verb that spans mailboxes: Send/Receive is global to the profile, so
+`--mailbox` narrows only which mailboxes are reported (default: every one in
+the registry) and its document lists each under `mailboxes`, with no single
+`mailbox` key.
 
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
@@ -54,6 +59,10 @@ Exit codes:
        the mailbox's address (`account_not_in_outlook`), or (draft / send) a
        draft that would not send as the mailbox (`sending_account_mismatch`).
        stdout carries `{"error": {"code", "message"}}` instead
+    3  (sync only) deferred: this is a Windows session with no desktop (session
+       0), so Outlook was not started and nothing was triggered. stdout carries
+       the `desktop` block, `outcome: "deferred_no_desktop"` and an `error`
+       with that code
 
 Why a separate process rather than a library call: the Inbox verbs drive
 Outlook over COM, and a COM modal (the address-book security prompt, a profile
@@ -67,13 +76,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from email_archiver import batch, dismiss, draft, find, send
+from email_archiver import batch, dismiss, draft, find, send, sync
 from email_archiver.config import (
     Mailbox,
     MailboxRegistry,
@@ -99,6 +109,9 @@ logger = logging.getLogger(__name__)
 EXIT_OK = 0
 EXIT_MAIL_FAILED = 1
 EXIT_CANNOT_START = 2
+# `sync` only: a session with no desktop, nothing started. The same code the
+# consumer apps already treat as "deferred", so they need no mapping.
+EXIT_DEFERRED = 3
 
 ERROR_CONFIG_MISSING = "config_missing"
 ERROR_BAD_INPUT = "bad_input"
@@ -110,6 +123,10 @@ ERROR_MAILBOX_NOT_IN_OUTLOOK = "mailbox_not_in_outlook"
 ERROR_MAILBOX_UNKNOWN = "mailbox_unknown"
 # The mailbox's store is there but no Outlook account sends from its address.
 ERROR_ACCOUNT_NOT_IN_OUTLOOK = "account_not_in_outlook"
+# Outlook was reached but the walk then hit something unclassified (a locked
+# or corrupt index database, a renumber or disk error) — distinct from
+# com_unavailable, which is reserved for "pywin32 is not installed".
+ERROR_RUN_FAILED = "run_failed"
 
 
 def _emit(document: dict[str, Any]) -> None:
@@ -195,6 +212,21 @@ def _find_args(args: argparse.Namespace) -> tuple[list[str], datetime | None, tu
     if args.limit <= 0:
         raise ValueError("--limit must be positive")
     return words, _parse_since(args.since), folders
+
+
+def _sync_timeout(raw: str) -> float:
+    """``sync``'s ``--timeout`` as seconds, validated before Outlook is touched.
+
+    Raises:
+        ValueError: not a positive, finite number.
+    """
+    try:
+        timeout = float(raw)
+    except ValueError:
+        raise ValueError(f"--timeout {raw!r} is not a number of seconds") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("--timeout must be a positive number of seconds")
+    return timeout
 
 
 def _plan_filters(args: argparse.Namespace) -> batch.PlanFilters:
@@ -441,6 +473,25 @@ def _add_find_parser(sub: Any) -> argparse.ArgumentParser:
     return p_find
 
 
+def _add_sync_parser(sub: Any) -> None:
+    p_sync = sub.add_parser(
+        "sync",
+        help="Ask Outlook to run Send/Receive for the whole profile and report "
+             "each mailbox's outcome. Reads, moves and sends no mail.",
+    )
+    p_sync.add_argument(
+        "--mailbox", metavar="ALIAS",
+        help="Report only this registry mailbox (an alias or extra alias) "
+             "instead of every one. The sync itself is profile-wide.",
+    )
+    # A string, validated in _sync_timeout: argparse's own float error would exit 2
+    # with usage text on stderr instead of the one JSON document.
+    p_sync.add_argument(
+        "--timeout", default=str(sync.DEFAULT_TIMEOUT_SECONDS), metavar="SECONDS",
+        help="Seconds to wait for the sync to end (default: %(default)s).",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main_batch.py",
@@ -465,6 +516,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(present / missing / unknown). Never starts Outlook.",
     )
     mailbox_verbs.append(_add_find_parser(sub))
+    _add_sync_parser(sub)
 
     for verb_parser in mailbox_verbs:
         verb_parser.add_argument(
@@ -567,6 +619,60 @@ def _mailboxes(registry: MailboxRegistry) -> dict[str, Any]:
         return batch.mailboxes(registry, OutlookClient if running else None)
     finally:
         pythoncom.CoUninitialize()
+
+
+def _sync(
+    args: argparse.Namespace, registry: MailboxRegistry, timeout: float,
+) -> int:
+    """The ``sync`` verb. Unlike the others it spans mailboxes, so it has its own
+    path: no single ``mailbox`` key, and a session with no desktop is deferred
+    (exit 3) before Outlook, COM or ``ensure_running`` are touched."""
+    verb = args.verb
+    try:
+        mailboxes = (
+            list(registry.mailboxes.values()) if args.mailbox is None
+            else [registry.select(args.mailbox)]
+        )
+    except MailboxUnknownError as exc:
+        # Before Outlook: an unknown name must never reach a mailbox at all.
+        return _fail(verb, ERROR_MAILBOX_UNKNOWN, str(exc))
+
+    desktop = process.desktop_state()
+    if desktop["status"] == "session_0":
+        logger.warning("Sync deferred: session 0 has no desktop; Outlook was not started.")
+        _emit(sync.deferred_document(desktop))
+        return EXIT_DEFERRED
+    if desktop["status"] == "unknown":
+        logger.warning("Sync: the session state could not be read; proceeding.")
+
+    try:
+        import pythoncom  # noqa: PLC0415
+    except ImportError as exc:
+        return _fail(
+            verb, ERROR_COM_UNAVAILABLE,
+            f"pywin32 is not available, so Outlook cannot be reached: {exc}",
+        )
+
+    pythoncom.CoInitialize()
+    try:
+        try:
+            # Starts Outlook when it is closed, like plan / find: a sync right
+            # after a reboot is the case this verb is for.
+            OutlookClient(mailboxes[0]).ensure_running(timeout=args.start_timeout)
+        except OutlookUnavailableError as exc:
+            return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
+        try:
+            document = sync.run(OutlookClient, mailboxes, desktop=desktop, timeout=timeout)
+        except OutlookUnavailableError as exc:
+            return _fail(verb, ERROR_OUTLOOK_UNAVAILABLE, str(exc))
+        except Exception as exc:
+            # Same last-resort guard as the other verbs: one JSON document, never
+            # a traceback with nothing on stdout.
+            return _fail(verb, ERROR_COM_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+    finally:
+        pythoncom.CoUninitialize()
+    _emit(document)
+    return EXIT_OK
 
 
 def _renumber(cfg: dict[str, Any], args: argparse.Namespace) -> int:
@@ -693,7 +799,7 @@ def _run_in_outlook(
             # process's one JSON document, not as a traceback on stderr with
             # nothing on stdout, which is what a spawning caller would see as
             # a crash it cannot classify.
-            return _fail(verb, ERROR_COM_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+            return _fail(verb, ERROR_RUN_FAILED, f"{type(exc).__name__}: {exc}")
     finally:
         pythoncom.CoUninitialize()
 
@@ -728,6 +834,13 @@ def main(argv: list[str] | None = None) -> int:
     except _Refusal as exc:
         return _fail(verb, exc.code, str(exc))
 
+    sync_timeout = sync.DEFAULT_TIMEOUT_SECONDS
+    if verb == "sync":
+        try:
+            sync_timeout = _sync_timeout(args.timeout)
+        except ValueError as exc:
+            return _fail(verb, ERROR_BAD_INPUT, str(exc))
+
     if verb == "renumber":
         return _renumber(cfg, args)
 
@@ -741,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
     if verb == "mailboxes":
         _emit(_mailboxes(registry))
         return EXIT_OK
+    if verb == "sync":
+        return _sync(args, registry, sync_timeout)
     try:
         mailbox = registry.select(args.mailbox)
     except MailboxUnknownError as exc:

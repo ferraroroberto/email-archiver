@@ -35,7 +35,7 @@ class MailboxNotInOutlookError(RuntimeError):
 
 class AccountNotInOutlookError(RuntimeError):
     """A registry mailbox's store is present but no Outlook account sends from
-    its address, so a draft cannot be made to send as it (issue #109).
+    its address, so a draft cannot be made to send as it.
 
     Distinct from ``MailboxNotInOutlookError``: the mailbox can be read and
     filed, only not sent from. Never answered by sending from another account.
@@ -130,6 +130,12 @@ DASL_DATE_SENT = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
 # archiver just wrote to disk. Batch mode tells this one refusal apart from
 # every other move failure because it is the only one worth retrying.
 MAPI_E_OBJECT_CHANGED = 0x80040109
+
+# What a Send/Receive handle (outlook/syncing.py) reports when polled. A sync
+# whose end cannot be observed is its own state, never folded into "ended".
+SYNC_RUNNING = "running"
+SYNC_ENDED = "ended"
+SYNC_UNOBSERVABLE = "unobservable"
 
 
 def is_message_changed_error(exc: Any) -> bool:

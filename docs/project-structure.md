@@ -26,6 +26,7 @@ archiver/
 │   ├── draft.py                 ← Headless draft: spec validation, BCC-self, the draft document (no COM)
 │   ├── find.py                  ← Headless read-only live search over a mailbox's Outlook folders (no COM)
 │   ├── send.py                  ← Headless read-back + guarded send: fingerprint, approval check (no COM)
+│   ├── sync.py                  ← Headless Send/Receive: one profile-wide trigger, bounded wait, per-mailbox outcome (no COM)
 │   ├── renumber.py              ← Re-sequence a folder into sent-date order
 │   ├── explorer.py              ← Foremost open Explorer window → folder path
 │   │
@@ -46,10 +47,11 @@ archiver/
 │   ├── outlook/
 │   │   ├── client.py           ← Outlook COM isolation (OutlookClient): read path + batch surface
 │   │   ├── drafts.py           ← Draft surface OutlookClient inherits (DraftSurface)
-│   │   ├── process.py          ← Outlook process: ensure_running
+│   │   ├── process.py          ← Outlook process: ensure_running; the session-0 desktop check
 │   │   ├── mapi.py             ← Shared constants and COM-free helpers
 │   │   ├── stores.py           ← Which Outlook store a mailbox lives in (by address)
-│   │   └── sending.py          ← The one COM Send call (send verb only)
+│   │   ├── sending.py          ← The one COM Send call (send verb only)
+│   │   └── syncing.py          ← The one place a Send/Receive is started (sync verb only)
 │   │
 │   ├── archiver/
 │   │   └── archiver.py         ← File saving logic (EmailArchiver)

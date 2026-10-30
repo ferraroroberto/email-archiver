@@ -251,7 +251,7 @@ def resolve_self_address(
     """The address every draft blind-copies, or ``None`` when it cannot be known.
 
     A registry ``mailbox`` blind-copies its own address: that copy lands in
-    its Inbox, which is where it is filed from (issue #109). With no registry,
+    its Inbox, which is where it is filed from. With no registry,
     ``outlook.self_address`` wins when set; otherwise the default sending
     account's SMTP address as Outlook reports it
     (``OutlookClient.default_account_smtp``, which never goes through

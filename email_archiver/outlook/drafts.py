@@ -118,7 +118,7 @@ class DraftAttachment:
     A file (``ATTACHMENT_FILE``) is bound by its bytes, not Outlook's
     ``Attachment.Size``, which counts MAPI overhead and never equals the file.
     A mail attached as an item (``ATTACHMENT_EMBEDDED``) has no stable bytes:
-    Outlook writes it out afresh on every ``SaveAsFile`` (issue #135). It is
+    Outlook writes it out afresh on every ``SaveAsFile``. It is
     bound by a hash of its content instead (``DraftSurface._embedded_content``).
     Its ``size_bytes`` is Outlook's ``Attachment.Size``, which reads 0 until the
     draft is saved: informational, never part of what binds it.
@@ -306,7 +306,7 @@ class DraftSurface:
         default signature; the body is then put above it. ``Save`` runs last,
         so the finished draft sits in Drafts even if the window is closed.
 
-        For a registry mailbox (issue #109) the item's ``SendUsingAccount`` is
+        For a registry mailbox the item's ``SendUsingAccount`` is
         set to that mailbox's account right after it is created — before
         ``Display``, so the signature is that account's — and read back; a
         draft that would send as anyone else is discarded unsaved
@@ -628,7 +628,7 @@ class DraftSurface:
         """What an attached mail says, in a form that reads the same every time.
 
         Every field here was seen identical across repeated reads of one
-        unchanged draft (issue #135); the opened copy's ``CreationTime`` was
+        unchanged draft; the opened copy's ``CreationTime`` was
         not, so it and anything like it stays out.
         """
         inner = self._namespace().OpenSharedItem(path)

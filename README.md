@@ -137,4 +137,5 @@ Durable reference lives in `docs/`; each line below is the entry point for one t
 | What batch mode will and will not touch | [docs/batch-safety.md](docs/batch-safety.md) |
 | `outlook:` config keys, the mailbox registry, `--mailbox` | [docs/mailboxes.md](docs/mailboxes.md) |
 | Live search of a mailbox's Outlook folders (`find`) | [docs/find.md](docs/find.md) |
+| Running Outlook's Send/Receive and reporting each mailbox's outcome (`sync`) | [docs/sync.md](docs/sync.md) |
 | Internal module structure (Mermaid) | [docs/architecture.mmd](docs/architecture.mmd) |
