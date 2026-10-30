@@ -442,16 +442,28 @@ class ArchiveDialog:
             # obtained in the background worker thread and cannot be used from
             # the main UI thread — doing so produces AttributeError: <unknown>.SaveAs.
             # Re-acquire a fresh reference from the main thread at click time
-            # (its apartment is held by run()). The user's selection in Outlook
-            # won't have changed between seeing suggestions and clicking
-            # Archive.
+            # (its apartment is held by run()). The dialog is non-modal, so the
+            # selection can have moved since the worker read it: the archive
+            # proceeds only when it is still the mail the dialog is showing.
             try:
                 mail_item = get_selected_mail_item()
                 if mail_item is None:
                     messagebox.showerror("Error", "No email is selected in Outlook.")
                     return
+                selected_id = mail_item.EntryID
             except Exception as exc:
                 messagebox.showerror("Outlook error", f"Cannot access Outlook:\n{exc}")
+                return
+
+            if selected_id != self._email.entry_id:
+                logger.warning("Archive refused: the Outlook selection changed.")
+                messagebox.showerror(
+                    "Selection changed",
+                    "The email selected in Outlook is no longer the one shown "
+                    "here, so nothing was archived.\n\n"
+                    "Re-select the email and try again.",
+                    parent=self._root,
+                )
                 return
 
             archiver = EmailArchiver(

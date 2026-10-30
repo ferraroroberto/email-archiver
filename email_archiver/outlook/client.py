@@ -14,9 +14,8 @@ Design decisions:
 - The batch surface (ensure_running / iter_inbox / iter_inbox_received_since /
   find_by_message_id / archive_ref / item_ids / refetch / is_same_object /
   move_to / set_category / clear_category / is_open_in_inspector /
-  view_away_from_inbox) lives here
-  too, so batch.py stays pure orchestration and can be driven by a fake client
-  in tests.
+  view_away_from_inbox) lives here too, so batch.py stays pure orchestration
+  and can be driven by a fake client in tests.
 - Every folder (Inbox, Sent, the archive folder, Drafts) comes from
   ``store()``: the store of the mailbox the client was built for, resolved by
   address in outlook/stores.py — never from the namespace's default folders.
@@ -80,6 +79,7 @@ class EmailData:
     sender: str = ""
     recipients: str = ""           # semicolon-separated SMTP addresses
     date_sent: datetime | None = None
+    entry_id: str = ""             # lets the Archive click confirm the selection
 
 
 @dataclass
@@ -322,6 +322,7 @@ class OutlookClient(DraftSurface):
                 sender=_get_sender_smtp(item),
                 recipients=_get_recipients_smtp(item),
                 date_sent=sent_datetime(item),
+                entry_id=item.EntryID,
             )
 
         except Exception as exc:
