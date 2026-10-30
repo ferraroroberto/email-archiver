@@ -13,7 +13,7 @@ flowchart TB
     MAINSCAN["main_scan.py\nheadless --no-ui, or opens ScanWindow"]
     MAINARCHIVE["main_archive.py\nopens ArchiveDialog directly"]
     MAINUI["main_ui.py\nopens LauncherApp (both buttons)"]
-    MAINBATCH["main_batch.py\nheadless plan / apply / revert / renumber / draft /\nread / send / mailboxes / find / sync, one JSON document on stdout;\nevery Outlook verb acts on one registry mailbox"]
+    MAINBATCH["main_batch.py\nheadless plan / apply / revert / dismiss / renumber / draft /\nread / send / mailboxes / find / sync, one JSON document on stdout;\nevery Outlook verb acts on one registry mailbox"]
     NIGHTLY["run-scan-nightly.bat\napp-launcher chain hop after the fleet backup;\nforeground, propagates the scan exit code"]
     CLI["python -m email_archiver archive|scan|ui|batch\nemail_archiver/cli/: the dispatcher and the four tools;\nthe main_*.py scripts above are thin wrappers over it"]
   end
@@ -132,6 +132,14 @@ flowchart TB
     FIND["find.py\nevery word in subject / sender / recipients / body,\nnewest hits across Inbox · archive folder · Sent,\nalready_archived from the index,\ncoverage: outlook_folders. No COM, writes nothing"]
   end
   MAINBATCH -->|find verb| FIND
+
+  subgraph dismissflow["Move without keeping (headless)"]
+    DISMISS["dismiss.py\nInbox lookup by Message-ID, move into the mailbox's\narchive folder, tag with outlook.dismiss_category.\nNo .msg, no index row, no archive-roots check.\nlookup_failed · not_in_inbox · move_failed · category_failed"]
+  end
+  MAINBATCH -->|dismiss verb| DISMISS
+  DISMISS -->|find_by_message_id · set_category| OUTLOOK
+  DISMISS -->|the move| BATCHMOVE
+  DISMISS -->|every document| BATCHCOMMON
   FIND -->|search_folder: Items.Restrict DASL words_filter,\nSort SentOn desc; archive folder never created| OUTLOOK
   FIND -->|already archived?| REPO
   FIND -->|mail_matches: the plan filter's per-mail rule,\nfor the folder-walk fallback| BATCH

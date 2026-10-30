@@ -6,10 +6,11 @@
 outlook:
   archive_folder: "Archive"           # created under the mailbox root if missing
   category: "Archived by task-os"     # stamped by apply, removed by revert (--category overrides)
+  dismiss_category: "Dismissed by task-os"  # stamped by dismiss (--category overrides)
   self_address: "you@example.com"     # draft: blind-copied on every draft
 ```
 
-All three keys are optional. `archive_folder` and `category` fall back to the values above; `self_address` falls back to the default sending account's SMTP address. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated. A registry mailbox's own `archive_folder` overrides `outlook.archive_folder` (see [Mailboxes](#mailboxes)).
+All four keys are optional. `archive_folder`, `category` and `dismiss_category` fall back to the values above; `self_address` falls back to the default sending account's SMTP address. The folder is matched case-insensitively so a mailbox that already has one is used rather than duplicated. A registry mailbox's own `archive_folder` overrides `outlook.archive_folder` (see [Mailboxes](#mailboxes)).
 
 ## Mailboxes
 

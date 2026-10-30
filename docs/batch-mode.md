@@ -1,12 +1,13 @@
 # Batch mode (headless)
 
-`main_batch.py` is the archiver's headless face: ten verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, one that lists the mailboxes it can act on, one that searches a mailbox's live folders, and one that asks Outlook to run Send/Receive — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
+`main_batch.py` is the archiver's headless face: eleven verbs — three that file the **whole Inbox** in one run instead of one selected mail at a time, one that moves Inbox mail into the archive folder without keeping a copy, one that repairs a folder's numbering, one that opens an unsent draft, two that read a draft back and send it only while it is still what was approved, one that lists the mailboxes it can act on, one that searches a mailbox's live folders, and one that asks Outlook to run Send/Receive — each printing exactly one JSON document on stdout. It exists so another local app can drive the archiver as a subprocess — the archiver stays the sole owner of Outlook COM, the suggestion engine and the naming rules, and the caller only decides *which folder* each mail goes to.
 
 ```powershell
 & .\.venv\Scripts\python.exe main_batch.py plan --candidates 5 > plan.json
 & .\.venv\Scripts\python.exe main_batch.py plan --search "<subject words>" --since 2026-09-15 --candidates 0
 & .\.venv\Scripts\python.exe main_batch.py apply --decisions decisions.json
 & .\.venv\Scripts\python.exe main_batch.py revert --items revert.json
+& .\.venv\Scripts\python.exe main_batch.py dismiss --message-id <id> --message-id <id>
 & .\.venv\Scripts\python.exe main_batch.py renumber --folder "<a folder>" --dry-run
 & .\.venv\Scripts\python.exe main_batch.py draft --spec spec.json
 & .\.venv\Scripts\python.exe main_batch.py read --entry-id <entry_id>
@@ -21,6 +22,7 @@
 | `plan` | nothing | Starts Outlook if it is closed, enumerates the Inbox, and returns every mail with its metadata and the top `--candidates` folder suggestions (default 10), each carrying its own `date_prefix`. `--message-id` / `--since` / `--search` / `--ref` narrow it to specific mail — see [Filing specific mail](#filing-specific-mail). Read-only. |
 | `apply` | `[{message_id, folder_path, date_prefix}]` | Archives each mail into `folder_path` (which must be inside `archive.root_paths`), then moves it to the Outlook `Archive` folder and tags it with the category. A mail already in the index is finished rather than filed again — see [Retrying a mail that was written but never moved](batch-retry.md#retrying-a-mail-that-was-written-but-never-moved). |
 | `revert` | `[{message_id, files}]` | Deletes exactly the listed files, removes their index rows, removes the category and moves the mail back to the Inbox. |
+| `dismiss` | `--message-id` (repeatable; optionally `--category`) | Moves each named Inbox mail into the mailbox's archive folder and tags it with `outlook.dismiss_category`, **without saving a `.msg`** — see [Dismissing mail](#dismissing-mail). |
 | `renumber` | nothing | Re-sequences one folder into sent-date order and prints the old → new map. Touches no Outlook and no COM — see [Renumbering a folder](renumber.md#renumbering-a-folder). |
 | `draft` | `{to, cc, bcc, subject, body_text \| body_html, attachments, ref, display, reply_to, reply_all}` | Creates a filled Outlook draft that blind-copies your own address, saves it to Drafts and opens it for you to review; with `reply_to`, a real threaded reply. **Never sends.** See [Drafting a mail](drafting-and-sending.md#drafting-a-mail). |
 | `read` | nothing | Reads one unsent draft back as it is stored, with its fingerprint. Writes nothing, shows nothing. See [Sending an approved draft](drafting-and-sending.md#sending-an-approved-draft). |
@@ -71,6 +73,16 @@ Two `apply` / `revert` options serve the same caller:
 & .\.venv\Scripts\python.exe main_batch.py revert --items applied.json --category "Archived by life-os"
 ```
 
+## Dismissing mail
+
+`dismiss` clears mail the caller does not want kept. It looks each `--message-id` up in the Inbox, moves it into the mailbox's archive folder and tags it with `outlook.dismiss_category` (default `Dismissed by task-os`; `--category` overrides it for the run, and the document's `category` reports the one used). It is a different category from `apply`'s, so a mail in the archive folder with no file behind it is recognisable in Outlook.
+
+It writes **nothing** to disk: no `.msg`, no index row, and no archive-roots check, because there is no destination path. Only an Inbox mail is ever touched — an id that matches nothing in the Inbox is `not_in_inbox`, whatever folder it is in. A Message-ID given twice is moved once. `--mailbox` acts on that mailbox's Inbox and archive folder only; an unknown alias is refused with exit 2 before Outlook is touched.
+
+Each result in `results` carries `message_id`, `folder` (the destination), `ok`, `moved`, `categorized`, `move_via`, `entry_id` and `error`. `error.code` is one of `not_in_inbox`, `lookup_failed` (the Inbox lookup itself raised, so whether the mail is there is unknown), `move_failed` and `message_changed` (the mail is still in the Inbox; the second is the [open-window case](batch-retry.md#retrying-a-mail-that-was-written-but-never-moved)) or `category_failed` (the mail **was** moved and only the tag did not stick). The process exits `1`, with the full document on stdout, when any mail is not both moved and tagged, so a caller checking only the exit code cannot miss it.
+
+A dismissed mail has no copy on disk. Recovering one means moving it back from the archive folder by hand in Outlook.
+
 ## Identity: the Message-ID, not the EntryID
 
 Outlook rewrites a mail's `EntryID` when it is moved between folders, which is exactly what `apply` does to every mail it files. So the identity that ties the three verbs together is the **Internet Message-ID** (MAPI `PR_INTERNET_MESSAGE_ID`), stored without its angle brackets. The scanner records it for every `.msg` it indexes, which is what lets `plan` mark a mail as `already_archived` instead of offering to file it a second time. A mail carrying no Message-ID (rare — drafts, some system mail) is reported under `skipped` with `reason: "no_message_id"` and left alone, never guessed at.
@@ -80,6 +92,7 @@ Outlook rewrites a mail's `EntryID` when it is moved between folders, which is e
 | Exit | Meaning |
 |---|---|
 | `0` | The run completed and stdout carries its document. Individual mails may still have failed — each result has its own `error` with a `code`. One failing mail never aborts the run. |
+| `1` | `dismiss` only: the run completed and stdout carries its document, but at least one mail was not moved and tagged. Each result has its own `error`. |
 | `2` | The run could not start, or `renumber` could not finish its one folder. stdout carries `{"error": {"code", "message"}}` instead of results; the code is one of `config_missing` (no config, **or** one that could not be loaded — a malformed `config.yaml` lands here too, with the parser error in `message`), `bad_input`, `outlook_unavailable`, `com_unavailable`, `self_address_unresolved` (`draft` only), `draft_not_found` / `draft_not_editable` (`draft --update`, `read`, `send`), `draft_body_unmarked` (`draft --update` only), `approval_mismatch` / `recipient_unreadable` (`send` only; `approval_mismatch` names the parts under `error.differs`), `mailbox_registry_invalid` (`config/mailboxes.json` is present but malformed), `mailbox_not_in_outlook` (a registry mailbox has no store in the running Outlook — never answered with the default store), `mailbox_unknown` (a `--mailbox` name the registry does not know; checked before Outlook is touched), `account_not_in_outlook` (`draft`: the mailbox's store is there but no Outlook account sends from its address), `sending_account_mismatch` (`draft`: Outlook would not set the mailbox's account, so the draft was discarded unsaved; `send`: the stored draft does not send as the mailbox's account, so nothing was sent), `run_failed` (Outlook was reached but the walk then hit something unclassified — a locked or corrupt index database, a renumber or disk error — distinct from `com_unavailable`, which is reserved for pywin32 not being installed). A folder outside `archive.root_paths` is a `bad_input`, and so is a renumber that stopped part-way: no map is printed, because a map the disk may not match is worse than none. |
 | `3` | `sync` only: deferred, because this is a Windows session with no desktop (session 0). Outlook was not started and nothing was triggered; stdout carries the `desktop` block, `outcome: "deferred_no_desktop"` and an `error` with that code. See [Syncing mail](sync.md#syncing-mail). |
 

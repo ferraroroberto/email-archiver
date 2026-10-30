@@ -52,6 +52,9 @@ DATE_PREFIX_AUTO = "auto"
 # mails a batch run touched, and is what `revert` removes again.
 DEFAULT_ARCHIVE_FOLDER = "Archive"
 DEFAULT_ARCHIVED_CATEGORY = "Archived by task-os"
+# What `dismiss` stamps on a mail it moved without keeping a copy; distinct from
+# the filing category so Outlook shows which archive-folder mail has no file.
+DEFAULT_DISMISSED_CATEGORY = "Dismissed by task-os"
 
 _config: dict[str, Any] | None = None
 
@@ -171,6 +174,18 @@ def get_outlook_category(cfg: dict[str, Any]) -> str:
     value = outlook_cfg.get("category")
     return (
         str(value).strip() if value and str(value).strip() else DEFAULT_ARCHIVED_CATEGORY
+    )
+
+
+def get_outlook_dismiss_category(cfg: dict[str, Any]) -> str:
+    """Return the Outlook category batch ``dismiss`` stamps on a moved mail.
+
+    Reads ``outlook.dismiss_category``, falling back to
+    ``DEFAULT_DISMISSED_CATEGORY``.
+    """
+    value = (cfg.get("outlook") or {}).get("dismiss_category")
+    return (
+        str(value).strip() if value and str(value).strip() else DEFAULT_DISMISSED_CATEGORY
     )
 
 

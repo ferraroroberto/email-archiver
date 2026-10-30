@@ -1,5 +1,5 @@
 """
-Headless batch entry point – plan / apply / revert / renumber / draft / read / send /
+Headless batch entry point – plan / apply / revert / dismiss / renumber / draft / read / send /
 mailboxes / find / sync, over JSON.
 
 Meant to be spawned as a subprocess by another local app (task-os, life-os),
@@ -16,6 +16,7 @@ one the caller approved (`read` reports it).
     python main_batch.py plan --folder sent --ref <token> --since 2026-09-15T10:00 --candidates 0
     python main_batch.py apply --decisions decisions.json [--renumber] [--category <name>]
     python main_batch.py revert --items revert.json [--renumber] [--category <name>]
+    python main_batch.py dismiss --message-id <id> [--message-id <id> ...] [--category <name>]
     python main_batch.py renumber --folder "<a folder>" [--dry-run]
     python main_batch.py draft --spec spec.json
     python main_batch.py draft --update <entry_id> --spec spec.json
@@ -41,6 +42,8 @@ the registry) and its document lists each under `mailboxes`, with no single
 Exit codes:
     0  the run completed and stdout carries its document — individual mails may
        still have failed, each with its own `error` inside the document
+    1  (`dismiss` only) the run completed and stdout carries its document, but
+       at least one mail was not moved and tagged — each with its own `error`
     2  the run could not start: no config, unreadable input, a folder outside
        the archive roots, Outlook unreachable, (draft) no self address to
        blind-copy, (draft) a `reply_to` mail that cannot be found or replied to
@@ -80,7 +83,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from email_archiver import batch, draft, find, send, sync
+from email_archiver import batch, dismiss, draft, find, send, sync
 from email_archiver.config import (
     Mailbox,
     MailboxRegistry,
@@ -104,6 +107,7 @@ from email_archiver.text import normalize_message_id
 logger = logging.getLogger(__name__)
 
 EXIT_OK = 0
+EXIT_MAIL_FAILED = 1
 EXIT_CANNOT_START = 2
 # `sync` only: a session with no desktop, nothing started. The same code the
 # consumer apps already treat as "deferred", so they need no mapping.
@@ -363,6 +367,25 @@ def _add_apply_revert_parsers(sub: Any) -> list[argparse.ArgumentParser]:
     return [p_apply, p_revert]
 
 
+def _add_dismiss_parser(sub: Any) -> argparse.ArgumentParser:
+    p_dismiss = sub.add_parser(
+        "dismiss",
+        help="Move Inbox mail into the mailbox's archive folder WITHOUT saving "
+             "a .msg, and tag it. Nothing is kept on disk.",
+    )
+    p_dismiss.add_argument(
+        "--message-id", action="append", default=[], dest="message_ids",
+        help="The Internet Message-ID of an Inbox mail to move. Repeatable; "
+             "at least one is required.",
+    )
+    p_dismiss.add_argument(
+        "--category",
+        help="Tag moved mail with this Outlook category instead of "
+             "outlook.dismiss_category.",
+    )
+    return p_dismiss
+
+
 def _add_renumber_parser(sub: Any) -> None:
     p_renumber = sub.add_parser(
         "renumber",
@@ -484,6 +507,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     mailbox_verbs = [_add_plan_parser(sub)]
     mailbox_verbs += _add_apply_revert_parsers(sub)
+    mailbox_verbs.append(_add_dismiss_parser(sub))
     _add_renumber_parser(sub)
     mailbox_verbs += _add_draft_read_send_parsers(sub)
     sub.add_parser(
@@ -565,7 +589,12 @@ def _read_request(args: argparse.Namespace) -> _Request:
             if args.candidates < 0:
                 raise ValueError("--candidates must be 0 or more")
             request.filters = _plan_filters(args)
-        if verb in ("apply", "revert") and args.category is not None:
+        if verb == "dismiss":
+            if not args.message_ids:
+                raise ValueError("dismiss needs at least one --message-id")
+            if not all(normalize_message_id(raw) for raw in args.message_ids):
+                raise ValueError("--message-id must not be blank")
+        if verb in ("apply", "revert", "dismiss") and args.category is not None:
             request.category = args.category.strip()
             if not request.category:
                 raise ValueError("--category must not be blank")
@@ -678,6 +707,10 @@ def _dispatch(
             client, cfg, request.payload, renumber=args.renumber,
             category=request.category, mailbox=mailbox,
         )
+    if verb == "dismiss":
+        return dismiss.dismiss(
+            client, cfg, args.message_ids, category=request.category, mailbox=mailbox,
+        )
     if verb == "draft":
         self_address = draft.resolve_self_address(cfg, client, mailbox)
         if self_address is None:
@@ -772,6 +805,11 @@ def _run_in_outlook(
 
     document["mailbox"] = mailbox.alias
     _emit(document)
+    # `dismiss` keeps no file, so a mail it did not move is the whole outcome
+    # and the caller's exit-code check must see it; the document still carries
+    # each mail's own error.
+    if verb == "dismiss" and document["counts"]["failed"]:
+        return EXIT_MAIL_FAILED
     return EXIT_OK
 
 
