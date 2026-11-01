@@ -26,7 +26,7 @@ logging.getLogger("t").info("Archived email 003 \\u2192 Documentos/Comunicaci\\u
 
 def test_a_captured_stderr_gets_log_records_as_utf8(tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD, str(tmp_path / "a.log")],

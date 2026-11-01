@@ -1,7 +1,9 @@
 """``python -m email_archiver <subcommand>`` and the root ``main_*.py`` wrappers.
 
 A scheduled job and a spawning app call the root scripts by path, so each old
-path must still reach the same function as its subcommand. Nothing here opens
+path must still reach the same function as its subcommand; another app imports
+the package with only the repo root on the path, which the root
+``email_archiver.py`` shim hands to ``src/``. Nothing here opens
 a window, Outlook or a mailbox: the dispatcher is tested over stub ``main``s and
 the wrappers over ``--help``.
 """
@@ -99,3 +101,21 @@ def test_the_old_paths_and_the_module_entry_run_as_scripts(argv: list[str]) -> N
     )
     assert proc.returncode == 0, proc.stderr
     assert "usage:" in proc.stdout
+
+
+def test_the_repo_root_shim_hands_imports_to_the_src_package() -> None:
+    # Another local app probes the config this way, with only the repo root on the path.
+    probe = (
+        "import email_archiver, email_archiver.config as c\n"
+        "print(email_archiver.__file__)\n"
+        "print(c.PROJECT_ROOT)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], cwd=REPO_ROOT, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=60,
+        stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    package_file, project_root = proc.stdout.splitlines()[-2:]
+    assert Path(package_file) == REPO_ROOT / "src" / "email_archiver" / "__init__.py"
+    assert Path(project_root) == REPO_ROOT

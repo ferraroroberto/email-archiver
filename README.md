@@ -102,7 +102,7 @@ The `.bat` files use `pythonw` so no console window flashes on screen.
 & .\.venv\Scripts\python.exe -m email_archiver scan --no-ui
 ```
 
-The `main_*.py` scripts are thin wrappers over `python -m email_archiver <subcommand>`, kept at their paths for the launchers, the nightly job and the app that spawns `main_batch.py`.
+The `main_*.py` scripts are thin wrappers over `python -m email_archiver <subcommand>`, kept at their paths for the launchers, the nightly job and the app that spawns `main_batch.py`. The package lives in `src/email_archiver/`; the root `email_archiver.py` shim lets `python -m email_archiver` and `import email_archiver` work from the repo root.
 
 ## Verification
 

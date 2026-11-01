@@ -8,11 +8,9 @@ description = "Outlook → OneDrive archive with a SQLite index and headless bat
 tag         = ["→", "OneDrive"]
 
 # The root layout the structure ratchet checks (project-scaffolding docs/repo-layout.md).
-# extra_roots only adds: the package sits at the root instead of under src/, and logs/
-# is the log file's folder, kept in git by a .gitkeep so the file handler has a place
-# to open. docs/layout.md carries the same two reasons.
+# The package lives in src/email_archiver, the shape's home for domain code.
 shape       = "pipeline-cli"
-extra_roots = ["email_archiver", "logs"]
+extra_roots = ["logs"]  # the log file's folder: a tracked .gitkeep gives the file handler a place to open
 
 # Byte-for-byte copies from project-scaffolding; never edited here. /propagate-vendored re-vendors.
 [vendored]
@@ -98,15 +96,14 @@ baseline = ".dead-code-ratchet-baseline.json"
 # `ast` rules. The gate (scripts/verify-before-ship.ps1) runs scripts/conventions_ratchet.py
 # through scripts/conventions_ratchet_gate.py: a rule count above its entry in
 # .conventions-ratchet-baseline.json fails. Exit 3 (a file could not be parsed) fails as NOT
-# CONFIRMED. Rules: no-window (a Windows app), logging-not-print (the library code lives in
-# email_archiver/, not the default app/ or src/; cli/ entry points print by design),
-# no-drive-path (any repo). secret-compare and git-wrapper are off: the repo has neither
-# helper. Procedure + limits: project-scaffolding docs/conventions-ratchet.md.
+# CONFIRMED. Rules: no-window (a Windows app), logging-not-print (the default src/ scope,
+# which holds the package; cli/ entry points print by design), no-drive-path (any repo).
+# secret-compare and git-wrapper are off: the repo has neither helper. Procedure + limits:
+# project-scaffolding docs/conventions-ratchet.md.
 [conventions_ratchet]
-enabled     = true
-baseline    = ".conventions-ratchet-baseline.json"
-rules       = ["no-window", "logging-not-print", "no-drive-path"]
-print_paths = ["email_archiver/"]
+enabled  = true
+baseline = ".conventions-ratchet-baseline.json"
+rules    = ["no-window", "logging-not-print", "no-drive-path"]
 
 # [comment_ratchet] -- the scaffold's baseline-and-ratchet check of `#NNN` issue references in
 # product-code comments (a comment states the present-tense why; history lives in the issue

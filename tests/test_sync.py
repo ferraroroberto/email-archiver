@@ -402,20 +402,20 @@ def test_only_the_syncing_module_can_start_a_sync():
     needles = ("Send" + "AndReceive", "Sync" + "Objects")
     holders = sorted(
         str(path.relative_to(REPO_ROOT)).replace("\\", "/")
-        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "email_archiver").rglob("*.py")]
+        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "src" / "email_archiver").rglob("*.py")]
         if any(needle in path.read_text(encoding="utf-8") for needle in needles)
     )
-    assert holders == ["email_archiver/outlook/syncing.py"]
+    assert holders == ["src/email_archiver/outlook/syncing.py"]
 
 
 def test_start_sync_is_called_only_from_the_sync_module():
     needle = "." + "start_sync("
     holders = sorted(
         str(path.relative_to(REPO_ROOT)).replace("\\", "/")
-        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "email_archiver").rglob("*.py")]
+        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "src" / "email_archiver").rglob("*.py")]
         if needle in path.read_text(encoding="utf-8")
     )
-    assert holders == ["email_archiver/sync.py"]
+    assert holders == ["src/email_archiver/sync.py"]
 
 
 # ------------------------------------------------------------ desktop state ---

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parents[2] / "email_archiver"
+PACKAGE = Path(__file__).resolve().parents[2] / "src" / "email_archiver"
 
 # Every module that builds on the shared base. ``batch`` is the one verb module
 # they must not reach through.

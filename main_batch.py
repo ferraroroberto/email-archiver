@@ -8,8 +8,8 @@ JSON documents and exit codes are documented in `email_archiver.cli.batch`.
 import sys
 from pathlib import Path
 
-# Ensure project root is on the path regardless of cwd
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The package lives in src/; put it first on the path regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from email_archiver.cli.batch import main
 

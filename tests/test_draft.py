@@ -257,10 +257,10 @@ def test_no_draft_code_path_calls_send():
     # this test included.
     needle = "." + "Send("
     for relative in (
-        "email_archiver/draft.py",
-        "email_archiver/outlook/client.py",
-        "email_archiver/outlook/drafts.py",
-        "email_archiver/cli/batch.py",
+        "src/email_archiver/draft.py",
+        "src/email_archiver/outlook/client.py",
+        "src/email_archiver/outlook/drafts.py",
+        "src/email_archiver/cli/batch.py",
     ):
         assert needle not in (REPO_ROOT / relative).read_text(encoding="utf-8"), relative
 
