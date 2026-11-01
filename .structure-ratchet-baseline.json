@@ -1,6 +1,6 @@
 {
   "version": 1,
   "band": {"files": 1, "functions": 5},
-  "root_extras": ["email_archiver", "logs"],
+  "root_extras": ["logs"],
   "entries": []
 }

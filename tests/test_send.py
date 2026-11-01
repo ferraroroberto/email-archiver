@@ -498,10 +498,10 @@ def test_send_is_called_only_from_the_sending_module():
     needle = "." + "Send("
     holders = sorted(
         str(path.relative_to(REPO_ROOT)).replace("\\", "/")
-        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "email_archiver").rglob("*.py")]
+        for path in [*REPO_ROOT.glob("*.py"), *(REPO_ROOT / "src" / "email_archiver").rglob("*.py")]
         if needle in path.read_text(encoding="utf-8")
     )
-    assert holders == ["email_archiver/outlook/sending.py"]
+    assert holders == ["src/email_archiver/outlook/sending.py"]
 
 
 # ------------------------------------------------------ process contract ---

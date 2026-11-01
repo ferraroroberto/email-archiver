@@ -17,8 +17,8 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# Project root = the 'archiver/' directory that contains this package
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Project root = the repo checkout: this file is src/email_archiver/config.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 # Machine-local and gitignored: it holds personal addresses and this repo is
 # public. config/mailboxes.sample.json is the tracked template.

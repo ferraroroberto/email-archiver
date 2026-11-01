@@ -6,7 +6,7 @@ Where new code goes. The shape is `pipeline-cli` (see `shape` in `.fleet.toml`);
 
 | Folder | Holds |
 |---|---|
-| `email_archiver/` | The package: all logic. Declared in `extra_roots` — see below. |
+| `src/` | The `email_archiver` package: all logic. The shape's home for domain code. |
 | `tests/` | The pytest suite. It never sends mail or touches a mailbox. |
 | `scripts/` | The pre-ship gate and the vendored ratchets with their gate wrappers. |
 | `config/` | The config and mailbox-registry templates; the live copies are git-ignored. |
@@ -14,30 +14,31 @@ Where new code goes. The shape is `pipeline-cli` (see `shape` in `.fleet.toml`);
 | `logs/` | The log file's folder. Declared in `extra_roots` — see below. |
 | `docs/` | Durable reference, indexed in the README. |
 
-The root also holds the four `main_*.py` scripts and the `.bat` launchers. Those are files, not folders, so the layout check does not see them.
+The root also holds the four `main_*.py` scripts, the `email_archiver.py` shim and the `.bat` launchers. Those are files, not folders, so the layout check does not see them.
 
 ## The package
 
 | Path | Holds |
 |---|---|
-| `email_archiver/cli/` | Command-line entry points: `__init__.py` is the `python -m email_archiver <subcommand>` dispatcher; `archive`, `scan`, `launcher` and `batch` are the four tools it routes to. |
-| `email_archiver/ui/` | The Tkinter windows and the native folder picker. |
-| `email_archiver/outlook/` | Everything that touches Outlook over COM, kept out of the headless modules. |
-| `email_archiver/database/` | The SQLite schema and every SQL query. |
-| `email_archiver/scanner/` | The incremental `.msg` indexer. |
-| `email_archiver/archiver/` | Saving an email into the archive tree. |
-| `email_archiver/engine/` | The three-stage folder ranking. |
-| `email_archiver/*.py` | The headless batch verbs (`batch`, `dismiss`, `draft`, `find`, `send`, `renumber`) and the shared helpers (`config`, `paths`, `text`, `explorer`). |
+| `src/email_archiver/cli/` | Command-line entry points: `__init__.py` is the `python -m email_archiver <subcommand>` dispatcher; `archive`, `scan`, `launcher` and `batch` are the four tools it routes to. |
+| `src/email_archiver/ui/` | The Tkinter windows and the native folder picker. |
+| `src/email_archiver/outlook/` | Everything that touches Outlook over COM, kept out of the headless modules. |
+| `src/email_archiver/database/` | The SQLite schema and every SQL query. |
+| `src/email_archiver/scanner/` | The incremental `.msg` indexer. |
+| `src/email_archiver/archiver/` | Saving an email into the archive tree. |
+| `src/email_archiver/engine/` | The three-stage folder ranking. |
+| `src/email_archiver/*.py` | The headless batch verbs (`batch`, `dismiss`, `draft`, `find`, `send`, `renumber`) and the shared helpers (`config`, `paths`, `text`, `explorer`). |
 
 ## Entry points
 
-`python -m email_archiver {archive,scan,ui,batch}` is the one entry point. Each subcommand passes the rest of the command line to the tool that owns it, so that tool's parser, help and exit codes are unchanged. The root `main_archive.py`, `main_scan.py`, `main_ui.py` and `main_batch.py` stay as thin wrappers over the same functions, because the launchers, the nightly job and the app that spawns `main_batch.py` call them by path. A new tool is a module in `email_archiver/cli/` and a row in `SUBCOMMANDS`; logic does not go in a root script.
+`python -m email_archiver {archive,scan,ui,batch}` is the one entry point. Each subcommand passes the rest of the command line to the tool that owns it, so that tool's parser, help and exit codes are unchanged. The root `main_archive.py`, `main_scan.py`, `main_ui.py` and `main_batch.py` stay as thin wrappers over the same functions, because the launchers, the nightly job and the app that spawns `main_batch.py` call them by path. Each wrapper puts `src/` first on `sys.path` itself. A new tool is a module in `src/email_archiver/cli/` and a row in `SUBCOMMANDS`; logic does not go in a root script.
+
+The root `email_archiver.py` is a compatibility shim for callers that only have the repo root on the path: another local app imports `email_archiver.config` with `python -c` from the repo root, and `python -m email_archiver` from the root goes through it too. It puts `src/` first on the path and hands the import to the real package, so every importer gets the same module. New code never imports through it; the test suite puts `src/` on the path in `tests/conftest.py`, and `tests/test_cli.py` pins the shim.
 
 ## Declared exceptions
 
-- `email_archiver/` — the `pipeline-cli` shape expects the package under `src/`. It sits at the root, and every launcher, the nightly job and the tests import it by that name, so it is declared in `extra_roots` rather than moved.
 - `logs/` — the log file handler opens its file there, so the folder has to exist on a fresh clone. A tracked `.gitkeep` guarantees that, which makes it a tracked root folder; it is declared in `extra_roots` for that reason.
 
 ## Baselined offenders
 
-None: `.structure-ratchet-baseline.json` is empty, so every file, function and directory sits under its limit and a new offender fails the gate. Split a growing module along its seam instead: `email_archiver/batch.py` keeps the verbs, `batch_move.py` the move and its error, `batch_common.py` the document envelope; the batch and draft tests share `tests/batch/batch_support.py` and `tests/draft_support.py`.
+None: `.structure-ratchet-baseline.json` is empty, so every file, function and directory sits under its limit and a new offender fails the gate. Split a growing module along its seam instead: `src/email_archiver/batch.py` keeps the verbs, `batch_move.py` the move and its error, `batch_common.py` the document envelope; the batch and draft tests share `tests/batch/batch_support.py` and `tests/draft_support.py`.

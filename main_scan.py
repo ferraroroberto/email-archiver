@@ -8,8 +8,8 @@ codes, is `email_archiver.cli.scan`.
 import sys
 from pathlib import Path
 
-# Ensure project root is on the path regardless of cwd
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The package lives in src/; put it first on the path regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from email_archiver.cli.scan import main
 

@@ -6,11 +6,17 @@ or more test modules before issue #63 hoisted them here.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from email_archiver import config
+# The suite imports the package from src/ itself; only test_cli goes through the
+# repo-root email_archiver.py shim, so a broken shim fails that test alone.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from email_archiver import config  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
