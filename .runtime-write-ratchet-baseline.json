@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "entries": [
+    {"key": "src/email_archiver/archiver/archiver.py", "counts": {"unresolved": 1}},
+    {"key": "src/email_archiver/config.py", "counts": {"unresolved": 3}},
+    {"key": "src/email_archiver/database/models.py", "counts": {"unresolved": 2}}
+  ]
+}

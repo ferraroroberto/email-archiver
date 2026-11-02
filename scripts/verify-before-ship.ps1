@@ -5,7 +5,10 @@
 
 .DESCRIPTION
     Runs, fail-fast:
-      1. pytest        - the unit suite (tests/); it never sends mail or touches a mailbox
+      1. pytest        - the unit suite (tests/); it never sends mail or touches a mailbox.
+                         Bracketed by the runtime write probe (scripts/runtime_write_ratchet.py
+                         --snapshot before, --probe after): any untracked or ignored file the
+                         tests left under a code folder fails.
       2. static ratchet - scripts/static_ratchet.py through scripts/static_ratchet_gate.py:
                          fails only on a duplicate block (jscpd via npx), an unused
                          import/variable (ruff F401,F841) or a ruff bug (B) / security
@@ -56,6 +59,11 @@
                          `#NNN` issue references inside comments rises above its entry in
                          .comment-ratchet-baseline.json. A file it could not scan (exit 3)
                          fails as NOT CONFIRMED. Not path-routed: a count needs the whole tree.
+     10. runtime write ratchet - scripts/runtime_write_ratchet.py, called directly (any
+                         non-zero exit fails the stage): fails on a Python write target
+                         resolving under a code folder beyond
+                         .runtime-write-ratchet-baseline.json; a new target it cannot
+                         resolve is exit 3, NOT CONFIRMED. Not path-routed.
 
     Anchors to the repo root, so run it from anywhere:  & .\scripts\verify-before-ship.ps1
 #>
@@ -86,7 +94,12 @@ function Invoke-Stage {
     Write-Host "[PASS] $Name" -ForegroundColor Green
 }
 
+# Runtime write probe, first half: what already sits untracked or ignored under
+# the code folders, so the probe after the tests names only what they wrote.
+$runtimeSnapshot = Join-Path ([IO.Path]::GetTempPath()) "runtime-write-snapshot-$PID.json"
+Invoke-Stage "runtime write probe (snapshot)" { & $py "scripts/runtime_write_ratchet.py" --snapshot $runtimeSnapshot }
 Invoke-Stage "pytest"         { & $py -m pytest tests/ }
+Invoke-Stage "runtime write probe" { & $py "scripts/runtime_write_ratchet.py" --probe $runtimeSnapshot }
 Invoke-Stage "static ratchet" { & $py -m scripts.static_ratchet_gate }
 Invoke-Stage "docs ratchet"   { & $py -m scripts.docs_ratchet_gate }
 Invoke-Stage "structure ratchet" { & $py -m scripts.structure_ratchet_gate }
@@ -95,6 +108,7 @@ Invoke-Stage "doc refs ratchet" { & $py -m scripts.doc_refs_ratchet_gate }
 Invoke-Stage "dead code ratchet" { & $py -m scripts.dead_code_ratchet_gate }
 Invoke-Stage "conventions ratchet" { & $py -m scripts.conventions_ratchet_gate }
 Invoke-Stage "comment ratchet" { & $py -m scripts.comment_ratchet_gate }
+Invoke-Stage "runtime write ratchet" { & $py "scripts/runtime_write_ratchet.py" }
 
 Write-Host ""
 Write-Host "[PASS] verify-before-ship" -ForegroundColor Green
