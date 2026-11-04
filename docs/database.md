@@ -37,6 +37,8 @@ The FTS5 index is automatically kept in sync with the `emails` table via `AFTER 
 
 WAL journal mode is enabled so the archive command can read the DB while a scan is running in another process without blocking.
 
+A writer that finds the database locked by another process waits up to 30 s inside SQLite, then retries each upsert and commit five more times with a 1, 2, 4, 8, 16 s backoff, logging every retry at info level. Overlapping scans therefore queue; only a lock held past all of that raises.
+
 ## The follow-up flag (`flag_status`)
 
 `flag_status` records Outlook's follow-up flag, read from the archived `.msg` as MAPI `PidTagFlagStatus` (`0x1090`): **2** = flagged for follow-up, **1** = flagged then completed, **0** = read, and not flagged. It exists so other tools can turn a flagged mail into a task — task-os polls it read-only and raises one Inbox task per flagged message.
