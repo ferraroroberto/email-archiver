@@ -347,12 +347,12 @@ class FolderScanner:
 
             batch_counter += 1
             if batch_counter >= self._batch_size:
-                conn.commit()
+                repo.commit()
                 batch_counter = 0
                 logger.debug("Committed batch at %d files.", idx + 1)
 
         # Final commit
-        conn.commit()
+        repo.commit()
 
         # Remove DB entries for files that no longer exist on disk.
         # Only run the purge when the scan was not aborted mid-way and every
@@ -368,7 +368,7 @@ class FolderScanner:
             stats.deleted = repo.delete_missing_emails(all_msg_paths)
             if stats.deleted:
                 logger.info("Purged %d deleted email(s) from index.", stats.deleted)
-            conn.commit()
+            repo.commit()
 
         stats.duration_seconds = (datetime.now() - start).total_seconds()
         logger.info(

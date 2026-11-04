@@ -137,13 +137,22 @@ def _add_missing_columns(conn: sqlite3.Connection) -> list[str]:
     return added
 
 
-def get_connection(db_path: str | Path) -> sqlite3.Connection:
+# How long SQLite itself waits on a competing writer before raising "database
+# is locked". The stdlib default is 5 s, too short when two scans overlap.
+BUSY_TIMEOUT_S = 30.0
+
+
+def get_connection(
+    db_path: str | Path, timeout: float = BUSY_TIMEOUT_S
+) -> sqlite3.Connection:
     """
     Open a SQLite connection with sensible defaults.
     Returns a connection with row_factory=sqlite3.Row so columns are
-    accessible by name.
+    accessible by name. ``timeout`` is the busy wait in seconds.
     """
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(
+        str(db_path), timeout=timeout, check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
     # Increase cache to speed up FTS5 queries on large datasets
     conn.execute("PRAGMA cache_size = -32768")  # 32 MB page cache

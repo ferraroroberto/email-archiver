@@ -10,8 +10,11 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Callable, Sequence, TypeVar
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,13 @@ logger = logging.getLogger(__name__)
 #   for, up to the folders the FTS rows touched.
 FTS_ROW_CAP = 1000
 FOLDER_POOL_CAP = 20
+
+# A write that still meets "database is locked" after SQLite's own busy wait
+# (``models.BUSY_TIMEOUT_S``) is retried this many more times, sleeping
+# 1, 2, 4, ... seconds between tries, so an overlapping scan queues rather than
+# failing the whole command.
+LOCK_RETRIES = 5
+LOCK_RETRY_BASE_S = 1.0
 
 
 # ----------------------------------------------------------------- types ----
@@ -89,13 +99,37 @@ class EmailRepository:
     pool). The scanner runs in a background thread and creates its own repo.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._conn = conn
+        self._sleep = sleep
+
+    def _retry_locked(self, op: Callable[[], _T], what: str) -> _T:
+        """Run a write, retrying with backoff while another writer holds the lock."""
+        for attempt in range(LOCK_RETRIES + 1):
+            try:
+                return op()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or attempt == LOCK_RETRIES:
+                    raise
+                delay = LOCK_RETRY_BASE_S * 2 ** attempt
+                logger.info(
+                    "⚠️ Index database locked during %s; retry %d/%d in %.0fs",
+                    what, attempt + 1, LOCK_RETRIES, delay,
+                )
+                self._sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     # -------------------------------------------------- write operations ---
 
     def upsert_email(self, rec: EmailRecord) -> None:
         """Insert or replace an email record. Triggers keep FTS in sync."""
+        self._retry_locked(lambda: self._execute_upsert_email(rec), "upsert_email")
+
+    def _execute_upsert_email(self, rec: EmailRecord) -> None:
         self._conn.execute(
             """
             INSERT INTO emails
@@ -124,14 +158,17 @@ class EmailRepository:
 
     def upsert_folder(self, folder_path: str) -> None:
         """Upsert folder record's last-seen timestamp."""
-        self._conn.execute(
-            """
-            INSERT INTO folders (folder_path, last_updated)
-            VALUES (?, datetime('now'))
-            ON CONFLICT(folder_path) DO UPDATE SET
-                last_updated = datetime('now')
-            """,
-            (folder_path,),
+        self._retry_locked(
+            lambda: self._conn.execute(
+                """
+                INSERT INTO folders (folder_path, last_updated)
+                VALUES (?, datetime('now'))
+                ON CONFLICT(folder_path) DO UPDATE SET
+                    last_updated = datetime('now')
+                """,
+                (folder_path,),
+            ),
+            "upsert_folder",
         )
 
     def delete_missing_emails(self, known_paths: Sequence[str]) -> int:
@@ -189,7 +226,7 @@ class EmailRepository:
         which must land a folder's renames and its index rows together — does
         not have to be handed the raw connection as well.
         """
-        self._conn.commit()
+        self._retry_locked(self._conn.commit, "commit")
 
     def delete_by_path(self, file_path: str) -> int:
         """Remove the index row for one file, if any. Returns rows deleted.
