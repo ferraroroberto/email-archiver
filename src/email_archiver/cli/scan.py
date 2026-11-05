@@ -5,11 +5,16 @@ Can also be run from the command line for headless operation:
     python main_scan.py           # opens Tkinter progress window
     python main_scan.py --no-ui   # headless, prints progress to stdout
 
+When ``database.path`` is folder-explorer's own email index, the headless
+scan runs folder-explorer's ``email index --fresh`` instead, so that index keeps
+its one writer (``email_archiver.folder_explorer``).
+
 Exit codes (headless):
     0  scan complete (per-file read errors are counted, not a failure)
-    1  unexpected crash (uncaught exception)
+    1  unexpected crash (uncaught exception), or folder-explorer's index run failed
     2  config missing/unloadable, or no archive roots configured
     3  a configured archive root is missing; its index rows were left untouched
+    4  busy: another folder-explorer email run held its lock past the wait
 """
 import argparse
 import logging
@@ -23,8 +28,10 @@ from email_archiver.config import get_archive_roots, load_config, setup_logging
 logger = logging.getLogger(__name__)
 
 EXIT_OK = 0
+EXIT_FAILED = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_ROOT_MISSING = 3
+EXIT_BUSY = 4
 
 _PROGRESS_EVERY = 500
 
@@ -55,6 +62,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 def _run_headless(cfg: dict) -> int:
+    from email_archiver import folder_explorer
+
+    checkout = folder_explorer.owner(cfg)
+    if checkout is not None:
+        logger.info("The email index belongs to folder-explorer; running its email index")
+        code = folder_explorer.index(checkout)
+        if code == folder_explorer.FE_BUSY:
+            logger.error("folder-explorer's email index is busy with another run; nothing indexed")
+            return EXIT_BUSY
+        return EXIT_OK if code == folder_explorer.FE_OK else EXIT_FAILED
+    return _scan_here(cfg)
+
+
+def _scan_here(cfg: dict) -> int:
     from email_archiver.scanner.scanner import FolderScanner
 
     try:
