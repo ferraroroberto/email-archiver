@@ -1,5 +1,7 @@
 # Email Archiver
 
+> **Retired.** [folder-explorer](https://github.com/ferraroroberto/folder-explorer) replaces this app: its scan keeps the email index, its Search tab searches it, its Archive sheet and Outlook macro file the open mail, and `python -m app.cli email batch <verb>` there is this repo's `main_batch.py` with the same JSON contract. task-os and life-os drive folder-explorer now. This repo gets no new features. `main_scan.py`'s hand-over to folder-explorer (below) and life-os's `LIFE_OS_EMAIL_ARCHIVER_REPO` fallback stay for one release; after that the repo is archived.
+
 A modular Python application that indexes and archives Outlook emails into a structured OneDrive folder system. A SQLite full-text index of the archive drives an instant-startup suggestion dialog designed for Stream Deck buttons, and a headless JSON batch CLI lets another local app drive the same archiver as a subprocess.
 
 Two commands, each launchable from a Stream Deck button or the command line:
