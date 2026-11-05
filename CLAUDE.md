@@ -4,6 +4,7 @@ Canonical instructions for AI coding agents working in this repository. Claude C
 
 ## This repository
 Modular Python app that indexes and archives Outlook emails into a structured OneDrive folder system.
+Retired: folder-explorer replaces it. Fix only what the one-release fallback (`main_scan.py`'s hand-over, life-os's old repo variable) needs; new work goes to folder-explorer.
 See `README.md` for setup and usage; layout and per-feature reference are indexed there and live in `docs/`.
 
 ## Internal architecture
