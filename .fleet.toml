@@ -23,7 +23,8 @@ box_lock_gate = { src = "scripts/box_lock_gate.ps1", sha = "98cdb1b7727d12a5c233
 instruction_ratchet = { src = "scripts/instruction_ratchet.py", sha = "5505185c5f4b10eea5ab268e7b6676c6c54340c4", dest = "scripts/instruction_ratchet.py" }
 doc_refs_ratchet = { src = "scripts/doc_refs_ratchet.py", sha = "5505185c5f4b10eea5ab268e7b6676c6c54340c4", dest = "scripts/doc_refs_ratchet.py" }
 dead_code_ratchet = { src = "scripts/dead_code_ratchet.py", sha = "5505185c5f4b10eea5ab268e7b6676c6c54340c4", dest = "scripts/dead_code_ratchet.py" }
-conventions_ratchet = { src = "scripts/conventions_ratchet.py", sha = "41ca8abd5a2755a06bd8a620a72967211161d58e", dest = "scripts/conventions_ratchet.py" }
+conventions_ratchet = { src = "scripts/conventions_ratchet.py", sha = "bfc660da641a05baf818d6ff7302bdd91b7d9a78", dest = "scripts/conventions_ratchet.py" }
+conventions_readers = { src = "scripts/conventions_readers.py", sha = "bfc660da641a05baf818d6ff7302bdd91b7d9a78", dest = "scripts/conventions_readers.py" }
 runtime_write_ratchet = { src = "scripts/runtime_write_ratchet.py", sha = "5505185c5f4b10eea5ab268e7b6676c6c54340c4", dest = "scripts/runtime_write_ratchet.py" }
 runtime_write_resolve = { src = "scripts/runtime_write_resolve.py", sha = "5505185c5f4b10eea5ab268e7b6676c6c54340c4", dest = "scripts/runtime_write_resolve.py" }
 comment_ratchet = { src = "scripts/comment_ratchet.py", sha = "41ca8abd5a2755a06bd8a620a72967211161d58e", dest = "scripts/comment_ratchet.py" }
@@ -106,6 +107,12 @@ baseline = ".dead-code-ratchet-baseline.json"
 enabled  = true
 baseline = ".conventions-ratchet-baseline.json"
 rules    = ["no-window", "logging-not-print", "no-drive-path"]
+
+# A raw connect skips the busy timeout, the row factory and the page-cache pragma.
+[[conventions_ratchet.must_use]]
+call   = "sqlite3.connect"
+helper = ["src/email_archiver/database/models.py"]
+why    = "src/email_archiver/database/models.py get_connection is the one SQLite connection helper (busy timeout, page cache)"
 
 # [runtime_write_ratchet] -- scripts/runtime_write_ratchet.py fails when a tracked
 # Python file gains a write target (open for writing, Path.write_*, mkdir, a log
