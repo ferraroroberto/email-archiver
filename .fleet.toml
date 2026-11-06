@@ -84,6 +84,10 @@ baseline = ".instruction-ratchet-baseline.json"
 [doc_refs_ratchet]
 enabled  = true
 baseline = ".doc-refs-ratchet-baseline.json"
+# Names of removed symbols: a doc that names one sends the next reader to code that is gone.
+retired = [
+  { term = "get_next_sequence_number", why = "wrapper removed; use _scan_folder(...).next_sequence" },
+]
 
 # [dead_code_ratchet] -- the scaffold's baseline-and-ratchet check for dead Python. The gate
 # (scripts/verify-before-ship.ps1) runs scripts/dead_code_ratchet.py through
