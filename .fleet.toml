@@ -4,7 +4,7 @@
 # description, exposed services). Schema: fleet-config/architecture/README.md.
 layer       = "working-pipe"
 icon        = "📧"
-description = "Retired: replaced by folder-explorer. Outlook → OneDrive archive with a SQLite index and headless batch CLI, kept one release as a fallback."
+description = "Retired: replaced by folder-explorer, kept one release as a fallback."
 tag         = ["→", "OneDrive"]
 
 # The root layout the structure ratchet checks (project-scaffolding docs/repo-layout.md).
