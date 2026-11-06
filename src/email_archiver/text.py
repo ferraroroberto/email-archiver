@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import re
 
-# Matches common reply/forward prefixes at the start of a subject line.
-RE_REPLY_PREFIX = re.compile(r"^\s*(re|rv|fwd?)\s*:?\s*", re.IGNORECASE)
+# Matches one or more chained reply/forward prefixes (``RE: RV: Fwd:``) at the
+# start of a subject line. The colon (ASCII or full-width) is mandatory: without
+# it the pattern would eat the first letters of ordinary words such as
+# "Recibo" or "Reunión".
+RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|rv|fwd?)\s*[:：]\s*)+", re.IGNORECASE)
 
 # Matches a trailing `.msg` filename extension.
 _RE_MSG_SUFFIX = re.compile(r"\s*\.msg$", re.IGNORECASE)
@@ -44,7 +47,8 @@ def normalize_message_id(raw: str | None) -> str:
 def clean_subject(raw: str | None, *, strip_msg_suffix: bool = False) -> str:
     """Return a normalised subject string.
 
-    Strips leading Re:/Rv:/Fwd: prefixes (case-insensitive).  When
+    Strips leading, possibly chained, Re:/Rv:/Fw:/Fwd: prefixes
+    (case-insensitive, ASCII or full-width colon).  When
     *strip_msg_suffix* is ``True`` also removes a trailing ``.msg``
     extension — useful when the subject was derived from a filename.
 
