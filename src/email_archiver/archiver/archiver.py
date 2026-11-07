@@ -400,6 +400,7 @@ class EmailArchiver:
         dest = Path(folder_path)
         if not dest.exists():
             logger.info("Creating destination folder: %s", dest)
+            # runtime-write-exempt: the destination is the caller's mail folder under the user's archive root, never a path in this checkout
             dest.mkdir(parents=True, exist_ok=True)
 
         # One listing pass covers both the next sequence number and (when the
