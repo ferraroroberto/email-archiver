@@ -21,7 +21,6 @@ from typing import Any
 
 from email_archiver.outlook import process
 from email_archiver.outlook.mapi import (
-    AccountNotInOutlookError,
     DASL_IN_REPLY_TO_ID,
     DASL_INTERNET_MESSAGE_ID,
     DASL_X_ARCHIVE_REF,
@@ -34,6 +33,7 @@ from email_archiver.outlook.mapi import (
     OL_MAIL_ITEM,
     OL_SAVE,
     OL_TO,
+    AccountNotInOutlookError,
     OutlookUnavailableError,
     insert_body_html,
     mark_body_html,

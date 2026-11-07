@@ -20,7 +20,6 @@ from email_archiver.outlook.mapi import (
     without_category,
 )
 
-
 # --------------------------------------------------------------- fake COM ---
 
 class _FakePropertyAccessor:

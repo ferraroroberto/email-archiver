@@ -1,29 +1,5 @@
 {
   "version": 1,
   "tools": {"jscpd": "5.4.0", "ruff": "0.17.1"},
-  "entries": [
-    {"key": "order:I001:scripts/docs_ratchet_gate.py:from __future__ import annotations", "files": ["scripts/docs_ratchet_gate.py"]},
-    {"key": "order:I001:src/email_archiver/batch.py:from __future__ import annotations", "files": ["src/email_archiver/batch.py"]},
-    {"key": "order:I001:src/email_archiver/cli/batch.py:from __future__ import annotations", "files": ["src/email_archiver/cli/batch.py"]},
-    {"key": "order:I001:src/email_archiver/dismiss.py:from __future__ import annotations", "files": ["src/email_archiver/dismiss.py"]},
-    {"key": "order:I001:src/email_archiver/outlook/drafts.py:from __future__ import annotations", "files": ["src/email_archiver/outlook/drafts.py"]},
-    {"key": "order:I001:src/email_archiver/ui/app.py:from __future__ import annotations", "files": ["src/email_archiver/ui/app.py"]},
-    {"key": "order:I001:tests/batch/batch_support.py:from __future__ import annotations", "files": ["tests/batch/batch_support.py"]},
-    {"key": "order:I001:tests/batch/test_batch.py:from __future__ import annotations", "files": ["tests/batch/test_batch.py"]},
-    {"key": "order:I001:tests/batch/test_batch_dismiss.py:from __future__ import annotations", "files": ["tests/batch/test_batch_dismiss.py"]},
-    {"key": "order:I001:tests/batch/test_batch_move.py:from __future__ import annotations", "files": ["tests/batch/test_batch_move.py"]},
-    {"key": "order:I001:tests/batch/test_batch_renumber.py:from __future__ import annotations", "files": ["tests/batch/test_batch_renumber.py"]},
-    {"key": "order:I001:tests/batch/test_batch_revert.py:from __future__ import annotations", "files": ["tests/batch/test_batch_revert.py"]},
-    {"key": "order:I001:tests/batch/test_batch_sent.py:from __future__ import annotations", "files": ["tests/batch/test_batch_sent.py"]},
-    {"key": "order:I001:tests/batch/test_batch_targeted.py:from __future__ import annotations", "files": ["tests/batch/test_batch_targeted.py"]},
-    {"key": "order:I001:tests/draft_support.py:from __future__ import annotations", "files": ["tests/draft_support.py"]},
-    {"key": "order:I001:tests/test_archiver_attachment_dedupe.py:from __future__ import annotations", "files": ["tests/test_archiver_attachment_dedupe.py"]},
-    {"key": "order:I001:tests/test_archiver_date_prefix_toggle.py:from __future__ import annotations", "files": ["tests/test_archiver_date_prefix_toggle.py"]},
-    {"key": "order:I001:tests/test_draft.py:from __future__ import annotations", "files": ["tests/test_draft.py"]},
-    {"key": "order:I001:tests/test_draft_update_reply.py:from __future__ import annotations", "files": ["tests/test_draft_update_reply.py"]},
-    {"key": "order:I001:tests/test_mailboxes.py:from __future__ import annotations", "files": ["tests/test_mailboxes.py"]},
-    {"key": "order:I001:tests/test_renumber.py:from __future__ import annotations", "files": ["tests/test_renumber.py"]},
-    {"key": "order:I001:tests/test_send.py:from __future__ import annotations", "files": ["tests/test_send.py"]},
-    {"key": "order:I001:tests/test_view_away_from_inbox.py:from __future__ import annotations", "files": ["tests/test_view_away_from_inbox.py"]}
-  ]
+  "entries": []
 }

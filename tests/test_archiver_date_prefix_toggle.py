@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 
-from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
+from email_archiver.archiver.archiver import (
+    EmailArchiver,
+    resolve_date_prefix_for_folder,
+)
 from email_archiver.config import get_date_prefix_enabled, get_date_prefix_mode
 
 from .conftest import _FakeAttachments, _FakeMailItem

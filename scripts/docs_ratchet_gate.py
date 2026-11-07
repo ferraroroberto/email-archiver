@@ -21,7 +21,11 @@ import sys
 from pathlib import Path
 
 from scripts.static_ratchet_gate import (
-    EXIT_CONFIG, EXIT_NEW, EXIT_NOT_CONFIRMED, EXIT_PASS, run_stage,
+    EXIT_CONFIG,
+    EXIT_NEW,
+    EXIT_NOT_CONFIRMED,
+    EXIT_PASS,
+    run_stage,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

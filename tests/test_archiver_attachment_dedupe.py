@@ -21,8 +21,8 @@ import threading
 
 from email_archiver.archiver.archiver import (
     _MAX_DEDUPE_ATTEMPTS,
-    _fit_filename_to_path,
     EmailArchiver,
+    _fit_filename_to_path,
 )
 
 from .conftest import _FakeMailItem
