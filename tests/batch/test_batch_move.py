@@ -4,28 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from email_archiver import batch
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
 from email_archiver.outlook.mapi import (
     is_message_changed_error,
 )
-from tests.batch.batch_support import (
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     FAKE_STORE_ID,
     FakeOutlookClient,
     HeldByReferenceClient,
     _FakeComError,
     _mail,
     _message_changed_error,
-    _stuck_move,
-)
-from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     _no_retry_pauses,
+    _stuck_move,
     archive_root,
     cfg,
 )
-
 
 # ----------------------------------------------------- selection hold (#111) ---
 

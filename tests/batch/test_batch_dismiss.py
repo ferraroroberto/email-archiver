@@ -11,8 +11,9 @@ import pytest
 
 from email_archiver import dismiss
 from email_archiver.config import DEFAULT_ARCHIVED_CATEGORY, DEFAULT_DISMISSED_CATEGORY
-from tests.batch.batch_support import FakeOutlookClient, _mail
 from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
+    FakeOutlookClient,
+    _mail,
     _no_retry_pauses,
     archive_root,
     cfg,

@@ -95,7 +95,11 @@ from email_archiver.config import (
 )
 from email_archiver.outlook import process
 from email_archiver.outlook.client import OutlookClient
-from email_archiver.outlook.drafts import DraftAccountError, DraftUpdateError, ReplySourceError
+from email_archiver.outlook.drafts import (
+    DraftAccountError,
+    DraftUpdateError,
+    ReplySourceError,
+)
 from email_archiver.outlook.mapi import (
     AccountNotInOutlookError,
     MailboxNotInOutlookError,

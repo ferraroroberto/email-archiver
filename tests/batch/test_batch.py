@@ -29,20 +29,17 @@ from email_archiver import batch, batch_common
 from email_archiver.archiver import archiver as archiver_module
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
-from tests.batch.batch_support import (
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     FAKE_STORE_ID,
     FakeOutlookClient,
     _FakeAttachment,
     _mail,
+    _no_retry_pauses,
     _seed_index,
     _stuck_move,
-)
-from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
-    _no_retry_pauses,
     archive_root,
     cfg,
 )
-
 
 # ------------------------------------------------------------------- plan ---
 

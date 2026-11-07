@@ -24,7 +24,6 @@ from email_archiver.paths import REFUSED_OUTSIDE_ROOTS
 from email_archiver.renumber import renumber_folder
 from email_archiver.scanner.scanner import MsgFacts
 
-
 # -------------------------------------------------------------- fixtures ----
 
 @pytest.fixture

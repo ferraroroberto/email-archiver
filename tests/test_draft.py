@@ -20,8 +20,8 @@ import types
 
 import pytest
 
-from email_archiver.cli import batch as main_batch
 from email_archiver import draft
+from email_archiver.cli import batch as main_batch
 from email_archiver.outlook import mapi, process
 from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.drafts import (
@@ -32,19 +32,16 @@ from email_archiver.outlook.mapi import (
     insert_body_html,
     mark_body_html,
 )
-from tests.draft_support import (
-    FakeDraftClient,
+from tests.draft_support import (  # noqa: F401 - fixtures are used by name
     REPO_ROOT,
     SELF,
+    FakeDraftClient,
     _FakeApplication,
     _FakeComMail,
     _spec,
-)
-from tests.draft_support import (  # noqa: F401 - fixtures are used by name
-    batch_process,
     attachment,
+    batch_process,
 )
-
 
 # ------------------------------------------------------------------- spec ---
 

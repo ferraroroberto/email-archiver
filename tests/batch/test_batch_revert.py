@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from email_archiver import batch, batch_common
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRecord, EmailRepository
@@ -12,18 +11,15 @@ from email_archiver.outlook.mapi import (
     with_category,
     without_category,
 )
-from tests.batch.batch_support import (
+from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     FakeOutlookClient,
     _FakeAttachment,
     _index_archived_file,
     _mail,
-)
-from tests.batch.batch_support import (  # noqa: F401 - fixtures are used by name
     _no_retry_pauses,
     archive_root,
     cfg,
 )
-
 
 # ----------------------------------------------------------------- revert ---
 

@@ -58,7 +58,39 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
+from email_archiver.archiver.archiver import (
+    EmailArchiver,
+    resolve_date_prefix_for_folder,
+)
+from email_archiver.batch_common import (
+    ERROR_CATEGORY_FAILED,
+    ERROR_NOT_IN_INBOX,
+    envelope,
+    header,
+    renumber_folders,
+    unique_folders,
+)
+from email_archiver.batch_move import (
+    ERROR_MESSAGE_CHANGED as ERROR_MESSAGE_CHANGED,
+)
+from email_archiver.batch_move import (
+    ERROR_MOVE_FAILED,
+    MOVE_VIA_KEPT_IN_SENT,
+    move_failure_error,
+    move_out_of_inbox,
+)
+from email_archiver.batch_move import (
+    MOVE_VIA_FOLDER_SWITCH as MOVE_VIA_FOLDER_SWITCH,
+)
+from email_archiver.batch_move import (
+    MOVE_VIA_ORIGINAL as MOVE_VIA_ORIGINAL,
+)
+from email_archiver.batch_move import (
+    MOVE_VIA_REFETCHED as MOVE_VIA_REFETCHED,
+)
+from email_archiver.batch_move import (
+    MOVE_VIA_RELEASED_RETRY as MOVE_VIA_RELEASED_RETRY,
+)
 from email_archiver.config import (
     DATE_PREFIX_AUTO,
     Mailbox,
@@ -71,30 +103,17 @@ from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
 from email_archiver.mail_filter import mail_matches
 from email_archiver.outlook.client import EmailData
-from email_archiver.batch_common import (
-    ERROR_CATEGORY_FAILED,
-    ERROR_NOT_IN_INBOX,
-    envelope,
-    header,
-    renumber_folders,
-    unique_folders,
-)
-from email_archiver.batch_move import (
-    ERROR_MESSAGE_CHANGED as ERROR_MESSAGE_CHANGED,
-    ERROR_MOVE_FAILED,
-    MOVE_VIA_FOLDER_SWITCH as MOVE_VIA_FOLDER_SWITCH,
-    MOVE_VIA_KEPT_IN_SENT,
-    MOVE_VIA_ORIGINAL as MOVE_VIA_ORIGINAL,
-    MOVE_VIA_REFETCHED as MOVE_VIA_REFETCHED,
-    MOVE_VIA_RELEASED_RETRY as MOVE_VIA_RELEASED_RETRY,
-    move_failure_error,
-    move_out_of_inbox,
-)
 from email_archiver.outlook.mapi import MailboxNotInOutlookError
 from email_archiver.paths import (
     REFUSED_OUTSIDE_ROOTS as REFUSED_OUTSIDE_ROOTS,
+)
+from email_archiver.paths import (
     REFUSED_UNRESOLVABLE as REFUSED_UNRESOLVABLE,
+)
+from email_archiver.paths import (
     archive_roots as _archive_roots,
+)
+from email_archiver.paths import (
     resolve_under_roots as _resolve_under_roots,
 )
 from email_archiver.renumber import RenumberResult, renumber_folder

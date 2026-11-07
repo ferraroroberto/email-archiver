@@ -18,7 +18,11 @@ import pytest
 from email_archiver.outlook import client as client_module
 from email_archiver.outlook import process
 from email_archiver.outlook.client import OutlookClient
-from email_archiver.outlook.mapi import OL_FOLDER_DRAFTS, OL_FOLDER_INBOX, OL_FOLDER_OUTBOX
+from email_archiver.outlook.mapi import (
+    OL_FOLDER_DRAFTS,
+    OL_FOLDER_INBOX,
+    OL_FOLDER_OUTBOX,
+)
 
 
 class _Folder:

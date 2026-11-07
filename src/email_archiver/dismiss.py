@@ -27,7 +27,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from email_archiver.batch_common import ERROR_CATEGORY_FAILED, ERROR_NOT_IN_INBOX, envelope
+from email_archiver.batch_common import (
+    ERROR_CATEGORY_FAILED,
+    ERROR_NOT_IN_INBOX,
+    envelope,
+)
 from email_archiver.batch_move import move_failure_error, move_out_of_inbox
 from email_archiver.config import (
     Mailbox,

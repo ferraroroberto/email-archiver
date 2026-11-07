@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from email_archiver.cli import batch as main_batch
 from email_archiver import draft, send
+from email_archiver.cli import batch as main_batch
 from email_archiver.outlook import mapi, process
 from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.drafts import DraftUpdateError

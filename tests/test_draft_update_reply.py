@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from email_archiver.cli import batch as main_batch
 from email_archiver import draft
+from email_archiver.cli import batch as main_batch
 from email_archiver.outlook import mapi, process
 from email_archiver.outlook.client import OutlookClient
 from email_archiver.outlook.drafts import (
@@ -30,15 +30,14 @@ from email_archiver.outlook.mapi import (
     replace_marked_body_html,
 )
 from tests.draft_support import (
-    FakeDraftClient,
     SELF,
+    FakeDraftClient,
     _FakeApplication,
     _FakeComMail,
     _FakePropertyAccessor,
     _spec,
+    batch_process,  # noqa: F401 - fixtures are used by name
 )
-from tests.draft_support import batch_process  # noqa: F401 - fixtures are used by name
-
 
 # ------------------------------------------------------------ update (#80) ---
 

@@ -20,7 +20,10 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
-from email_archiver.archiver.archiver import EmailArchiver, resolve_date_prefix_for_folder
+from email_archiver.archiver.archiver import (
+    EmailArchiver,
+    resolve_date_prefix_for_folder,
+)
 from email_archiver.config import get_archive_roots, get_date_prefix_enabled
 from email_archiver.engine.suggester import RankedSuggestion, SuggestionEngine
 from email_archiver.explorer import (
