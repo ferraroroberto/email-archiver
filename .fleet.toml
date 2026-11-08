@@ -10,7 +10,7 @@ tag         = ["→", "OneDrive"]
 # The root layout the structure ratchet checks (project-scaffolding docs/repo-layout.md).
 # The package lives in src/email_archiver, the shape's home for domain code.
 shape       = "pipeline-cli"
-extra_roots = ["logs"]  # the log file's folder: a tracked .gitkeep gives the file handler a place to open
+extra_roots = []
 
 # Byte-for-byte copies from project-scaffolding; never edited here. /propagate-vendored re-vendors.
 [vendored]
