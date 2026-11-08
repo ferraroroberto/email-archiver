@@ -1,5 +1,5 @@
 """
-Ask Outlook to run Send/Receive and report how it went (issue #132).
+Ask Outlook to run Send/Receive and report how it went.
 
 This is what ``main_batch.py sync`` runs. A mail that is already on the server
 stays invisible to ``find``, ``plan`` and ``apply`` until Outlook syncs on its

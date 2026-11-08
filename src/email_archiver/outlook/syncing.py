@@ -1,5 +1,5 @@
 """
-The one place this app starts an Outlook Send/Receive over COM (issue #132).
+The one place this app starts an Outlook Send/Receive over COM.
 
 Kept out of ``client.py`` on purpose, like ``sending.py`` for ``Send``: only the
 ``sync`` verb may start a sync, and a test pins that nothing else references
@@ -9,7 +9,7 @@ Kept out of ``client.py`` on purpose, like ``sending.py`` for ``Send``: only the
 Nothing here reads, moves, saves or sends a mail, and nothing ends or restarts
 Outlook.
 
-How the end is observed (a hypothesis until the live probe of issue #132
+How the end is observed (a hypothesis until a live probe
 confirms it): each ``Namespace.SyncObjects`` group raises ``SyncEnd`` when its
 sync finishes; the handle watches those events while pumping COM messages on
 the thread that owns the apartment. Folder item counts are deliberately not a
