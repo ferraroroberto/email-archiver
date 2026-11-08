@@ -10,10 +10,9 @@ archiver/
 │   └── mailboxes.json          ← Your mailbox registry (git-ignored, optional)
 │
 ├── data/
-│   └── emails.db                ← SQLite database (auto-created on first scan)
-│
-├── logs/
-│   └── archiver.log             ← Log file (plain FileHandler, not rotated)
+│   ├── emails.db                ← SQLite database (auto-created on first scan)
+│   └── logs/
+│       └── archiver.log         ← Log file (plain FileHandler, not rotated)
 │
 ├── src/
 │   └── email_archiver/          ← Main package

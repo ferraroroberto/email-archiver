@@ -10,8 +10,7 @@ Where new code goes. The shape is `pipeline-cli` (see `shape` in `.fleet.toml`);
 | `tests/` | The pytest suite. It never sends mail or touches a mailbox. |
 | `scripts/` | The pre-ship gate and the vendored ratchets with their gate wrappers. |
 | `config/` | The config and mailbox-registry templates; the live copies are git-ignored. |
-| `data/` | The SQLite index, created on first scan; only a `.gitkeep` is tracked. |
-| `logs/` | The log file's folder. Declared in `extra_roots` — see below. |
+| `data/` | The SQLite index, created on first scan, and the log file under `data/logs/`; only a `.gitkeep` is tracked. |
 | `docs/` | Durable reference, indexed in the README. |
 
 The root also holds the four `main_*.py` scripts, the `email_archiver.py` shim and the `.bat` launchers. Those are files, not folders, so the layout check does not see them.
@@ -37,7 +36,7 @@ The root `email_archiver.py` is a compatibility shim for callers that only have 
 
 ## Declared exceptions
 
-- `logs/` — the log file handler opens its file there, so the folder has to exist on a fresh clone. A tracked `.gitkeep` guarantees that, which makes it a tracked root folder; it is declared in `extra_roots` for that reason.
+None: `extra_roots` is empty.
 
 ## Baselined offenders
 

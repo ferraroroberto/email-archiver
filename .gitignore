@@ -9,7 +9,9 @@ data/*.db-shm
 data/*.db-wal
 # Manual database backups (e.g. emails.db.bak-20260909-0513)
 data/*.bak*
-logs/*.log
+data/logs/
+# Machine-local configs written before the log folder moved still point at logs/
+logs/
 __pycache__/
 *.pyc
 *.pyo

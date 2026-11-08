@@ -1,7 +1,7 @@
 {
   "version": 1,
   "band": {"files": 1, "functions": 5},
-  "root_extras": ["logs"],
+  "root_extras": [],
   "shape_contract": {
     "root_files": ["email_archiver.py", "main_archive.py", "main_batch.py", "main_scan.py", "main_ui.py", "run-scan-nightly.bat"],
     "redundant": [],

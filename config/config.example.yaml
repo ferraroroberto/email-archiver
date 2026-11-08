@@ -69,4 +69,4 @@ ui:
 
 logging:
   level: "INFO"
-  file: "logs/archiver.log"
+  file: "data/logs/archiver.log"
