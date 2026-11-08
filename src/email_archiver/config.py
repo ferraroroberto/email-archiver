@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from email_archiver.runtime_files import file_handler, make_dirs
+
 logger = logging.getLogger(__name__)
 
 # Project root = the repo checkout: this file is src/email_archiver/config.py
@@ -391,10 +393,8 @@ def _resolve_paths(cfg: dict[str, Any]) -> None:
         cfg["logging"]["file"] = str(PROJECT_ROOT / log_path)
 
     # Ensure directories exist
-    # runtime-write-exempt: the database folder is whatever config.json names, so it cannot be resolved statically
-    Path(cfg["database"]["path"]).parent.mkdir(parents=True, exist_ok=True)
-    # runtime-write-exempt: the log folder is whatever config.json names, so it cannot be resolved statically
-    Path(cfg["logging"]["file"]).parent.mkdir(parents=True, exist_ok=True)
+    make_dirs(Path(cfg["database"]["path"]).parent)
+    make_dirs(Path(cfg["logging"]["file"]).parent)
 
 
 def setup_logging(cfg: dict[str, Any] | None = None) -> None:
@@ -422,8 +422,7 @@ def setup_logging(cfg: dict[str, Any] | None = None) -> None:
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
-        # runtime-write-exempt: the log file is whatever config.json names, so it cannot be resolved statically
-        handlers.append(logging.FileHandler(log_cfg["file"], encoding="utf-8"))
+        handlers.append(file_handler(log_cfg["file"]))
     except OSError as exc:
         logging.warning("Cannot open log file %s: %s", log_cfg["file"], exc)
 
