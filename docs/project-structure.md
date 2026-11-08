@@ -19,6 +19,7 @@ archiver/
 │       ├── config.py            ← YAML loader, path resolution, logging setup, mailbox registry
 │       ├── text.py              ← Shared subject + Message-ID normalisation
 │       ├── paths.py             ← Archive-root guard shared by revert and renumber
+│       ├── runtime_files.py     ← Guarded writers for config- and caller-named paths (index, log, archive folders)
 │       ├── batch.py             ← Headless plan/apply/revert/renumber orchestration (no COM, no tkinter)
 │       ├── batch_common.py      ← What every batch-family document shares: schema version, document header, envelope, error shape, folder renumbering
 │       ├── mail_filter.py       ← The per-mail search/since rule `plan` and `find` share

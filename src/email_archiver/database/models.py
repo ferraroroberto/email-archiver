@@ -17,6 +17,8 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from email_archiver.runtime_files import IN_MEMORY, connect_sqlite, make_dirs
+
 logger = logging.getLogger(__name__)
 
 
@@ -150,10 +152,7 @@ def get_connection(
     Returns a connection with row_factory=sqlite3.Row so columns are
     accessible by name. ``timeout`` is the busy wait in seconds.
     """
-    # runtime-write-exempt: the caller passes the database path from config.json, so it cannot be resolved statically
-    conn = sqlite3.connect(
-        str(db_path), timeout=timeout, check_same_thread=False
-    )
+    conn = connect_sqlite(db_path, timeout=timeout, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     # Increase cache to speed up FTS5 queries on large datasets
     conn.execute("PRAGMA cache_size = -32768")  # 32 MB page cache
@@ -163,8 +162,8 @@ def get_connection(
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     """Create all tables/indexes/triggers if they don't exist yet, then bring an
     older `emails` table up to the current column set."""
-    # runtime-write-exempt: the caller passes the database path from config.json, so it cannot be resolved statically
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    if str(db_path) != IN_MEMORY:
+        make_dirs(Path(db_path).parent)
     conn = get_connection(db_path)
     conn.executescript(_DDL)
     added = _add_missing_columns(conn)

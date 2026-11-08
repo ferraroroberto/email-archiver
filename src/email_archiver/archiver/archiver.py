@@ -54,6 +54,7 @@ from email_archiver.config import (
     get_max_path_length,
 )
 from email_archiver.outlook.client import sent_datetime
+from email_archiver.runtime_files import make_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -400,8 +401,7 @@ class EmailArchiver:
         dest = Path(folder_path)
         if not dest.exists():
             logger.info("Creating destination folder: %s", dest)
-            # runtime-write-exempt: the destination is the caller's mail folder under the user's archive root, never a path in this checkout
-            dest.mkdir(parents=True, exist_ok=True)
+            make_dirs(dest)
 
         # One listing pass covers both the next sequence number and (when the
         # config mode is "auto") the per-folder date-prefix inference.

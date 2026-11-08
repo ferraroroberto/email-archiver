@@ -26,6 +26,9 @@ flowchart TB
   TEXT["src/email_archiver/text.py\nclean_subject — shared Re:/Fwd: stripping ·\nnormalize_message_id — one spelling of the\nMessage-ID for the scanner and the Outlook client"]
   PATHS["src/email_archiver/paths.py\nis_within · resolve_under_roots · archive_roots —\nthe one archive.root_paths guard, shared by\nrevert's deletes and renumber's renames"]
 
+  RUNTIMEFILES["src/email_archiver/runtime_files.py\nmake_dirs · file_handler · connect_sqlite —\nconfig- and caller-named writes, refused at\nruntime under src, app, scripts, hooks, skills"]
+  CONFIG --> RUNTIMEFILES
+
   MAINSCAN --> CONFIG
   MAINARCHIVE --> CONFIG
   MAINUI --> CONFIG
