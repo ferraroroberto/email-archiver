@@ -118,6 +118,8 @@ The project ships a pytest suite (`tests/`) covering the filename fitter, sequen
 
 That runs `pytest tests/` and then the static ratchet: a duplicate block (jscpd via `npx`, so Node is needed) or an unused import/variable (ruff) that is not in `.static-ratchet-baseline.json` fails the gate. Existing debt is baselined, not fixed, so the count can only go down; a detector that cannot run fails as NOT CONFIRMED rather than passing. The same gate then runs the docs, structure, instruction, doc-refs, dead-code, conventions and comment ratchets, each with its own baseline file at the repo root; the comment ratchet fails a `#NNN` issue reference added to a code comment.
 
+The last stdout line of a gate run is `GATE-RESULT: PASS` or `GATE-RESULT: FAIL`, also after a failed stage or an early terminating error; exit codes stay 0 and 1. Do not pipe the gate when its exit code matters (`... | tail` reports `tail`'s status); a caller that must pipe asserts on that line, and a run without it is not a pass.
+
 `pytest` and `ruff` are dev-only dependencies — see `requirements.txt`.
 
 ---
