@@ -27,17 +27,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from email_archiver.batch_common import (
-    ERROR_CATEGORY_FAILED,
-    ERROR_NOT_IN_INBOX,
-    envelope,
-)
-from email_archiver.batch_move import move_failure_error, move_out_of_inbox
+from email_archiver.batch_common import ERROR_NOT_IN_INBOX, envelope
+from email_archiver.batch_move import move_and_tag
 from email_archiver.config import (
     Mailbox,
     get_mailbox_archive_folder,
     get_outlook_dismiss_category,
 )
+from email_archiver.filing_state import FilingFacts, Lookup, settle
 from email_archiver.text import normalize_message_id
 
 logger = logging.getLogger(__name__)
@@ -76,41 +73,25 @@ def _dismiss_one(
             "code": ERROR_LOOKUP_FAILED,
             "message": f"the Inbox lookup failed: {type(exc).__name__}: {exc}",
         }
+        settle(result, FilingFacts(lookup=Lookup.RAISED))
         return result
     if item is None:
         result["error"] = {
             "code": ERROR_NOT_IN_INBOX,
             "message": "no mail with this Message-ID is in the Inbox",
         }
+        settle(result, FilingFacts(lookup=Lookup.MISSING))
         return result
 
-    try:
-        # The move takes over the only reference: nothing in this frame may
-        # keep the mail alive while Outlook is asked to let go of it.
-        held, item = [item], None
-        moved, via = move_out_of_inbox(client, held, archive_folder, message_id)
-        result["moved"] = True
-        result["move_via"] = via
-        result["entry_id"] = client.entry_id(moved)
-    except Exception as exc:
-        logger.exception("Moving %s to %r failed", message_id, archive_folder)
-        result["error"] = move_failure_error(client, exc, message_id)
-        return result
-
-    # Tagged in its own step: a tag that would not stick leaves the mail moved,
-    # which the caller recovers from differently than a move that did not happen.
-    try:
-        client.set_category(moved, category)
-        result["categorized"] = True
-    except Exception as exc:
-        logger.exception("Tagging %s with %r failed", message_id, category)
-        result["error"] = {
-            "code": ERROR_CATEGORY_FAILED,
-            "message": f"the mail was moved, but not tagged: {type(exc).__name__}: {exc}",
-        }
-        return result
-
-    result["ok"] = True
+    # The move takes over the only reference: nothing in this frame may keep
+    # the mail alive while Outlook is asked to let go of it.
+    held, item = [item], None
+    moved, categorized = move_and_tag(
+        client, held, result,
+        archive_folder=archive_folder, category=category, message_id=message_id,
+        keep_in_sent=False, tag_note="moved",
+    )
+    settle(result, FilingFacts(lookup=Lookup.FOUND, moved=moved, categorized=categorized))
     return result
 
 

@@ -139,6 +139,7 @@ Durable reference lives in `docs/`; each line below is the entry point for one t
 | `main_batch.py` verbs, filing specific mail, Sent Items, identity, exit codes | [docs/batch-mode.md](docs/batch-mode.md) |
 | Retrying a mail that was written but never moved | [docs/batch-retry.md](docs/batch-retry.md) |
 | Renumbering a folder into sent-date order | [docs/renumber.md](docs/renumber.md) |
+| The per-mail filing state `apply` and `dismiss` end in | [docs/filing-state.md](docs/filing-state.md) |
 | `draft`, replies, `--update`, `read` and the guarded `send` | [docs/drafting-and-sending.md](docs/drafting-and-sending.md) |
 | What batch mode will and will not touch | [docs/batch-safety.md](docs/batch-safety.md) |
 | `outlook:` config keys, the mailbox registry, `--mailbox` | [docs/mailboxes.md](docs/mailboxes.md) |

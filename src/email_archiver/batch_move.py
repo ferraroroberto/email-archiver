@@ -26,6 +26,7 @@ import logging
 import time
 from typing import Any
 
+from email_archiver.batch_common import ERROR_CATEGORY_FAILED
 from email_archiver.outlook.mapi import is_message_changed_error
 
 logger = logging.getLogger(__name__)
@@ -366,3 +367,58 @@ def move_out_of_inbox(
     return _retry_with_view_away(
         client, refusal, via, entry_id, store_id, archive_folder, message_id,
     )
+
+
+def move_and_tag(
+    client: Any,
+    held: list[Any],
+    result: dict[str, Any],
+    *,
+    archive_folder: str,
+    category: str,
+    message_id: str,
+    keep_in_sent: bool,
+    tag_note: str,
+) -> tuple[bool, bool]:
+    """The move and tag steps ``apply`` and ``dismiss`` share; return ``(moved, categorized)``.
+
+    ``held`` is the one-item list carrying the caller's only reference to the
+    mail (emptied here, so the caller's frame keeps none while Outlook is asked
+    to let go of it). ``keep_in_sent`` files a Sent Items mail where it is.
+    ``result`` receives ``move_via``, ``entry_id`` and, on a failure, ``error``.
+
+    Reading the new EntryID is its own step: a move that landed stays moved
+    when that read raises, ``entry_id`` stays empty and the tag step still
+    runs. ``tag_note`` completes "the mail was ..., but not tagged".
+    """
+    try:
+        if keep_in_sent:
+            filed, via = held.pop(), MOVE_VIA_KEPT_IN_SENT
+            logger.info("Archived %s from Sent Items; leaving it there.", message_id)
+        else:
+            filed, via = move_out_of_inbox(client, held, archive_folder, message_id)
+    except Exception as exc:
+        logger.exception("Moving %s to %r failed", message_id, archive_folder)
+        result["error"] = move_failure_error(client, exc, message_id)
+        return False, False
+    moved = not keep_in_sent
+    result["move_via"] = via
+
+    try:
+        result["entry_id"] = client.entry_id(filed)
+    except Exception:  # the mail is already where it belongs; only its id is unread
+        logger.exception("Reading the EntryID of %s after its move failed", message_id)
+
+    # Tagged in its own step: a category that would not stick is a different
+    # state from a move that did not happen, and the caller recovers from the
+    # two differently.
+    try:
+        client.set_category(filed, category)
+    except Exception as exc:
+        logger.exception("Tagging %s with %r failed", message_id, category)
+        result["error"] = {
+            "code": ERROR_CATEGORY_FAILED,
+            "message": f"the mail was {tag_note}, but not tagged: {type(exc).__name__}: {exc}",
+        }
+        return moved, False
+    return moved, True

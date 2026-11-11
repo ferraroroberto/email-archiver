@@ -148,3 +148,13 @@ enabled  = true
 baseline = ".comment-ratchet-baseline.json"
 docstrings = true
 history_phrases = true
+
+# [[state_machines]] -- the per-mail filing state of apply and dismiss, declared once.
+# src/email_archiver/filing_state.py owns the FilingState enum and the one derive function;
+# the conventions ratchet's state rules stop reporting that module and keep reporting any
+# other module that re-derives a mail's mode. Why and the state table: docs/filing-state.md.
+[[state_machines]]
+name   = "filing-state"
+module = "src/email_archiver/filing_state.py"
+type   = "FilingState"
+derive = "derive_filing_state"
