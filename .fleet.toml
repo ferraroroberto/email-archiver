@@ -111,13 +111,14 @@ baseline = ".dead-code-ratchet-baseline.json"
 # through scripts/conventions_ratchet_gate.py: a rule count above its entry in
 # .conventions-ratchet-baseline.json fails. Exit 3 (a file could not be parsed) fails as NOT
 # CONFIRMED. Rules: no-window (a Windows app), logging-not-print (the default src/ scope,
-# which holds the package; cli/ entry points print by design), no-drive-path (any repo).
+# which holds the package; cli/ entry points print by design), no-drive-path (any repo),
+# subprocess-timeout (a blocking subprocess call must pass timeout= or carry a reasoned exempt marker).
 # secret-compare and git-wrapper are off: the repo has neither helper. Procedure + limits:
 # project-scaffolding docs/conventions-ratchet.md.
 [conventions_ratchet]
 enabled  = true
 baseline = ".conventions-ratchet-baseline.json"
-rules    = ["no-window", "logging-not-print", "no-drive-path", "state-literal", "state-set-repeat", "state-write"]
+rules    = ["no-window", "logging-not-print", "no-drive-path", "subprocess-timeout", "state-literal", "state-set-repeat", "state-write"]
 
 # A raw connect skips the busy timeout, the row factory and the page-cache pragma.
 [[conventions_ratchet.must_use]]
