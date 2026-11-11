@@ -31,6 +31,8 @@ Design decisions:
   file reported back, nothing new on disk.
 - **The reference that is moved is not the one that was archived.** The move,
   its retries and the ``message_changed`` error are ``email_archiver.batch_move``.
+- **Where a mail's run ended is one state.** ``ok``, ``moved`` and
+  ``categorized`` are set from ``email_archiver.filing_state``, nowhere else.
 - **Nothing is written outside the archive roots.** ``revert`` refuses per
   file, and ``apply`` refuses per decision, any path that does not resolve
   inside ``archive.root_paths`` — so a malformed, hostile or LLM-invented
@@ -63,7 +65,9 @@ from email_archiver.archiver.archiver import (
     resolve_date_prefix_for_folder,
 )
 from email_archiver.batch_common import (
-    ERROR_CATEGORY_FAILED,
+    ERROR_CATEGORY_FAILED as ERROR_CATEGORY_FAILED,
+)
+from email_archiver.batch_common import (
     ERROR_NOT_IN_INBOX,
     envelope,
     header,
@@ -75,12 +79,13 @@ from email_archiver.batch_move import (
 )
 from email_archiver.batch_move import (
     ERROR_MOVE_FAILED,
-    MOVE_VIA_KEPT_IN_SENT,
-    move_failure_error,
-    move_out_of_inbox,
+    move_and_tag,
 )
 from email_archiver.batch_move import (
     MOVE_VIA_FOLDER_SWITCH as MOVE_VIA_FOLDER_SWITCH,
+)
+from email_archiver.batch_move import (
+    MOVE_VIA_KEPT_IN_SENT as MOVE_VIA_KEPT_IN_SENT,
 )
 from email_archiver.batch_move import (
     MOVE_VIA_ORIGINAL as MOVE_VIA_ORIGINAL,
@@ -101,6 +106,7 @@ from email_archiver.config import (
 from email_archiver.database.models import init_db
 from email_archiver.database.repository import EmailRepository
 from email_archiver.engine.suggester import SuggestionEngine
+from email_archiver.filing_state import FilingFacts, Lookup, settle
 from email_archiver.mail_filter import mail_matches
 from email_archiver.outlook.client import EmailData
 from email_archiver.outlook.mapi import MailboxNotInOutlookError
@@ -634,6 +640,7 @@ def _apply_one(
 
     result["error"] = _decision_refusal(raw, message_id, folder_path, roots)
     if result["error"] is not None:
+        settle(result, FilingFacts(refused=True))
         return result
     from_sent = raw.get("source", SOURCE_INBOX) == SOURCE_SENT
 
@@ -649,6 +656,7 @@ def _apply_one(
             "code": not_found_code,
             "message": f"{where} lookup failed: {type(exc).__name__}: {exc}",
         }
+        settle(result, FilingFacts(lookup=Lookup.RAISED))
         return result
 
     if item is None:
@@ -656,45 +664,25 @@ def _apply_one(
             "code": not_found_code,
             "message": f"no mail with this Message-ID is in {where}",
         }
+        settle(result, FilingFacts(lookup=Lookup.MISSING))
         return result
 
     if not _archive_decision(client, cfg, repo, raw, item, result):
+        settle(result, FilingFacts(lookup=Lookup.FOUND, archive_failed=True))
         return result
 
-    try:
-        if from_sent:
-            # Filed from Sent Items: the files are written, the mail stays.
-            moved, via = item, MOVE_VIA_KEPT_IN_SENT
-            logger.info("Archived %s from Sent Items; leaving it there.", message_id)
-        else:
-            # The move takes over the only reference: nothing in this frame
-            # may keep the mail alive while Outlook is asked to let go of it.
-            held, item = [item], None
-            moved, via = move_out_of_inbox(client, held, archive_folder, message_id)
-            result["moved"] = True
-        result["move_via"] = via
-        result["entry_id"] = client.entry_id(moved)
-    except Exception as exc:
-        logger.exception("Moving %s to %r failed", message_id, archive_folder)
-        result["error"] = move_failure_error(client, exc, message_id)
-        return result
-
-    # Tagged in its own step: a category that would not stick is a different
-    # state from a move that did not happen, and the caller recovers from the
-    # two differently.
-    try:
-        client.set_category(moved, category)
-        result["categorized"] = True
-    except Exception as exc:
-        logger.exception("Tagging %s with %r failed", message_id, category)
-        result["error"] = {
-            "code": ERROR_CATEGORY_FAILED,
-            "message": f"the mail was filed{'' if from_sent else ' and moved'}, but not tagged: "
-                       f"{type(exc).__name__}: {exc}",
-        }
-        return result
-
-    result["ok"] = True
+    # The move takes over the only reference: nothing in this frame may keep
+    # the mail alive while Outlook is asked to let go of it.
+    held, item = [item], None
+    moved, categorized = move_and_tag(
+        client, held, result,
+        archive_folder=archive_folder, category=category, message_id=message_id,
+        keep_in_sent=from_sent, tag_note="filed" if from_sent else "filed and moved",
+    )
+    settle(result, FilingFacts(
+        lookup=Lookup.FOUND, moved=moved, kept_in_sent=from_sent,
+        categorized=categorized,
+    ))
     return result
 
 
