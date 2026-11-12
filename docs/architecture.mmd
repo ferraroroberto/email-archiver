@@ -54,7 +54,10 @@ flowchart TB
     SCANNER["scanner/scanner.py\nFolderScanner — incremental os.walk,\nmtime compare, batch commits,\nreads the Outlook follow-up flag;\nskips the purge when a root is missing"]
   end
   SCANWINDOW --> SCANNER
-  MAINSCAN -->|--no-ui| SCANNER
+  FEHANDOVER["folder_explorer.py\nowner: is database.path folder-explorer's own email index?\nyes: its email index --fresh (exit 0 / 1 / 4 busy);\nno: this repo's scan"]
+  MAINSCAN -->|--no-ui| FEHANDOVER
+  FEHANDOVER -->|database.path is not folder-explorer's index| SCANNER
+  FEHANDOVER -->|database.path is its index| FEEMAIL["folder-explorer (separate checkout)\npython -m app.cli email index --fresh"]
   NIGHTLY -->|main_scan.py --no-ui| MAINSCAN
   SCANNER --> TEXT
   SCANNER -->|os.walk + open .msg| ONEDRIVE["OneDrive-synced archive root(s)\n(.msg files on disk)"]
