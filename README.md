@@ -70,7 +70,7 @@ To speed up the first scan, right-click your archive root in Windows Explorer â†
 & .\.venv\Scripts\python.exe main_scan.py --no-ui
 ```
 
-**When folder-explorer owns the index.** If `database.path` points at folder-explorer's own email index (what its `python -m app.cli email config --json` reports as `db`), the headless scan does not scan here: it runs folder-explorer's `email index --fresh`, so that index keeps one writer. Folder-explorer is the checkout named by `FOLDER_EXPLORER_HOME`, else a sibling `folder-explorer` folder. Exit codes then: 0 indexed, 1 its run failed, 4 busy (another email run held its lock past ten minutes). In every other case the scan runs here as described above.
+**When folder-explorer owns the index.** If `database.path` points at folder-explorer's own email index (what its `python -m app.cli email config --json` reports as `db`), the headless scan does not scan here: it runs folder-explorer's `email index --fresh`, so that index keeps one writer. Folder-explorer is the checkout named by `FOLDER_EXPLORER_HOME`, else a sibling `folder-explorer` folder. The exit codes are in [docs/nightly-scan.md](docs/nightly-scan.md). In every other case the scan runs here as described above.
 
 ---
 

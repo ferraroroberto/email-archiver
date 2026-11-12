@@ -3,7 +3,8 @@ REM ============================================================================
 REM SCHEDULED-JOB LAUNCHER - Headless index scan (app-launcher chain hop)
 REM ============================================================================
 REM Runs main_scan.py --no-ui in the foreground and exits with its exit code:
-REM   0 ok, 1 crash, 2 config missing / no roots, 3 an archive root is missing.
+REM   0 ok, 1 crash (or folder-explorer's index run failed), 2 config missing / no roots,
+REM   3 an archive root is missing, 4 folder-explorer busy (its lock held past the wait).
 REM Stream Deck keeps launch_scan.bat (windowed, detached).
 
 setlocal
